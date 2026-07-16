@@ -207,7 +207,7 @@ testers (LAN/localhost only at this stage).
 
 ---
 
-## Milestone 7 — Responsive multiplayer movement (stage 2)
+## Milestone 7 — Responsive multiplayer movement (stage 2) ✅
 
 **Objective:** Local movement feels offline-crisp; remote players are
 smooth — under 150 ms simulated latency and 5% loss.

@@ -2,8 +2,10 @@
 
 #include <enet/enet.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <mutex>
+#include <random>
 #include <unordered_map>
 
 #include "engine/core/log.h"
@@ -34,6 +36,57 @@ struct NetHost::Impl {
     std::unordered_map<std::uint32_t, ENetPeer*> peers;
     std::uint32_t next_peer_id = 1;
     NetStats stats;
+
+    // Network condition simulation (see NetSimConfig).
+    NetSimConfig sim;
+    std::mt19937 rng{0xC0FFEEu};
+    struct DelayedSend {
+        std::chrono::steady_clock::time_point when;
+        std::uint32_t peer;
+        std::vector<std::uint8_t> data;
+        NetChannel channel;
+        bool reliable;
+    };
+    struct DelayedEvent {
+        std::chrono::steady_clock::time_point when;
+        NetEvent event;
+    };
+    std::vector<DelayedSend> delayed_out;
+    std::vector<DelayedEvent> delayed_in;
+
+    std::chrono::steady_clock::time_point delivery_time() {
+        auto when = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(sim.latency_ms);
+        if (sim.jitter_ms > 0) {
+            std::uniform_int_distribution<int> jitter(0, sim.jitter_ms);
+            when += std::chrono::milliseconds(jitter(rng));
+        }
+        return when;
+    }
+
+    bool should_drop(NetChannel channel, bool reliable) {
+        if (sim.loss_percent <= 0.0f || reliable || channel != NetChannel::Sequenced) {
+            return false;
+        }
+        std::uniform_real_distribution<float> roll(0.0f, 100.0f);
+        return roll(rng) < sim.loss_percent;
+    }
+
+    void raw_send(std::uint32_t peer_id, std::span<const std::uint8_t> data, NetChannel channel,
+                  bool reliable) {
+        const auto it = peers.find(peer_id);
+        if (it == peers.end()) {
+            return;
+        }
+        ENetPacket* packet = enet_packet_create(data.data(), data.size(),
+                                                reliable ? ENET_PACKET_FLAG_RELIABLE : 0u);
+        if (enet_peer_send(it->second, static_cast<enet_uint8>(channel), packet) != 0) {
+            enet_packet_destroy(packet);
+            return;
+        }
+        stats.bytes_sent += data.size();
+        ++stats.packets_sent;
+    }
 
     ~Impl() {
         if (host != nullptr) {
@@ -95,6 +148,17 @@ std::optional<std::uint32_t> NetHost::connect(const std::string& host, std::uint
 }
 
 void NetHost::poll(std::vector<NetEvent>& out) {
+    const auto now = std::chrono::steady_clock::now();
+
+    // Release delayed outgoing sends that are due.
+    std::erase_if(impl_->delayed_out, [&](Impl::DelayedSend& delayed) {
+        if (delayed.when <= now) {
+            impl_->raw_send(delayed.peer, delayed.data, delayed.channel, delayed.reliable);
+            return true;
+        }
+        return false;
+    });
+
     ENetEvent event;
     while (enet_host_service(impl_->host, &event, 0) > 0) {
         switch (event.type) {
@@ -126,29 +190,52 @@ void NetHost::poll(std::vector<NetEvent>& out) {
                 impl_->stats.bytes_received += event.packet->dataLength;
                 ++impl_->stats.packets_received;
                 enet_packet_destroy(event.packet);
-                out.push_back(std::move(message));
+                if (impl_->sim.enabled()) {
+                    if (!impl_->should_drop(message.channel, false)) {
+                        impl_->delayed_in.push_back({impl_->delivery_time(), std::move(message)});
+                    }
+                } else {
+                    out.push_back(std::move(message));
+                }
                 break;
             }
             case ENET_EVENT_TYPE_NONE:
                 break;
         }
     }
+
+    // Release delayed incoming messages that are due.
+    std::erase_if(impl_->delayed_in, [&](Impl::DelayedEvent& delayed) {
+        if (delayed.when <= now) {
+            out.push_back(std::move(delayed.event));
+            return true;
+        }
+        return false;
+    });
 }
 
 void NetHost::send(std::uint32_t peer, std::span<const std::uint8_t> data, NetChannel channel,
                    bool reliable) {
-    const auto it = impl_->peers.find(peer);
-    if (it == impl_->peers.end()) {
+    if (impl_->sim.enabled()) {
+        if (impl_->should_drop(channel, reliable)) {
+            return;
+        }
+        impl_->delayed_out.push_back({impl_->delivery_time(),
+                                      peer,
+                                      {data.begin(), data.end()},
+                                      channel,
+                                      reliable});
         return;
     }
-    ENetPacket* packet = enet_packet_create(data.data(), data.size(),
-                                            reliable ? ENET_PACKET_FLAG_RELIABLE : 0u);
-    if (enet_peer_send(it->second, static_cast<enet_uint8>(channel), packet) != 0) {
-        enet_packet_destroy(packet);
-        return;
-    }
-    impl_->stats.bytes_sent += data.size();
-    ++impl_->stats.packets_sent;
+    impl_->raw_send(peer, data, channel, reliable);
+}
+
+void NetHost::set_simulation(const NetSimConfig& config) {
+    impl_->sim = config;
+}
+
+const NetSimConfig& NetHost::simulation() const {
+    return impl_->sim;
 }
 
 void NetHost::broadcast(std::span<const std::uint8_t> data, NetChannel channel, bool reliable) {

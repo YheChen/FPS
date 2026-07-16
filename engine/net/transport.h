@@ -38,6 +38,20 @@ struct NetStats {
     std::uint64_t packets_received = 0;
 };
 
+// Artificial network conditions for testing (applied per direction, i.e.
+// latency_ms is ONE-WAY). Loss applies only to the unreliable Sequenced
+// channel - dropping "reliable" sends above ENet would break semantics that
+// real loss would not (ENet retransmits under the hood).
+struct NetSimConfig {
+    int latency_ms = 0;
+    int jitter_ms = 0;        // uniform extra [0, jitter_ms]
+    float loss_percent = 0.0f;
+
+    bool enabled() const {
+        return latency_ms > 0 || jitter_ms > 0 || loss_percent > 0.0f;
+    }
+};
+
 class NetHost {
 public:
     static std::optional<NetHost> create_server(std::uint16_t port, std::size_t max_peers);
@@ -68,6 +82,10 @@ public:
 
     std::size_t peer_count() const;
     const NetStats& stats() const;
+
+    // Enable/adjust simulated latency/jitter/loss (deterministic RNG).
+    void set_simulation(const NetSimConfig& config);
+    const NetSimConfig& simulation() const;
 
 private:
     NetHost();

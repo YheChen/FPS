@@ -40,6 +40,12 @@ public:
     bool on_ground() const;
     glm::vec3 ground_normal() const;
 
+    // Recomputes contacts/ground state from the current position. MUST be
+    // called after set_position when teleporting or replaying (prediction):
+    // it makes update() a pure function of (position, velocity) instead of
+    // depending on stale internal contact state.
+    void refresh_ground(PhysicsWorld& world);
+
     // Moves by the current velocity for dt seconds, resolving collisions.
     // `gravity` is passed to Jolt for slope/stair handling; velocity
     // integration (including gravity) is the caller's responsibility.

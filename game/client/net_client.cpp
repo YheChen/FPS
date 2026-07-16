@@ -127,6 +127,14 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
                 player.pitch = sp.pitch;
                 player.on_ground = (sp.flags & 1u) != 0;
                 player.seen_in_snapshot = true;
+                if (sp.player_id == my_id_) {
+                    pending_self_ack_ = SelfAck{sp.position, sp.velocity, player.on_ground,
+                                                snapshot->last_processed_input,
+                                                snapshot->server_tick};
+                } else {
+                    player.history.push(RemoteSample{snapshot->server_tick, sp.position, sp.yaw,
+                                                     sp.pitch, sp.flags});
+                }
             }
             break;
         }
@@ -134,6 +142,12 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
         case MessageType::Input:
             break;  // client-to-server only; a server sending these is broken
     }
+}
+
+std::optional<SelfAck> NetClient::take_self_ack() {
+    auto ack = pending_self_ack_;
+    pending_self_ack_.reset();
+    return ack;
 }
 
 void NetClient::send_input(const std::deque<InputCommand>& recent_newest_first,

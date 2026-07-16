@@ -4,8 +4,12 @@ add_library(game_shared STATIC
     shared/health.h
     shared/hitscan.h
     shared/input_command.h
+    shared/interpolation.cpp
+    shared/interpolation.h
     shared/player_movement.cpp
     shared/player_movement.h
+    shared/prediction.cpp
+    shared/prediction.h
     shared/protocol.cpp
     shared/protocol.h
     shared/weapon.cpp

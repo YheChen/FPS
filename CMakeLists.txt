@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.25)
 project(fps
     VERSION 0.1.0
     DESCRIPTION "A small custom C++ game engine and an online FPS built on it"
-    LANGUAGES CXX)
+    LANGUAGES C CXX)  # C is needed for vendored C libraries (glad, later ENet)
 
 # Detect whether we are the top-level project (affects defaults only).
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
@@ -31,6 +31,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerWarnings)
 include(Sanitizers)
 
+add_subdirectory(third_party)
 add_subdirectory(engine)
 add_subdirectory(game)
 

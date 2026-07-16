@@ -33,16 +33,19 @@ the bar).
 
 ---
 
-## Milestone 1 — Platform layer
+## Milestone 1 — Platform layer ✅
 
 **Objective:** A window with a live OpenGL 4.1 core context, real main loop,
 input, and high-resolution timing.
 
-**Deliverables:** SDL3 + glad dependencies; `eng::platform::Window` (RAII:
-window + GL context); `eng::platform::Input` (keyboard state, mouse deltas,
-relative-mouse capture toggle); `eng::core::Clock` and fixed-timestep
-accumulator; `eng::core::Application` skeleton owning window/input/loop;
-clean Escape-to-quit shutdown.
+**Deliverables:** SDL3 + glad dependencies; `eng::Window` (RAII: window + GL
+context + event pump); `eng::InputState` (platform-free key/mouse state
+machine, unit-tested); `eng::Clock` and `eng::FixedTimestep` accumulator;
+Escape toggles mouse capture. *Deviation from the original plan:* no
+`Application` class — the client composes Window/Input/Clock directly; a
+wrapper would be speculative API at this point. The engine is split into
+`engine` (headless-safe) and `engine_platform` (SDL/GL) targets so the
+dedicated server never links SDL.
 
 **Files:** `engine/platform/{window,input}.{h,cpp}`,
 `engine/core/{application,time}.{h,cpp}`, updated `game/client/main.cpp`,

@@ -9,7 +9,9 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(Catch2)
 
 add_executable(engine_tests
+    core/input_tests.cpp
     core/log_tests.cpp
+    core/time_tests.cpp
     core/version_tests.cpp
 )
 target_link_libraries(engine_tests PRIVATE fps::engine Catch2::Catch2WithMain)

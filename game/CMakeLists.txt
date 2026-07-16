@@ -1,10 +1,11 @@
 add_executable(fps_client
     client/main.cpp
 )
-target_link_libraries(fps_client PRIVATE fps::engine)
+target_link_libraries(fps_client PRIVATE fps::engine_platform)
 fps_set_warnings(fps_client)
 fps_enable_sanitizers(fps_client)
 
+# The dedicated server stays headless: engine core only, no SDL/GL.
 add_executable(fps_server
     server/main.cpp
 )

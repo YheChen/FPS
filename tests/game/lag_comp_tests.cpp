@@ -37,8 +37,7 @@ TEST_CASE("rewind tick claims are clamped to the legal window", "[lagcomp]") {
 
     // Honest claims inside the window pass through.
     CHECK(game::clamp_rewind_tick(995, now) == 995);
-    CHECK(game::clamp_rewind_tick(now - game::kMaxRewindTicks, now) ==
-          now - game::kMaxRewindTicks);
+    CHECK(game::clamp_rewind_tick(now - game::kMaxRewindTicks, now) == now - game::kMaxRewindTicks);
 
     // Hostile claims: ancient past clamps to the window edge; the future
     // and "no estimate" resolve to now.

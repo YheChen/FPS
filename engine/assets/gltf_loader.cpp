@@ -56,8 +56,7 @@ std::optional<MeshData> read_primitive(const cgltf_primitive& primitive,
     if (normals != nullptr && normals->count == vertex_count &&
         cgltf_accessor_unpack_floats(normals, scratch.data(), vertex_count * 3) != 0) {
         for (cgltf_size v = 0; v < vertex_count; ++v) {
-            mesh.vertices[v].normal = {scratch[v * 3 + 0], scratch[v * 3 + 1],
-                                       scratch[v * 3 + 2]};
+            mesh.vertices[v].normal = {scratch[v * 3 + 0], scratch[v * 3 + 1], scratch[v * 3 + 2]};
         }
     }
 
@@ -75,8 +74,7 @@ std::optional<MeshData> read_primitive(const cgltf_primitive& primitive,
         const cgltf_size index = cgltf_accessor_read_index(primitive.indices, i);
         if (index >= vertex_count) {
             log::error("glTF '{}': index {} out of range ({} vertices)", path.string(),
-                       static_cast<std::uint64_t>(index),
-                       static_cast<std::uint64_t>(vertex_count));
+                       static_cast<std::uint64_t>(index), static_cast<std::uint64_t>(vertex_count));
             return std::nullopt;
         }
         mesh.indices[i] = static_cast<std::uint32_t>(index);

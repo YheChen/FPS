@@ -26,14 +26,14 @@ constexpr std::string_view assert_message(std::string_view message) {
 }  // namespace eng::detail
 
 #if defined(ENG_ENABLE_ASSERTS)
-    #define ENG_ASSERT(condition, ...)                                                      \
-        do {                                                                                 \
-            if (!(condition)) {                                                              \
-                ::eng::log::error("Assertion failed: {} ({}:{}) {}", #condition, __FILE__,   \
-                                  __LINE__, ::eng::detail::assert_message(__VA_ARGS__));     \
-                std::abort();                                                                \
-            }                                                                                \
-        } while (false)
+#define ENG_ASSERT(condition, ...)                                                               \
+    do {                                                                                         \
+        if (!(condition)) {                                                                      \
+            ::eng::log::error("Assertion failed: {} ({}:{}) {}", #condition, __FILE__, __LINE__, \
+                              ::eng::detail::assert_message(__VA_ARGS__));                       \
+            std::abort();                                                                        \
+        }                                                                                        \
+    } while (false)
 #else
-    #define ENG_ASSERT(condition, ...) ((void)sizeof(!(condition)))
+#define ENG_ASSERT(condition, ...) ((void)sizeof(!(condition)))
 #endif

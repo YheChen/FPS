@@ -27,8 +27,8 @@ std::optional<WeaponConfig> parse_weapon_config(std::string_view text);
 
 struct WeaponState {
     int ammo = 0;
-    float cooldown_seconds = 0.0f;         // until next shot allowed
-    float reload_remaining_seconds = 0.0f; // > 0 while reloading
+    float cooldown_seconds = 0.0f;          // until next shot allowed
+    float reload_remaining_seconds = 0.0f;  // > 0 while reloading
 
     bool reloading() const { return reload_remaining_seconds > 0.0f; }
 };

@@ -9,8 +9,8 @@ namespace game {
 // Milestone 4 onward (kept for spectating/debugging).
 struct FlyCamera {
     eng::Camera camera;
-    float move_speed = 8.0f;         // m/s
-    float look_sensitivity = 0.002f; // radians per pixel
+    float move_speed = 8.0f;          // m/s
+    float look_sensitivity = 0.002f;  // radians per pixel
 
     void update(const eng::InputState& input, float dt, bool mouse_captured) {
         if (mouse_captured) {

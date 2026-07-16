@@ -9,8 +9,8 @@ namespace eng {
 class PhysicsWorld;
 
 struct CharacterConfig {
-    float radius = 0.4f;            // capsule radius, meters
-    float height = 1.8f;            // total standing height, meters
+    float radius = 0.4f;  // capsule radius, meters
+    float height = 1.8f;  // total standing height, meters
     float max_slope_degrees = 50.0f;
 };
 

@@ -57,8 +57,8 @@ public:
 
     // Sends the newest command plus up to 2 previous ones (loss redundancy).
     // `view_tick` is the interpolation render tick (for server-side rewind).
-    void send_input(const std::deque<InputCommand>& recent_newest_first,
-                    std::uint32_t client_tick, std::uint32_t view_tick);
+    void send_input(const std::deque<InputCommand>& recent_newest_first, std::uint32_t client_tick,
+                    std::uint32_t view_tick);
 
     State state() const { return state_; }
     const char* state_name() const;

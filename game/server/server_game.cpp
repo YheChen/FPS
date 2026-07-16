@@ -145,8 +145,8 @@ void ServerGame::handle_hello(std::uint32_t peer, eng::ByteReader& reader, eng::
     // Tell them about everyone already here, and everyone about them.
     for (std::uint8_t i = 0; i < kMaxPlayers; ++i) {
         if (players_[i] && i != *slot) {
-            net.send(peer, encode(PlayerJoined{i, players_[i]->name}),
-                     eng::NetChannel::Reliable, true);
+            net.send(peer, encode(PlayerJoined{i, players_[i]->name}), eng::NetChannel::Reliable,
+                     true);
         }
     }
     const auto joined = encode(PlayerJoined{*slot, hello->name});
@@ -232,8 +232,7 @@ void ServerGame::tick(eng::NetHost& net) {
             player.pending.erase(next);
             player.last_processed_input = command.sequence;
             player.starved_ticks = 0;
-        } else if (!player.pending.empty() &&
-                   ++player.starved_ticks >= kStarvationJumpTicks) {
+        } else if (!player.pending.empty() && ++player.starved_ticks >= kStarvationJumpTicks) {
             const auto first = player.pending.begin();
             command = first->second;
             player.last_processed_input = first->first;
@@ -342,16 +341,15 @@ void ServerGame::send_weapon_status(const Player& player, eng::NetHost& net) {
 MatchStateMsg ServerGame::match_state() const {
     MatchStateMsg m;
     m.phase = phase_;
-    m.seconds_remaining = static_cast<std::uint16_t>(std::max(
-        0.0f, phase_ == MatchPhase::Playing ? match_remaining_ : restart_remaining_));
+    m.seconds_remaining = static_cast<std::uint16_t>(
+        std::max(0.0f, phase_ == MatchPhase::Playing ? match_remaining_ : restart_remaining_));
     return m;
 }
 
 void ServerGame::fire_hitscan(std::uint8_t shooter_id, const InputCommand& command,
                               eng::NetHost& net) {
     Player& shooter = *players_[shooter_id];
-    const glm::vec3 eye =
-        shooter.state.position + glm::vec3{0.0f, kMove.eye_height, 0.0f};
+    const glm::vec3 eye = shooter.state.position + glm::vec3{0.0f, kMove.eye_height, 0.0f};
     const glm::vec3 dir = view_direction(command.yaw, command.pitch);
 
     // World geometry bounds the shot.
@@ -411,10 +409,9 @@ void ServerGame::kill_player(std::uint8_t victim_id, std::uint8_t killer_id, eng
     ++victim.deaths;
     if (killer_id != kNoPlayer && players_[killer_id]) {
         ++players_[killer_id]->kills;
-        broadcast_reliable(
-            encode(ScoreUpdateMsg{killer_id, players_[killer_id]->kills,
-                                  players_[killer_id]->deaths}),
-            net);
+        broadcast_reliable(encode(ScoreUpdateMsg{killer_id, players_[killer_id]->kills,
+                                                 players_[killer_id]->deaths}),
+                           net);
     }
     broadcast_reliable(encode(PlayerDiedMsg{victim_id, killer_id}), net);
     broadcast_reliable(encode(ScoreUpdateMsg{victim_id, victim.kills, victim.deaths}), net);

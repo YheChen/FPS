@@ -37,8 +37,8 @@ public:
     };
 
     // Applies an authoritative state acked at `last_processed_seq`.
-    ReconcileResult reconcile(const glm::vec3& position, const glm::vec3& velocity,
-                              bool on_ground, std::uint32_t last_processed_seq);
+    ReconcileResult reconcile(const glm::vec3& position, const glm::vec3& velocity, bool on_ground,
+                              std::uint32_t last_processed_seq);
 
     // Commands the server has not acknowledged yet (oldest first).
     const std::deque<InputCommand>& pending() const { return pending_; }

@@ -26,8 +26,7 @@ std::optional<InputCommand> read_command_body(eng::ByteReader& r) {
     if (!yaw || !pitch || !buttons) {
         return std::nullopt;
     }
-    if (*yaw < -8.0f || *yaw > 8.0f || *pitch < -kMaxPitch - 0.01f ||
-        *pitch > kMaxPitch + 0.01f) {
+    if (*yaw < -8.0f || *yaw > 8.0f || *pitch < -kMaxPitch - 0.01f || *pitch > kMaxPitch + 0.01f) {
         return std::nullopt;  // outside any legitimate range
     }
     c.yaw = std::remainder(*yaw, 2.0f * kPi);
@@ -273,8 +272,8 @@ std::optional<Snapshot> read_snapshot(eng::ByteReader& r) {
         const auto yaw = r.f32();
         const auto pitch = r.f32();
         const auto flags = r.u8();
-        if (!id || *id >= kMaxPlayers || !px || !py || !pz || !vx || !vy || !vz || !yaw ||
-            !pitch || !flags.has_value()) {
+        if (!id || *id >= kMaxPlayers || !px || !py || !pz || !vx || !vy || !vz || !yaw || !pitch ||
+            !flags.has_value()) {
             return std::nullopt;
         }
         p.player_id = *id;

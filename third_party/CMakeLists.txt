@@ -97,6 +97,9 @@ set(TARGET_SAMPLES OFF CACHE BOOL "" FORCE)
 set(TARGET_VIEWER OFF CACHE BOOL "" FORCE)
 set(ENABLE_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
 set(INTERPROCEDURAL_OPTIMIZATION OFF CACHE BOOL "" FORCE)
+# Jolt defaults to the static MSVC CRT (/MT); everything else here uses the
+# dynamic CRT, and mixing them is a link error.
+set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
     JoltPhysics
     GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
@@ -105,3 +108,14 @@ FetchContent_Declare(
     SOURCE_SUBDIR Build
 )
 FetchContent_MakeAvailable(JoltPhysics)
+
+# Third-party headers must be SYSTEM includes so our warnings-as-errors
+# never fire inside them (Jolt trips -Wdouble-promotion, glm trips
+# -Wsign-conversion on some compiler versions).
+foreach(third_party_target Jolt glm)
+    get_target_property(_tp_includes ${third_party_target} INTERFACE_INCLUDE_DIRECTORIES)
+    if(_tp_includes)
+        set_target_properties(${third_party_target} PROPERTIES
+            INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_tp_includes}")
+    endif()
+endforeach()

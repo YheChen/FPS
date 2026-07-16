@@ -12,7 +12,7 @@ game::WeaponConfig test_config() {
     config.damage = 25.0f;
     config.rounds_per_minute = 600.0f;  // 0.1 s = 6 ticks between shots
     config.magazine_size = 5;
-    config.reload_seconds = 0.5f;       // 30 ticks
+    config.reload_seconds = 0.5f;  // 30 ticks
     return config;
 }
 

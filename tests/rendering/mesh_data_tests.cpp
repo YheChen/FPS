@@ -7,8 +7,8 @@ namespace {
 
 TEST_CASE("unit cube has per-face vertices and full index coverage", "[mesh]") {
     const eng::MeshData cube = eng::MeshData::unit_cube();
-    CHECK(cube.vertices.size() == 24);   // 6 faces * 4 corners
-    CHECK(cube.indices.size() == 36);    // 6 faces * 2 triangles * 3
+    CHECK(cube.vertices.size() == 24);  // 6 faces * 4 corners
+    CHECK(cube.indices.size() == 36);   // 6 faces * 2 triangles * 3
 
     for (const std::uint32_t index : cube.indices) {
         CHECK(index < cube.vertices.size());

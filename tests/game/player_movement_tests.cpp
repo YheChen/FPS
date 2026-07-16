@@ -65,9 +65,9 @@ TEST_CASE("input command button helpers round-trip", "[movement]") {
 
 TEST_CASE("horizontal speed is capped at max_speed", "[movement]") {
     TestArena arena;
-    std::vector<game::InputCommand> commands(30);       // settle
+    std::vector<game::InputCommand> commands(30);  // settle
     for (int i = 0; i < 180; ++i) {
-        commands.push_back(command_with(kForward));     // 3 s of full throttle
+        commands.push_back(command_with(kForward));  // 3 s of full throttle
     }
     const game::PlayerState state = simulate(arena, commands, {0.0f, 0.1f, 0.0f});
     const float horizontal = std::hypot(state.velocity.x, state.velocity.z);

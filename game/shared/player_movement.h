@@ -17,13 +17,13 @@ inline constexpr double kTickRate = 60.0;
 inline constexpr float kTickSeconds = 1.0f / 60.0f;
 
 struct MoveConfig {
-    float max_speed = 6.0f;       // m/s horizontal
-    float ground_accel = 60.0f;   // m/s^2
-    float air_accel = 12.0f;      // m/s^2
-    float friction = 10.0f;       // 1/s exponential horizontal damping on ground
-    float gravity = 20.0f;        // m/s^2 (snappier than 9.81 on purpose)
-    float jump_speed = 7.0f;      // m/s -> apex ~1.2m
-    float eye_height = 1.62f;     // camera above feet
+    float max_speed = 6.0f;      // m/s horizontal
+    float ground_accel = 60.0f;  // m/s^2
+    float air_accel = 12.0f;     // m/s^2
+    float friction = 10.0f;      // 1/s exponential horizontal damping on ground
+    float gravity = 20.0f;       // m/s^2 (snappier than 9.81 on purpose)
+    float jump_speed = 7.0f;     // m/s -> apex ~1.2m
+    float eye_height = 1.62f;    // camera above feet
 };
 
 inline constexpr MoveConfig kMove{};

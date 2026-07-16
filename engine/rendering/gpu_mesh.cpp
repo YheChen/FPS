@@ -20,8 +20,7 @@ GpuMesh GpuMesh::upload(const MeshData& mesh) {
     glBindVertexArray(gpu.vao_);
 
     glBindBuffer(GL_ARRAY_BUFFER, gpu.vbo_);
-    glBufferData(GL_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(mesh.vertices.size() * sizeof(Vertex)),
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(mesh.vertices.size() * sizeof(Vertex)),
                  mesh.vertices.data(), GL_STATIC_DRAW);
 
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu.ebo_);

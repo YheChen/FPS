@@ -67,7 +67,7 @@ render frames (keep the accumulator pattern from day one).
 
 ---
 
-## Milestone 2 — Rendering foundation
+## Milestone 2 — Rendering foundation ✅
 
 **Objective:** Textured, lit meshes through a small GL abstraction, plus
 Dear ImGui debug overlay.

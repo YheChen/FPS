@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "engine/core/log.h"
+#include "engine/debug/imgui_layer.h"
 
 namespace eng {
 
@@ -135,10 +136,13 @@ Window& Window::operator=(Window&& other) noexcept {
     return *this;
 }
 
-bool Window::poll(InputState& input) {
+bool Window::poll(InputState& input, ImGuiLayer* imgui) {
     input.begin_frame();
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
+        if (imgui != nullptr) {
+            imgui->process_event(event);
+        }
         switch (event.type) {
             case SDL_EVENT_QUIT:
                 return false;

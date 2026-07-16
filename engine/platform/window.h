@@ -9,6 +9,8 @@ struct SDL_Window;
 
 namespace eng {
 
+class ImGuiLayer;
+
 struct WindowConfig {
     std::string title = "fps";
     int width = 1280;
@@ -33,8 +35,9 @@ public:
     Window& operator=(const Window&) = delete;
 
     // Pumps all pending OS events into `input` (after input.begin_frame()).
+    // If `imgui` is given, every event is also forwarded to it.
     // Returns false when the user requested quit (window close / OS quit).
-    bool poll(InputState& input);
+    bool poll(InputState& input, ImGuiLayer* imgui = nullptr);
 
     void swap();
 
@@ -46,6 +49,10 @@ public:
     // Relative mouse mode: cursor hidden and locked, deltas keep flowing.
     void set_relative_mouse(bool enabled);
     bool relative_mouse() const;
+
+    // Native handles for platform-coupled subsystems (ImGui backend).
+    SDL_Window* sdl_window() const { return window_; }
+    void* gl_context() const { return gl_context_; }
 
 private:
     Window() = default;

@@ -25,6 +25,7 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/g-truc/glm.git
     GIT_TAG 1.0.1
     GIT_SHALLOW TRUE
+    SYSTEM
 )
 FetchContent_MakeAvailable(glm)
 
@@ -100,22 +101,15 @@ set(INTERPROCEDURAL_OPTIMIZATION OFF CACHE BOOL "" FORCE)
 # Jolt defaults to the static MSVC CRT (/MT); everything else here uses the
 # dynamic CRT, and mixing them is a link error.
 set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
+# SYSTEM (CMake >= 3.25): consumers see Jolt/glm headers as system includes,
+# so our warnings-as-errors never fires inside them (Jolt trips
+# -Wdouble-promotion, glm trips -Wsign-conversion on some compilers).
 FetchContent_Declare(
     JoltPhysics
     GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
     GIT_TAG v5.2.0
     GIT_SHALLOW TRUE
     SOURCE_SUBDIR Build
+    SYSTEM
 )
 FetchContent_MakeAvailable(JoltPhysics)
-
-# Third-party headers must be SYSTEM includes so our warnings-as-errors
-# never fire inside them (Jolt trips -Wdouble-promotion, glm trips
-# -Wsign-conversion on some compiler versions).
-foreach(third_party_target Jolt glm)
-    get_target_property(_tp_includes ${third_party_target} INTERFACE_INCLUDE_DIRECTORIES)
-    if(_tp_includes)
-        set_target_properties(${third_party_target} PROPERTIES
-            INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_tp_includes}")
-    endif()
-endforeach()

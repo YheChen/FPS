@@ -1,0 +1,293 @@
+# Milestone roadmap
+
+Rules: the project compiles and all tests pass at the end of every milestone.
+Each milestone ends at a runnable checkpoint. Dependencies are added in the
+milestone that first needs them, never earlier.
+
+---
+
+## Milestone 0 — Project foundation ✅
+
+**Objective:** A compiling monorepo with engine library, client/server
+executables, tests, logging, formatting, and CI.
+
+**Deliverables:** Root CMake + presets, `cmake/` warning & sanitizer modules,
+`engine` static library (`eng::log`, `ENG_ASSERT`, version), `fps_client` and
+`fps_server` stubs, Catch2 test target, `.clang-format`, `.clang-tidy`,
+GitHub Actions CI, docs skeleton + ADRs.
+
+**Key interfaces:** `eng::log::{set_level, info, warn, error, format_line}`,
+`ENG_ASSERT(cond, msg)`, `eng::version_string()`.
+
+**Visible result:** Both executables print a startup banner through the
+logger and exit 0. `ctest` is green.
+
+**Tests:** log line formatting, level filtering, version injection.
+
+**Done when:** fresh clone → configure → build → test passes on macOS, and CI
+is green on all three OSes.
+
+**Failure modes:** FetchContent blocked by no network; CMake < 3.25;
+warnings-as-errors differences between compilers (fix warnings, don't lower
+the bar).
+
+---
+
+## Milestone 1 — Platform layer
+
+**Objective:** A window with a live OpenGL 4.1 core context, real main loop,
+input, and high-resolution timing.
+
+**Deliverables:** SDL3 + glad dependencies; `eng::platform::Window` (RAII:
+window + GL context); `eng::platform::Input` (keyboard state, mouse deltas,
+relative-mouse capture toggle); `eng::core::Clock` and fixed-timestep
+accumulator; `eng::core::Application` skeleton owning window/input/loop;
+clean Escape-to-quit shutdown.
+
+**Files:** `engine/platform/{window,input}.{h,cpp}`,
+`engine/core/{application,time}.{h,cpp}`, updated `game/client/main.cpp`,
+`third_party/CMakeLists.txt`.
+
+**Visible result:** `fps_client` opens a 1280×720 window clearing to a solid
+color at vsync; console logs FPS once per second; mouse capture toggles with
+Escape; closes cleanly (sanitizer-clean).
+
+**Tests:** fixed-timestep accumulator (given frame times → expected tick
+counts and alpha), input edge detection (pressed vs held).
+
+**Done when:** window runs for minutes without leaks under ASan, resize
+doesn't crash, server target still builds headless (no SDL dependency).
+
+**Failure modes:** SDL3 API drift vs docs; GL context version pinning on
+macOS (must request 4.1 core, forward-compatible); mixing simulation into
+render frames (keep the accumulator pattern from day one).
+
+---
+
+## Milestone 2 — Rendering foundation
+
+**Objective:** Textured, lit meshes through a small GL abstraction, plus
+Dear ImGui debug overlay.
+
+**Deliverables:** `Shader` (compile/link/uniforms, hot-reload later),
+`Buffer`/`VertexArray`, `Texture2D`, `Mesh`, perspective `Camera`,
+first-person fly camera for testing, depth testing, one directional light
+(Blinn-Phong), Dear ImGui integration, render stats (draw calls, frame ms),
+debug line renderer (world-space lines).
+
+**Visible result:** Several textured cubes lit by a directional light; fly
+camera with WASD+mouse; ImGui window showing FPS/frame-time graph and draw
+calls.
+
+**Tests:** camera view/projection matrices vs known values; vertical FOV
+math; (GL objects themselves are manually verified).
+
+**Done when:** 1000 cubes render at 60 FPS; resize keeps aspect correct;
+zero GL errors with a debug-callback… (4.1: use `glGetError` sweep in Debug).
+
+**Failure modes:** GL object lifetime bugs (fix with strict RAII wrappers,
+non-copyable/movable); coordinate convention drift (document once: right-
+handed, +Y up, -Z forward); ImGui input conflicts with game input (route
+through one input layer with a "UI captured" flag).
+
+---
+
+## Milestone 3 — World and assets
+
+**Objective:** Load a glTF map and render it as the game world.
+
+**Deliverables:** cgltf + stb_image; `AssetCache` (path-keyed, typed
+handles); glTF → meshes/materials/textures import; simple scene: entity IDs
+(index+generation), `Transform`, `MeshRenderer`, flat entity list (no deep
+hierarchy until needed); entity inspector in ImGui; a small test map
+(greybox arena) authored in Blender, checked into `assets/maps/`.
+
+**Visible result:** Fly around a textured arena loaded from
+`assets/maps/arena01.glb`; inspector lists entities and lets you move them.
+
+**Tests:** asset path normalization; cache returns same handle for same
+path; glTF import of a known tiny file (counts of meshes/verts/materials);
+transform compose/decompose math.
+
+**Done when:** map loads in < 2 s, missing files produce a magenta fallback
+material + error log instead of a crash.
+
+**Failure modes:** glTF coordinate/units mismatches (assert +Y up, meters at
+import); texture color-space bugs (sRGB for albedo, linear for data maps).
+
+---
+
+## Milestone 4 — Physics and FPS character controller
+
+**Objective:** Jolt-backed collision and a responsive first-person
+controller.
+
+**Deliverables:** Jolt dependency; `PhysicsWorld` wrapper (init, fixed step,
+layers); static mesh colliders generated from the map; **kinematic
+character controller** via Jolt `CharacterVirtual` (not a dynamic rigid
+body — see ADR); ground detection, gravity, jump, air control, step-up and
+slope limits; capsule + collision debug rendering; raycast API.
+
+**Movement code placement:** the controller update lives in `game/shared/`
+(pure function of state + input + dt) because M7 prediction will replay it.
+
+**Visible result:** Walk/run/jump around the arena in first person;
+collision wireframes toggleable; a debug ray drawn from the camera.
+
+**Tests:** controller simulation is deterministic for a scripted input
+sequence (same start + inputs → same end state, run twice); jump apex height
+matches configured value; ground detection on slopes at the configured
+limit.
+
+**Done when:** movement feels crisp (accelerates in <100 ms, stops without
+sliding), no tunneling through map geometry at 60 Hz, headless server target
+can step the same world without a renderer.
+
+**Failure modes:** using a dynamic body and fighting the solver for game
+feel; Jolt broadphase layer misconfiguration; forgetting to keep the
+controller update fixed-timestep.
+
+---
+
+## Milestone 5 — Offline FPS prototype
+
+**Objective:** The complete single-player game loop: shoot, damage, die,
+respawn — all offline. This is the vertical slice before networking.
+
+**Deliverables:** data-driven weapon config (name, damage, RPM, magazine,
+reload time, range, spread) loaded from a config file; hitscan raycast fire
+with fire-rate gating; ammo + reload; `Health`, damage application, death,
+respawn timer and spawn points; static + moving target dummies; crosshair
+and HUD (health, ammo) via ImGui for now; miniaudio integration: fire,
+impact, dry-fire, death sounds; muzzle-flash/impact debug FX.
+
+**Visible result:** Run around the arena shooting targets; they die and
+respawn; HUD shows health/ammo; sounds play.
+
+**Tests:** fire-rate cooldown math (RPM → min ticks between shots); reload
+state machine; damage/death/respawn logic; weapon config parsing incl.
+malformed files.
+
+**Done when:** the loop "spawn → shoot → kill → respawn" works entirely
+offline with sound, at 60 FPS.
+
+**Failure modes:** weapon logic entangled with rendering/input (keep it a
+pure shared-simulation function so M8 can run it on the server); frame-rate-
+dependent fire rate (gate by tick, not wall clock).
+
+---
+
+## Milestone 6 — Basic networking (stage 1)
+
+**Objective:** Two clients see each other move via a dedicated server.
+
+**Deliverables:** ENet dependency; `eng::net` transport wrapper (host,
+connect, channels, service loop); `ByteReader`/`ByteWriter`; protocol
+messages Hello/Welcome/Reject/Joined/Left/InputCommand/Snapshot/Ping per
+packet-format.md; server: fixed 60 Hz headless loop, per-player input
+queues, shared movement sim, 20 Hz snapshot broadcast; client: connect
+screen (direct IP), send inputs, apply snapshots raw (no
+prediction/interpolation yet — remote AND local players will look choppy
+and laggy; that is the honest state of stage 1).
+
+**Tests:** ByteReader/Writer round-trips incl. truncated/hostile buffers;
+every message round-trips; input queue ordering; malformed-packet rejection.
+
+**Visible result:** `fps_server` in one terminal; two `fps_client`
+instances connect; each sees the other's capsule moving around the arena.
+
+**Done when:** join/leave is stable, server survives garbage packets
+(fuzz-ish test), 10-minute two-client session with no divergence crashes.
+
+**Failure modes:** sending structs raw (banned); blocking the sim on
+`enet_host_service` (poll with 0 timeout); forgetting NAT/firewall docs for
+testers (LAN/localhost only at this stage).
+
+---
+
+## Milestone 7 — Responsive multiplayer movement (stage 2)
+
+**Objective:** Local movement feels offline-crisp; remote players are
+smooth — under 150 ms simulated latency and 5% loss.
+
+**Deliverables:** tick synchronization (client estimates server tick from
+Welcome + ping); input ring buffer + redundancy (3 commands/packet);
+client-side prediction using shared movement code; reconciliation (replay
+unacked inputs on snapshot, smooth residual error); snapshot interpolation
+buffer for remote players (~100 ms delay, adaptive later); network
+condition simulator (configurable latency/jitter/loss injected in the
+transport wrapper); ImGui network panel: RTT, loss, snapshot age, prediction
+error graph, bandwidth.
+
+**Tests:** prediction replay = original simulation for scripted inputs;
+reconciliation converges after a forced server correction; interpolation
+buffer handles missing/duplicate/reordered snapshots; sequence arithmetic
+wraparound.
+
+**Visible result:** with 150 ms + 5% loss injected, local movement is
+indistinguishable from offline and the remote player glides smoothly.
+
+**Done when:** prediction error < 1 cm in steady state on localhost; no
+visible rubber-banding under the test conditions above.
+
+**Failure modes:** client and server stepping different movement code (must
+be the same shared function); interpolating with too little delay (jitter →
+stutter); smoothing corrections by snapping (jarring) or over-smoothing
+(floaty).
+
+---
+
+## Milestone 8 — Networked combat (stage 3)
+
+**Objective:** Full authoritative deathmatch.
+
+**Deliverables:** fire input in InputCommand; server-side hitscan raycast
+against player capsules; server-side validation: fire rate, ammo, reload,
+range, alive-state; damage/death/respawn on the server; kill/death
+scoreboard (Tab); match timer + end screen + restart; FireEvent/Died/
+Respawned/Score/MatchState messages; client FX driven by server events
+(tracer, hit sound, kill feed).
+
+**Tests:** fire-rate validation rejects too-fast fire; ammo/reload
+validation; damage → death → respawn state machine; scoreboard ordering;
+match timer transitions; hostile inputs (fire while dead, fire during
+reload, absurd rates) are rejected.
+
+**Visible result:** Two players kill each other, scoreboard updates, match
+ends at the timer, new match starts.
+
+**Done when:** a full 5-minute deathmatch between 2+ clients completes with
+correct scores under simulated 100 ms latency.
+
+**Failure modes:** trusting client hit claims (never sent at all);
+applying damage on the client; fire-rate checks using wall clock instead of
+ticks.
+
+---
+
+## Milestone 9 — Lag compensation and polish
+
+**Objective:** Fair hits under latency; shippable-feeling vertical slice.
+
+**Deliverables:** server-side hitbox history ring buffer (last ~250 ms);
+rewind hitscan validation to `client_view_tick` (bounded, validated);
+lag-comp debug visualization (rewound capsules); bandwidth measurement
+panel + snapshot quantization if measurements demand; placeholder character
+animation (walk cycle or capsule tilt), improved sounds, hit markers;
+main menu: name entry + direct-IP connect; settings (sensitivity, FOV,
+volume); packaging scripts per platform; final docs pass.
+
+**Tests:** rewind returns correct historical capsule for a recorded
+trajectory; rewind bound clamps ancient/future ticks; quantization
+round-trip error bounds.
+
+**Visible result:** with 150 ms simulated latency, shooting directly at a
+moving target hits reliably; menu → connect → play → match end → menu loop
+works.
+
+**Done when:** 8-player playtest on LAN holds 60 FPS client / stable 60 Hz
+server tick, bandwidth < 20 kB/s per client, no sanitizer findings.
+
+**Failure modes:** unbounded rewind (trusting client timestamps blindly);
+lag comp before M7 correctness is proven; polish scope creep — the list
+above is the ceiling, not the floor.

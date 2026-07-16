@@ -1,0 +1,21 @@
+---
+# Advisory static analysis. Run manually or in CI; findings are reviewed,
+# not blindly applied.
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  concurrency-*,
+  misc-*,
+  modernize-*,
+  performance-*,
+  readability-*,
+  -modernize-use-trailing-return-type,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-named-parameter,
+  -misc-non-private-member-variables-in-classes,
+  -bugprone-easily-swappable-parameters
+WarningsAsErrors: ''
+HeaderFilterRegex: '(engine|game|tests)/'
+FormatStyle: file

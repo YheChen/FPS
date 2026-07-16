@@ -1,6 +1,10 @@
 # Build output
 build/
 out/
+dist/
+
+# Local user state
+fps_settings.cfg
 
 # IDE / editor
 .vscode/

@@ -47,9 +47,12 @@ Transport: **ENet** (UDP with optional per-channel reliability/ordering).
    latency/loss simulation for testing.
 3. **Combat (M8):** hitscan fire through validated inputs, server-side
    fire-rate/ammo checks, damage, death, respawn, scoreboard, match timer.
-4. **Lag compensation & optimization (M9):** server-side rewind of player
-   hitboxes for hitscan (bounded to ~200 ms), bandwidth measurement, then —
-   only if profiling demands — quantization/delta compression.
+4. **Lag compensation (M9, done):** each input packet carries the client's
+   interpolation `view_tick`; the server records per-player position
+   history and validates hitscan against victims where the shooter saw
+   them, clamped to a 15-tick (~250 ms) rewind window. Quantization/delta
+   compression remain unimplemented by choice: measured bandwidth at 8
+   players (~5 kB/s per client) does not justify them.
 
 ## Hostile-input assumptions
 

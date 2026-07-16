@@ -1,7 +1,7 @@
 # Packet format
 
-Status: **design** — implementation begins in Milestone 6. This document is
-the source of truth; update it in the same commit as any protocol change.
+Status: **implemented** (protocol version 3, `game/shared/protocol.*`).
+Update this document in the same commit as any protocol change.
 
 ## Encoding rules
 

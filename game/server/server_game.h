@@ -14,6 +14,7 @@
 #include "engine/physics/physics_world.h"
 #include "game/shared/health.h"
 #include "game/shared/input_command.h"
+#include "game/shared/lag_comp.h"
 #include "game/shared/player_movement.h"
 #include "game/shared/protocol.h"
 #include "game/shared/weapon.h"
@@ -67,6 +68,11 @@ private:
         std::map<std::uint32_t, InputCommand> pending;  // seq -> command
         InputCommand last_command;                      // reused when starved
         int starved_ticks = 0;
+
+        // Lag compensation: recent positions + the client's claimed view
+        // tick (already range-limited at deserialization, clamped on use).
+        PositionHistory history;
+        std::uint32_t view_tick = 0;
 
         // Basic abuse accounting.
         int input_packets_this_second = 0;

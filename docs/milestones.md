@@ -267,7 +267,7 @@ ticks.
 
 ---
 
-## Milestone 9 — Lag compensation and polish
+## Milestone 9 — Lag compensation and polish ✅
 
 **Objective:** Fair hits under latency; shippable-feeling vertical slice.
 

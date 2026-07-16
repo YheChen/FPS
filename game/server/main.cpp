@@ -19,6 +19,7 @@ namespace {
 struct ServerArgs {
     std::uint16_t port = 7777;
     std::optional<double> run_seconds;
+    bool verbose = false;
 };
 
 ServerArgs parse_args(int argc, char** argv) {
@@ -47,6 +48,8 @@ ServerArgs parse_args(int argc, char** argv) {
                     args.run_seconds = seconds;
                 }
             }
+        } else if (arg == "--verbose") {
+            args.verbose = true;
         } else {
             eng::log::warn("Unknown argument '{}'", arg);
         }
@@ -61,6 +64,9 @@ int main(int argc, char** argv) {
     eng::log::info("FPS dedicated server starting (engine v{})", eng::version_string());
 
     const ServerArgs args = parse_args(argc, argv);
+    if (args.verbose) {
+        eng::log::set_level(eng::log::Level::Debug);
+    }
 
     // --- load map collision (headless) ------------------------------------
     const auto assets_root = eng::find_assets_root();

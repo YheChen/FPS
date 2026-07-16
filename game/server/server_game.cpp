@@ -194,6 +194,12 @@ void ServerGame::handle_input(Player& player, eng::ByteReader& reader, eng::NetH
             player.pending.emplace(command.sequence, command);
         }
     }
+
+    // Newest claimed view tick for lag compensation (monotonic; clamped
+    // again into the legal rewind window at fire time).
+    if (packet->view_tick > player.view_tick) {
+        player.view_tick = packet->view_tick;
+    }
 }
 
 void ServerGame::drop_player(std::uint8_t player_id, eng::NetHost& net) {
@@ -247,6 +253,7 @@ void ServerGame::tick(eng::NetHost& net) {
         }
 
         advance_player(player.state, command, kTickSeconds, *player.controller, world_);
+        player.history.push(tick_, player.state.position);
 
         // Fell out of the world: counts as an environment death.
         if (player.state.position.y < -20.0f) {
@@ -353,21 +360,28 @@ void ServerGame::fire_hitscan(std::uint8_t shooter_id, const InputCommand& comma
         max_t = wall->distance;
     }
 
-    // Closest live player capsule within range (positions at the CURRENT
-    // tick; rewind-based lag compensation arrives in Milestone 9).
+    // Lag compensation: test victims where the SHOOTER saw them - their
+    // positions at the shooter's (bounded) interpolation view tick. A
+    // hostile view_tick claim can rewind at most kMaxRewindTicks (~250 ms).
+    const std::uint32_t rewind_tick = clamp_rewind_tick(shooter.view_tick, tick_);
     std::uint8_t hit_id = kNoPlayer;
     float hit_t = max_t;
     for (std::uint8_t id = 0; id < kMaxPlayers; ++id) {
         if (id == shooter_id || !players_[id] || !players_[id]->alive) {
             continue;
         }
+        const glm::vec3 victim_position =
+            players_[id]->history.at(rewind_tick).value_or(players_[id]->state.position);
         const auto& config = players_[id]->controller->config();
-        const auto t = ray_vertical_capsule(eye, dir, players_[id]->state.position,
-                                            config.radius, config.height);
+        const auto t =
+            ray_vertical_capsule(eye, dir, victim_position, config.radius, config.height);
         if (t && *t < hit_t) {
             hit_t = *t;
             hit_id = id;
         }
+    }
+    if (rewind_tick != tick_ && hit_id != kNoPlayer) {
+        eng::log::debug("lag comp: hit resolved {} ticks in the past", tick_ - rewind_tick);
     }
 
     FireEventMsg event;

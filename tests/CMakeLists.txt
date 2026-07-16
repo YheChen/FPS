@@ -17,6 +17,7 @@ add_executable(engine_tests
     core/version_tests.cpp
     game/hitscan_tests.cpp
     game/interpolation_tests.cpp
+    game/lag_comp_tests.cpp
     game/player_movement_tests.cpp
     game/prediction_tests.cpp
     game/weapon_tests.cpp

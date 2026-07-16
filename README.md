@@ -33,5 +33,18 @@ See [docs/build.md](docs/build.md) for presets, sanitizers, and CI details.
 
 ## Status
 
-Milestone 0 (project foundation) complete. See
-[docs/milestones.md](docs/milestones.md) for the roadmap.
+**All nine milestones complete** — playable online deathmatch with an
+authoritative dedicated server, client-side prediction + reconciliation,
+snapshot interpolation, and server-side lag compensation. See
+[docs/milestones.md](docs/milestones.md).
+
+## Play
+
+```sh
+./build/debug/game/fps_server --port 7777         # dedicated server
+./build/debug/game/fps_client                     # menu -> Connect / Practice
+```
+
+Client flags for testing: `--connect <ip> --name <n> --fake-latency <ms>
+--fake-jitter <ms> --fake-loss <pct> --no-vsync --run-seconds <s>`.
+`scripts/package.sh` stages a distributable zip (binaries + assets).

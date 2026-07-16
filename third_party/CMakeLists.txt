@@ -62,6 +62,19 @@ FetchContent_MakeAvailable(cgltf)
 add_library(cgltf INTERFACE)
 target_include_directories(cgltf SYSTEM INTERFACE ${cgltf_SOURCE_DIR})
 
+# --- ENet (UDP transport with optional reliability) -------------------------
+FetchContent_Declare(
+    enet
+    GIT_REPOSITORY https://github.com/lsalzman/enet.git
+    GIT_TAG v1.3.18
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(enet)
+target_include_directories(enet SYSTEM PUBLIC ${enet_SOURCE_DIR}/include)
+if(WIN32)
+    target_link_libraries(enet PUBLIC winmm ws2_32)
+endif()
+
 # --- miniaudio (audio playback, header-only) --------------------------------
 FetchContent_Declare(
     miniaudio

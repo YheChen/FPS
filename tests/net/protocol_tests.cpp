@@ -105,6 +105,107 @@ TEST_CASE("snapshot round-trips", "[protocol]") {
     CHECK(m->players[0].flags == 1);
 }
 
+TEST_CASE("combat messages round-trip", "[protocol]") {
+    {
+        game::FireEventMsg fire;
+        fire.shooter = 2;
+        fire.from = {1.0f, 1.6f, 3.0f};
+        fire.to = {5.0f, 1.2f, -8.0f};
+        fire.hit_player = game::kNoPlayer;
+        const auto bytes = encode(fire);
+        eng::ByteReader r{{bytes.data(), bytes.size()}};
+        REQUIRE(game::read_message_type(r) == game::MessageType::FireEvent);
+        const auto m = game::read_fire_event(r);
+        REQUIRE(m.has_value());
+        CHECK(m->shooter == 2);
+        CHECK(m->to.z == -8.0f);
+        CHECK(m->hit_player == game::kNoPlayer);
+    }
+    {
+        const auto bytes = encode(game::PlayerDamagedMsg{1, 0, 75.0f});
+        eng::ByteReader r{{bytes.data(), bytes.size()}};
+        game::read_message_type(r);
+        const auto m = game::read_player_damaged(r);
+        REQUIRE(m.has_value());
+        CHECK(m->health == 75.0f);
+    }
+    {
+        const auto bytes = encode(game::PlayerDiedMsg{3, game::kNoPlayer});
+        eng::ByteReader r{{bytes.data(), bytes.size()}};
+        game::read_message_type(r);
+        const auto m = game::read_player_died(r);
+        REQUIRE(m.has_value());
+        CHECK(m->killer == game::kNoPlayer);
+    }
+    {
+        const auto bytes = encode(game::PlayerRespawnedMsg{4, {1, 2, 3}});
+        eng::ByteReader r{{bytes.data(), bytes.size()}};
+        game::read_message_type(r);
+        CHECK(game::read_player_respawned(r)->position.y == 2.0f);
+    }
+    {
+        const auto bytes = encode(game::ScoreUpdateMsg{1, 12, 7});
+        eng::ByteReader r{{bytes.data(), bytes.size()}};
+        game::read_message_type(r);
+        const auto m = game::read_score_update(r);
+        CHECK(m->kills == 12);
+        CHECK(m->deaths == 7);
+    }
+    {
+        const auto bytes = encode(game::MatchStateMsg{game::MatchPhase::Ended, 8});
+        eng::ByteReader r{{bytes.data(), bytes.size()}};
+        game::read_message_type(r);
+        const auto m = game::read_match_state(r);
+        CHECK(m->phase == game::MatchPhase::Ended);
+        CHECK(m->seconds_remaining == 8);
+    }
+    {
+        const auto bytes = encode(game::WeaponStatusMsg{17, true});
+        eng::ByteReader r{{bytes.data(), bytes.size()}};
+        game::read_message_type(r);
+        const auto m = game::read_weapon_status(r);
+        CHECK(m->ammo == 17);
+        CHECK(m->reloading);
+    }
+}
+
+TEST_CASE("hostile combat messages are rejected", "[protocol]") {
+    // Shooter id out of range.
+    {
+        eng::ByteWriter w;
+        w.u8(static_cast<std::uint8_t>(game::MessageType::FireEvent));
+        w.u8(99);  // invalid shooter
+        for (int i = 0; i < 6; ++i) {
+            w.f32(0.0f);
+        }
+        w.u8(game::kNoPlayer);
+        eng::ByteReader r{w.data()};
+        game::read_message_type(r);
+        CHECK(game::read_fire_event(r) == std::nullopt);
+    }
+    // Negative health.
+    {
+        eng::ByteWriter w;
+        w.u8(static_cast<std::uint8_t>(game::MessageType::PlayerDamaged));
+        w.u8(0);
+        w.u8(1);
+        w.f32(-5.0f);
+        eng::ByteReader r{w.data()};
+        game::read_message_type(r);
+        CHECK(game::read_player_damaged(r) == std::nullopt);
+    }
+    // Invalid match phase.
+    {
+        eng::ByteWriter w;
+        w.u8(static_cast<std::uint8_t>(game::MessageType::MatchState));
+        w.u8(7);
+        w.u16(100);
+        eng::ByteReader r{w.data()};
+        game::read_message_type(r);
+        CHECK(game::read_match_state(r) == std::nullopt);
+    }
+}
+
 TEST_CASE("hostile packets are rejected", "[protocol]") {
     // Unknown message type.
     {

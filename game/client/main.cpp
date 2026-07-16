@@ -2,6 +2,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <imgui.h>
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cmath>
@@ -94,6 +95,9 @@ struct ClientArgs {
     bool vsync = true;  // --no-vsync: automated multi-window runs must not
                         // block on swap (macOS throttles occluded windows)
     eng::NetSimConfig net_sim;  // --fake-latency/--fake-jitter/--fake-loss
+    // Automated-verification hooks (harmless in normal play):
+    bool auto_fire = false;                 // hold the trigger every tick
+    std::optional<float> fixed_yaw;         // lock the view yaw (radians)
 };
 
 ClientArgs parse_args(int argc, char** argv) {
@@ -132,6 +136,16 @@ ClientArgs parse_args(int argc, char** argv) {
             }
         } else if (arg == "--no-vsync") {
             args.vsync = false;
+        } else if (arg == "--auto-fire") {
+            args.auto_fire = true;
+        } else if (arg == "--fixed-yaw") {
+            if (const auto value = next_value()) {
+                float yaw = 0.0f;
+                if (std::from_chars(value->data(), value->data() + value->size(), yaw).ec ==
+                    std::errc{}) {
+                    args.fixed_yaw = yaw;
+                }
+            }
         } else if (arg == "--fake-latency") {
             if (const auto value = next_value()) {
                 std::from_chars(value->data(), value->data() + value->size(),
@@ -194,6 +208,11 @@ struct Target {
 struct Tracer {
     glm::vec3 from;
     glm::vec3 to;
+    float ttl;
+};
+
+struct KillFeedEntry {
+    std::string text;
     float ttl;
 };
 
@@ -368,6 +387,14 @@ int main(int argc, char** argv) {
     std::size_t prediction_error_cursor = 0;
     float last_reconcile_error = 0.0f;
     eng::NetSimConfig sim_config = args.net_sim;
+    std::deque<KillFeedEntry> kill_feed;
+    const auto player_name = [&](std::uint8_t id) -> std::string {
+        if (!online) {
+            return "?";
+        }
+        const auto it = net->players().find(id);
+        return it != net->players().end() ? it->second.name : "world";
+    };
 
     float view_yaw = 0.0f;
     float view_pitch = 0.0f;
@@ -439,10 +466,22 @@ int main(int argc, char** argv) {
 
             if (online) {
                 // Predict locally with the shared movement code; the server
-                // corrects us via reconcile() below.
-                const game::InputCommand command =
+                // corrects us via reconcile() below. While dead, inputs keep
+                // flowing (so acks stay in sync) but nothing is predicted.
+                if (args.fixed_yaw) {
+                    view_yaw = *args.fixed_yaw;
+                }
+                game::InputCommand command =
                     make_command(input, view_yaw, view_pitch, input_sequence++);
-                prediction->tick(command);
+                if (!window->relative_mouse() && !args.auto_fire) {
+                    game::set_button(command, game::Button::Fire, false);  // menu clicks
+                }
+                if (args.auto_fire) {
+                    game::set_button(command, game::Button::Fire, true);
+                }
+                if (net->self_alive()) {
+                    prediction->tick(command);
+                }
                 recent_commands.push_front(command);
                 if (recent_commands.size() > 8) {
                     recent_commands.pop_back();
@@ -553,6 +592,41 @@ int main(int argc, char** argv) {
         }
 
         if (online) {
+            // Combat events -> visuals and audio.
+            const glm::vec3 listener =
+                player.position + glm::vec3{0.0f, game::kMove.eye_height, 0.0f};
+            for (const auto& fire : net->take_fire_events()) {
+                tracers.push_back({fire.from + glm::vec3{0.0f, -0.06f, 0.0f}, fire.to, 0.08f});
+                const float distance = glm::length(fire.from - listener);
+                sound("fire.wav", std::clamp(1.1f - distance / 40.0f, 0.15f, 0.9f));
+                if (fire.shooter == net->my_id() && fire.hit_player != game::kNoPlayer) {
+                    sound("hit.wav", 0.8f);  // hit confirm
+                }
+            }
+            for (const auto& death : net->take_death_events()) {
+                kill_feed.push_back(
+                    {player_name(death.killer) + " killed " + player_name(death.victim), 5.0f});
+                if (kill_feed.size() > 5) {
+                    kill_feed.pop_front();
+                }
+                if (death.victim == net->my_id()) {
+                    sound("death.wav", 0.9f);
+                } else if (death.killer == net->my_id()) {
+                    sound("kill.wav", 0.8f);
+                }
+            }
+            for (const auto& respawn : net->take_respawn_events()) {
+                if (respawn.player == net->my_id()) {
+                    prediction->reset(respawn.position);
+                    player = prediction->state();
+                    previous_player = player;
+                }
+            }
+            for (KillFeedEntry& entry : kill_feed) {
+                entry.ttl -= static_cast<float>(dt);
+            }
+            std::erase_if(kill_feed, [](const KillFeedEntry& e) { return e.ttl <= 0.0f; });
+
             // Reconciliation: rewind to the authoritative state and replay
             // unacked inputs.
             if (const auto ack = net->take_self_ack()) {
@@ -642,8 +716,8 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 const auto pose = remote.history.sample(remote_render_tick);
-                if (!pose) {
-                    continue;
+                if (!pose || (pose->flags & game::kFlagAlive) == 0) {
+                    continue;  // dead players are not drawn
                 }
                 glm::mat4 model = glm::translate(glm::mat4{1.0f},
                                                  pose->position + glm::vec3{0.0f, 0.9f, 0.0f});
@@ -740,6 +814,86 @@ int main(int argc, char** argv) {
         ImGui::TextDisabled("Esc: mouse capture | WASD+Space: move | LMB: fire | R: reload");
         ImGui::End();
 
+        // --- match UI (online) ---------------------------------------------
+        if (online) {
+            const ImVec2 display_size = ImGui::GetIO().DisplaySize;
+
+            // Match timer, top center.
+            ImGui::SetNextWindowPos({display_size.x * 0.5f, 8.0f}, ImGuiCond_Always, {0.5f, 0.0f});
+            ImGui::Begin("##timer", nullptr,
+                         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                             ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBackground);
+            ImGui::SetWindowFontScale(1.5f);
+            ImGui::Text("%02u:%02u", net->match_seconds() / 60, net->match_seconds() % 60);
+            ImGui::End();
+
+            // Kill feed, top right.
+            if (!kill_feed.empty()) {
+                ImGui::SetNextWindowPos({display_size.x - 12.0f, 12.0f}, ImGuiCond_Always,
+                                        {1.0f, 0.0f});
+                ImGui::Begin("##killfeed", nullptr,
+                             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                 ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBackground);
+                for (const KillFeedEntry& entry : kill_feed) {
+                    ImGui::TextColored({1.0f, 0.85f, 0.4f, std::min(1.0f, entry.ttl)}, "%s",
+                                       entry.text.c_str());
+                }
+                ImGui::End();
+            }
+
+            // Scoreboard: held Tab, or automatically on the end screen.
+            const bool match_over = net->match_phase() == game::MatchPhase::Ended;
+            if (input.is_down(eng::Key::Tab) || match_over) {
+                ImGui::SetNextWindowPos({display_size.x * 0.5f, display_size.y * 0.35f},
+                                        ImGuiCond_Always, {0.5f, 0.5f});
+                ImGui::Begin("Scoreboard", nullptr,
+                             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
+                                 ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoInputs);
+                if (match_over) {
+                    ImGui::SetWindowFontScale(1.4f);
+                    ImGui::Text("MATCH OVER - restarting in %us", net->match_seconds());
+                    ImGui::SetWindowFontScale(1.0f);
+                    ImGui::Separator();
+                }
+                // Sort by kills descending.
+                std::vector<std::pair<std::uint8_t, game::NetClient::Scores>> rows(
+                    net->scores().begin(), net->scores().end());
+                std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
+                    return a.second.kills > b.second.kills;
+                });
+                if (ImGui::BeginTable("scores", 3, ImGuiTableFlags_Borders)) {
+                    ImGui::TableSetupColumn("player");
+                    ImGui::TableSetupColumn("kills");
+                    ImGui::TableSetupColumn("deaths");
+                    ImGui::TableHeadersRow();
+                    for (const auto& [id, score] : rows) {
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::Text("%s%s", player_name(id).c_str(),
+                                    id == net->my_id() ? " (you)" : "");
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::Text("%u", score.kills);
+                        ImGui::TableSetColumnIndex(2);
+                        ImGui::Text("%u", score.deaths);
+                    }
+                    ImGui::EndTable();
+                }
+                ImGui::End();
+            }
+
+            // Death overlay.
+            if (!net->self_alive() && !match_over) {
+                ImGui::SetNextWindowPos({display_size.x * 0.5f, display_size.y * 0.5f},
+                                        ImGuiCond_Always, {0.5f, 0.5f});
+                ImGui::Begin("##dead", nullptr,
+                             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                 ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBackground);
+                ImGui::SetWindowFontScale(2.0f);
+                ImGui::TextColored({1.0f, 0.3f, 0.3f, 1.0f}, "YOU DIED");
+                ImGui::End();
+            }
+        }
+
         // --- HUD ---------------------------------------------------------
         if (!fly_mode) {
             ImDrawList* overlay = ImGui::GetForegroundDrawList();
@@ -764,7 +918,21 @@ int main(int argc, char** argv) {
                          ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                              ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBackground);
             ImGui::SetWindowFontScale(1.6f);
-            if (weapon.reloading()) {
+            if (online) {
+                const auto self_score = net->scores().find(net->my_id());
+                const int net_kills =
+                    self_score != net->scores().end() ? self_score->second.kills : 0;
+                const int net_deaths =
+                    self_score != net->scores().end() ? self_score->second.deaths : 0;
+                if (net->self_reloading()) {
+                    ImGui::Text("HP %.0f    RELOADING    K %d / D %d", net->self_health(),
+                                net_kills, net_deaths);
+                } else {
+                    ImGui::Text("HP %.0f    %u / %d    K %d / D %d", net->self_health(),
+                                net->self_ammo(), weapon_config.magazine_size, net_kills,
+                                net_deaths);
+                }
+            } else if (weapon.reloading()) {
                 ImGui::Text("HP 100    RELOADING (%.1fs)    K %d / D %d",
                             weapon.reload_remaining_seconds, kills, deaths);
             } else {

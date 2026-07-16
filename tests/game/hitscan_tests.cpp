@@ -53,6 +53,18 @@ TEST_CASE("ray_vertical_capsule respects horizontal offset", "[hitscan]") {
                     .has_value());
 }
 
+TEST_CASE("view_direction matches the camera convention", "[hitscan]") {
+    const glm::vec3 ahead = game::view_direction(0.0f, 0.0f);
+    CHECK(ahead.x == Approx(0.0f).margin(1e-6f));
+    CHECK(ahead.z == Approx(-1.0f));
+
+    const glm::vec3 right = game::view_direction(glm::radians(90.0f), 0.0f);
+    CHECK(right.x == Approx(1.0f));
+
+    const glm::vec3 up45 = game::view_direction(0.0f, glm::radians(45.0f));
+    CHECK(up45.y == Approx(std::sin(glm::radians(45.0f))));
+}
+
 TEST_CASE("damage and death transitions", "[health]") {
     game::Health health{50.0f, 50.0f};
     CHECK_FALSE(game::apply_damage(health, 20.0f));  // 30 left

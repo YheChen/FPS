@@ -12,6 +12,7 @@
 #include "engine/net/transport.h"
 #include "game/server/server_game.h"
 #include "game/shared/player_movement.h"
+#include "game/shared/weapon.h"
 
 namespace {
 
@@ -89,12 +90,21 @@ int main(int argc, char** argv) {
         }
     }
 
+    game::WeaponConfig weapon_config;
+    if (const auto text = eng::read_text_file(*assets_root / "weapons/rifle.cfg")) {
+        if (const auto parsed = game::parse_weapon_config(*text)) {
+            weapon_config = *parsed;
+        } else {
+            eng::log::warn("Weapon config parse failed; using built-in defaults");
+        }
+    }
+
     auto net = eng::NetHost::create_server(args.port, game::kMaxPlayers);
     if (!net) {
         return 1;
     }
 
-    game::ServerGame server{std::move(collision), std::move(spawns), kMapPath};
+    game::ServerGame server{std::move(collision), std::move(spawns), kMapPath, weapon_config};
 
     // --- fixed-tick headless loop ------------------------------------------
     eng::Clock clock;

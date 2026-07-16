@@ -1,8 +1,10 @@
 #include "game/server/server_game.h"
 
+#include <cmath>
 #include <utility>
 
 #include "engine/core/log.h"
+#include "game/shared/hitscan.h"
 
 namespace game {
 
@@ -22,8 +24,11 @@ std::vector<std::uint8_t> encode(const Message& message) {
 }  // namespace
 
 ServerGame::ServerGame(std::vector<std::pair<eng::MeshData, glm::mat4>> map_meshes,
-                       std::vector<glm::vec3> spawns, std::string map_name)
-    : spawns_(std::move(spawns)), map_name_(std::move(map_name)) {
+                       std::vector<glm::vec3> spawns, std::string map_name,
+                       WeaponConfig weapon_config)
+    : spawns_(std::move(spawns)),
+      map_name_(std::move(map_name)),
+      weapon_config_(std::move(weapon_config)) {
     for (const auto& [mesh, transform] : map_meshes) {
         world_.add_static_mesh(mesh, transform);
     }
@@ -125,6 +130,7 @@ void ServerGame::handle_hello(std::uint32_t peer, eng::ByteReader& reader, eng::
     const glm::vec3 spawn = spawns_[next_spawn_++ % spawns_.size()];
     player.state.position = spawn;
     player.controller = std::make_unique<eng::CharacterController>(world_, spawn);
+    player.weapon.ammo = weapon_config_.magazine_size;
     players_[*slot] = std::move(player);
 
     eng::log::info("Player {} '{}' joined (peer {})", *slot, hello->name, peer);
@@ -149,6 +155,16 @@ void ServerGame::handle_hello(std::uint32_t peer, eng::ByteReader& reader, eng::
             net.send(players_[i]->peer, joined, eng::NetChannel::Reliable, true);
         }
     }
+
+    // Bring the newcomer up to date: match state, all scores, their weapon.
+    net.send(peer, encode(match_state()), eng::NetChannel::Reliable, true);
+    for (std::uint8_t i = 0; i < kMaxPlayers; ++i) {
+        if (players_[i]) {
+            net.send(peer, encode(ScoreUpdateMsg{i, players_[i]->kills, players_[i]->deaths}),
+                     eng::NetChannel::Reliable, true);
+        }
+    }
+    send_weapon_status(*players_[*slot], net);
 }
 
 void ServerGame::handle_input(Player& player, eng::ByteReader& reader, eng::NetHost& net) {
@@ -192,15 +208,17 @@ void ServerGame::drop_player(std::uint8_t player_id, eng::NetHost& net) {
 
 void ServerGame::tick(eng::NetHost& net) {
     ++tick_;
+    update_match(net);
 
-    for (auto& slot : players_) {
-        if (!slot) {
+    for (std::uint8_t id = 0; id < kMaxPlayers; ++id) {
+        if (!players_[id]) {
             continue;
         }
-        Player& player = *slot;
+        Player& player = *players_[id];
 
         // Consume exactly one input per tick, in order. When starved (loss
         // or jitter), reuse the last command briefly, then fast-forward.
+        // Inputs are consumed even while dead so sequence acks keep flowing.
         const auto next = player.pending.find(player.last_processed_input + 1);
         InputCommand command = player.last_command;
         if (next != player.pending.end()) {
@@ -220,12 +238,36 @@ void ServerGame::tick(eng::NetHost& net) {
         player.view_yaw = command.yaw;
         player.view_pitch = command.pitch;
 
+        if (!player.alive) {
+            player.respawn_remaining -= kTickSeconds;
+            if (player.respawn_remaining <= 0.0f) {
+                respawn_player(id, net);
+            }
+            continue;
+        }
+
         advance_player(player.state, command, kTickSeconds, *player.controller, world_);
 
-        // Fell out of the world: respawn.
+        // Fell out of the world: counts as an environment death.
         if (player.state.position.y < -20.0f) {
-            player.state = {};
-            player.state.position = spawns_[next_spawn_++ % spawns_.size()];
+            kill_player(id, kNoPlayer, net);
+            continue;
+        }
+
+        // Weapon: entirely authoritative. Fire rate, ammo, and reload come
+        // from the deterministic shared state machine; a cheating client
+        // holding Fire every tick still fires at exactly the configured RPM.
+        if (phase_ == MatchPhase::Playing) {
+            const bool fire_held = has_button(command, Button::Fire);
+            const bool reload = has_button(command, Button::Reload);
+            const WeaponTickResult shot =
+                update_weapon(player.weapon, weapon_config_, fire_held, reload, kTickSeconds);
+            if (shot.fired) {
+                fire_hitscan(id, command, net);
+            }
+            if (shot.fired || shot.reload_started || shot.reload_finished) {
+                send_weapon_status(player, net);
+            }
         }
     }
 
@@ -257,7 +299,7 @@ void ServerGame::send_snapshots(eng::NetHost& net) {
         sp.velocity = p.state.velocity;
         sp.yaw = p.view_yaw;
         sp.pitch = p.view_pitch;
-        sp.flags = p.state.on_ground ? 1u : 0u;
+        sp.flags = (p.state.on_ground ? kFlagOnGround : 0u) | (p.alive ? kFlagAlive : 0u);
         everyone.push_back(sp);
     }
 
@@ -271,6 +313,151 @@ void ServerGame::send_snapshots(eng::NetHost& net) {
         snapshot.players = everyone;
         net.send(slot->peer, encode(snapshot), eng::NetChannel::Sequenced, false);
     }
+}
+
+// --- combat -----------------------------------------------------------------
+
+void ServerGame::broadcast_reliable(const std::vector<std::uint8_t>& data, eng::NetHost& net) {
+    for (const auto& player : players_) {
+        if (player) {
+            net.send(player->peer, data, eng::NetChannel::Reliable, true);
+        }
+    }
+}
+
+void ServerGame::send_weapon_status(const Player& player, eng::NetHost& net) {
+    net.send(player.peer,
+             encode(WeaponStatusMsg{static_cast<std::uint8_t>(player.weapon.ammo),
+                                    player.weapon.reloading()}),
+             eng::NetChannel::Reliable, true);
+}
+
+MatchStateMsg ServerGame::match_state() const {
+    MatchStateMsg m;
+    m.phase = phase_;
+    m.seconds_remaining = static_cast<std::uint16_t>(std::max(
+        0.0f, phase_ == MatchPhase::Playing ? match_remaining_ : restart_remaining_));
+    return m;
+}
+
+void ServerGame::fire_hitscan(std::uint8_t shooter_id, const InputCommand& command,
+                              eng::NetHost& net) {
+    Player& shooter = *players_[shooter_id];
+    const glm::vec3 eye =
+        shooter.state.position + glm::vec3{0.0f, kMove.eye_height, 0.0f};
+    const glm::vec3 dir = view_direction(command.yaw, command.pitch);
+
+    // World geometry bounds the shot.
+    float max_t = weapon_config_.range;
+    if (const auto wall = world_.raycast(eye, dir, weapon_config_.range)) {
+        max_t = wall->distance;
+    }
+
+    // Closest live player capsule within range (positions at the CURRENT
+    // tick; rewind-based lag compensation arrives in Milestone 9).
+    std::uint8_t hit_id = kNoPlayer;
+    float hit_t = max_t;
+    for (std::uint8_t id = 0; id < kMaxPlayers; ++id) {
+        if (id == shooter_id || !players_[id] || !players_[id]->alive) {
+            continue;
+        }
+        const auto& config = players_[id]->controller->config();
+        const auto t = ray_vertical_capsule(eye, dir, players_[id]->state.position,
+                                            config.radius, config.height);
+        if (t && *t < hit_t) {
+            hit_t = *t;
+            hit_id = id;
+        }
+    }
+
+    FireEventMsg event;
+    event.shooter = shooter_id;
+    event.from = eye;
+    event.to = eye + dir * hit_t;
+    event.hit_player = hit_id;
+    broadcast_reliable(encode(event), net);
+
+    if (hit_id != kNoPlayer) {
+        Player& victim = *players_[hit_id];
+        const bool died = apply_damage(victim.health, weapon_config_.damage);
+        broadcast_reliable(encode(PlayerDamagedMsg{hit_id, shooter_id, victim.health.current}),
+                           net);
+        if (died) {
+            kill_player(hit_id, shooter_id, net);
+        }
+    }
+}
+
+void ServerGame::kill_player(std::uint8_t victim_id, std::uint8_t killer_id, eng::NetHost& net) {
+    Player& victim = *players_[victim_id];
+    victim.alive = false;
+    victim.health.current = 0.0f;
+    victim.respawn_remaining = kRespawnSeconds;
+    victim.state.velocity = {0.0f, 0.0f, 0.0f};
+    ++victim.deaths;
+    if (killer_id != kNoPlayer && players_[killer_id]) {
+        ++players_[killer_id]->kills;
+        broadcast_reliable(
+            encode(ScoreUpdateMsg{killer_id, players_[killer_id]->kills,
+                                  players_[killer_id]->deaths}),
+            net);
+    }
+    broadcast_reliable(encode(PlayerDiedMsg{victim_id, killer_id}), net);
+    broadcast_reliable(encode(ScoreUpdateMsg{victim_id, victim.kills, victim.deaths}), net);
+    eng::log::info("Player {} '{}' killed by {}", victim_id, victim.name,
+                   killer_id == kNoPlayer ? -1 : static_cast<int>(killer_id));
+}
+
+void ServerGame::respawn_player(std::uint8_t player_id, eng::NetHost& net) {
+    Player& player = *players_[player_id];
+    const glm::vec3 spawn = spawns_[next_spawn_++ % spawns_.size()];
+    player.state = {};
+    player.state.position = spawn;
+    player.controller->set_position(spawn);
+    player.controller->set_velocity({0.0f, 0.0f, 0.0f});
+    reset_health(player.health);
+    player.weapon = {};
+    player.weapon.ammo = weapon_config_.magazine_size;
+    player.alive = true;
+    broadcast_reliable(encode(PlayerRespawnedMsg{player_id, spawn}), net);
+    send_weapon_status(player, net);
+}
+
+void ServerGame::update_match(eng::NetHost& net) {
+    if (phase_ == MatchPhase::Playing) {
+        match_remaining_ -= kTickSeconds;
+        if (match_remaining_ <= 0.0f) {
+            phase_ = MatchPhase::Ended;
+            restart_remaining_ = kMatchRestartSeconds;
+            broadcast_reliable(encode(match_state()), net);
+            eng::log::info("Match ended");
+        }
+    } else {
+        restart_remaining_ -= kTickSeconds;
+        if (restart_remaining_ <= 0.0f) {
+            restart_match(net);
+        }
+    }
+    // Periodic timer sync (1 Hz).
+    if (tick_ % 60 == 0) {
+        broadcast_reliable(encode(match_state()), net);
+    }
+}
+
+void ServerGame::restart_match(eng::NetHost& net) {
+    phase_ = MatchPhase::Playing;
+    match_remaining_ = kMatchSeconds;
+    for (std::uint8_t id = 0; id < kMaxPlayers; ++id) {
+        if (!players_[id]) {
+            continue;
+        }
+        players_[id]->kills = 0;
+        players_[id]->deaths = 0;
+        broadcast_reliable(encode(ScoreUpdateMsg{id, 0, 0}), net);
+        respawn_player(id, net);
+    }
+    broadcast_reliable(encode(match_state()), net);
+    eng::log::info("Match restarted");
 }
 
 }  // namespace game

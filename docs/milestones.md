@@ -239,7 +239,7 @@ stutter); smoothing corrections by snapping (jarring) or over-smoothing
 
 ---
 
-## Milestone 8 — Networked combat (stage 3)
+## Milestone 8 — Networked combat (stage 3) ✅
 
 **Objective:** Full authoritative deathmatch.
 

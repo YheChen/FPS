@@ -16,7 +16,7 @@
 // returning nullopt means "hostile or corrupt packet - drop it".
 namespace game {
 
-inline constexpr std::uint16_t kProtocolVersion = 1;
+inline constexpr std::uint16_t kProtocolVersion = 2;
 inline constexpr std::uint8_t kMaxPlayers = 8;
 inline constexpr std::size_t kMaxNameLength = 16;
 inline constexpr int kSnapshotDivisor = 3;  // 60 Hz ticks -> 20 Hz snapshots
@@ -31,7 +31,21 @@ enum class MessageType : std::uint8_t {
     PlayerLeft = 5,
     Input = 6,
     Snapshot = 7,
+    // Combat (stage 3), all server -> client, reliable:
+    FireEvent = 8,
+    PlayerDamaged = 9,
+    PlayerDied = 10,
+    PlayerRespawned = 11,
+    ScoreUpdate = 12,
+    MatchState = 13,
+    WeaponStatus = 14,
 };
+
+inline constexpr std::uint8_t kNoPlayer = 255;  // "no player" id (world/none)
+
+// Snapshot player flags.
+inline constexpr std::uint8_t kFlagOnGround = 1u << 0;
+inline constexpr std::uint8_t kFlagAlive = 1u << 1;
 
 enum class RejectReason : std::uint8_t {
     VersionMismatch = 1,
@@ -88,6 +102,53 @@ struct Snapshot {
     std::vector<SnapshotPlayer> players;     // <= kMaxPlayers
 };
 
+// A shot was fired (visuals/audio on every client). hit_player == kNoPlayer
+// means the shot hit world geometry or nothing.
+struct FireEventMsg {
+    std::uint8_t shooter = 0;
+    glm::vec3 from{0.0f};
+    glm::vec3 to{0.0f};
+    std::uint8_t hit_player = kNoPlayer;
+};
+
+struct PlayerDamagedMsg {
+    std::uint8_t victim = 0;
+    std::uint8_t attacker = 0;
+    float health = 0.0f;  // victim's health after the hit
+};
+
+struct PlayerDiedMsg {
+    std::uint8_t victim = 0;
+    std::uint8_t killer = 0;  // kNoPlayer for environment deaths
+};
+
+struct PlayerRespawnedMsg {
+    std::uint8_t player = 0;
+    glm::vec3 position{0.0f};
+};
+
+struct ScoreUpdateMsg {
+    std::uint8_t player = 0;
+    std::uint16_t kills = 0;
+    std::uint16_t deaths = 0;
+};
+
+enum class MatchPhase : std::uint8_t {
+    Playing = 1,
+    Ended = 2,
+};
+
+struct MatchStateMsg {
+    MatchPhase phase = MatchPhase::Playing;
+    std::uint16_t seconds_remaining = 0;
+};
+
+// Sent only to the owning player when their ammo/reload state changes.
+struct WeaponStatusMsg {
+    std::uint8_t ammo = 0;
+    bool reloading = false;
+};
+
 // --- encode ---------------------------------------------------------------
 void write(eng::ByteWriter& w, const ClientHello& m);
 void write(eng::ByteWriter& w, const ServerWelcome& m);
@@ -96,6 +157,13 @@ void write(eng::ByteWriter& w, const PlayerJoined& m);
 void write(eng::ByteWriter& w, const PlayerLeft& m);
 void write(eng::ByteWriter& w, const InputPacket& m);
 void write(eng::ByteWriter& w, const Snapshot& m);
+void write(eng::ByteWriter& w, const FireEventMsg& m);
+void write(eng::ByteWriter& w, const PlayerDamagedMsg& m);
+void write(eng::ByteWriter& w, const PlayerDiedMsg& m);
+void write(eng::ByteWriter& w, const PlayerRespawnedMsg& m);
+void write(eng::ByteWriter& w, const ScoreUpdateMsg& m);
+void write(eng::ByteWriter& w, const MatchStateMsg& m);
+void write(eng::ByteWriter& w, const WeaponStatusMsg& m);
 
 // --- decode (after the type byte has been consumed) -------------------------
 std::optional<ClientHello> read_client_hello(eng::ByteReader& r);
@@ -105,6 +173,13 @@ std::optional<PlayerJoined> read_player_joined(eng::ByteReader& r);
 std::optional<PlayerLeft> read_player_left(eng::ByteReader& r);
 std::optional<InputPacket> read_input_packet(eng::ByteReader& r);
 std::optional<Snapshot> read_snapshot(eng::ByteReader& r);
+std::optional<FireEventMsg> read_fire_event(eng::ByteReader& r);
+std::optional<PlayerDamagedMsg> read_player_damaged(eng::ByteReader& r);
+std::optional<PlayerDiedMsg> read_player_died(eng::ByteReader& r);
+std::optional<PlayerRespawnedMsg> read_player_respawned(eng::ByteReader& r);
+std::optional<ScoreUpdateMsg> read_score_update(eng::ByteReader& r);
+std::optional<MatchStateMsg> read_match_state(eng::ByteReader& r);
+std::optional<WeaponStatusMsg> read_weapon_status(eng::ByteReader& r);
 
 // Reads and validates the leading type byte.
 std::optional<MessageType> read_message_type(eng::ByteReader& r);

@@ -1,6 +1,10 @@
 #include "engine/assets/paths.h"
 
+#include <fstream>
+#include <sstream>
 #include <vector>
+
+#include "engine/core/log.h"
 
 namespace eng {
 
@@ -64,6 +68,17 @@ std::optional<std::filesystem::path> find_assets_root(const std::filesystem::pat
         dir = dir.parent_path();
     }
     return std::nullopt;
+}
+
+std::optional<std::string> read_text_file(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        log::error("Failed to open '{}'", path.string());
+        return std::nullopt;
+    }
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    return std::move(buffer).str();
 }
 
 }  // namespace eng

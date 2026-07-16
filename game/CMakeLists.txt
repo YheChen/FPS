@@ -1,9 +1,13 @@
 # Simulation code shared verbatim by client (prediction) and server
 # (authority). Headless-safe: links engine core only, never SDL/GL.
 add_library(game_shared STATIC
+    shared/health.h
+    shared/hitscan.h
     shared/input_command.h
     shared/player_movement.cpp
     shared/player_movement.h
+    shared/weapon.cpp
+    shared/weapon.h
 )
 add_library(fps::game_shared ALIAS game_shared)
 target_link_libraries(game_shared PUBLIC fps::engine)

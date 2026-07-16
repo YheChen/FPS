@@ -22,4 +22,7 @@ bool asset_path_escapes_root(std::string_view normalized);
 std::optional<std::filesystem::path> find_assets_root(
     const std::filesystem::path& start = std::filesystem::current_path());
 
+// Reads an entire file as text. nullopt (with an error log) on failure.
+std::optional<std::string> read_text_file(const std::filesystem::path& path);
+
 }  // namespace eng

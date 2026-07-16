@@ -12,6 +12,7 @@
 
 #include "engine/assets/asset_cache.h"
 #include "engine/assets/paths.h"
+#include "engine/audio/audio_engine.h"
 #include "engine/core/log.h"
 #include "engine/core/time.h"
 #include "engine/core/version.h"
@@ -29,8 +30,11 @@
 #include "engine/scene/scene.h"
 
 #include "game/client/fly_camera.h"
+#include "game/shared/health.h"
+#include "game/shared/hitscan.h"
 #include "game/shared/input_command.h"
 #include "game/shared/player_movement.h"
+#include "game/shared/weapon.h"
 
 namespace {
 
@@ -126,6 +130,25 @@ void draw_capsule(eng::DebugDraw& draw, const glm::vec3& feet, float radius, flo
     draw.line(feet, feet + glm::vec3{0.0f, height, 0.0f}, color);
 }
 
+// Shootable practice dummy. Rendered as a stretched cube, hit-tested as a
+// capsule (same math the networked players will use in Milestone 8).
+struct Target {
+    glm::vec3 home{0.0f};
+    glm::vec3 position{0.0f};
+    game::Health health;
+    float respawn_remaining = 0.0f;  // > 0 while dead
+    float patrol_radius = 0.0f;      // 0 = static
+    float patrol_phase = 0.0f;
+
+    bool alive() const { return respawn_remaining <= 0.0f; }
+};
+
+struct Tracer {
+    glm::vec3 from;
+    glm::vec3 to;
+    float ttl;
+};
+
 game::InputCommand make_command(const eng::InputState& input, float yaw, float pitch,
                                 std::uint32_t sequence) {
     game::InputCommand command;
@@ -190,6 +213,7 @@ int main(int argc, char** argv) {
 
     const eng::Texture2D white =
         eng::Texture2D::checkerboard(4, 1, {255, 255, 255}, {255, 255, 255});
+    const eng::GpuMesh cube = eng::GpuMesh::upload(eng::MeshData::unit_cube());
 
     eng::Scene scene;
     std::vector<glm::vec3> spawn_points;
@@ -222,6 +246,52 @@ int main(int argc, char** argv) {
     game::PlayerState player;
     player.position = spawn;
     game::PlayerState previous_player = player;
+
+    // --- gameplay: weapon, targets, audio ---------------------------------
+    auto audio = eng::AudioEngine::create();  // optional: game runs silent if it fails
+    const auto sound = [&](const char* name, float volume = 1.0f) {
+        if (audio) {
+            audio->play(*assets_root / "sounds" / name, volume);
+        }
+    };
+
+    game::WeaponConfig weapon_config;
+    if (const auto text = eng::read_text_file(*assets_root / "weapons/rifle.cfg")) {
+        if (const auto parsed = game::parse_weapon_config(*text)) {
+            weapon_config = *parsed;
+        } else {
+            eng::log::warn("Using built-in weapon defaults (config parse failed)");
+        }
+    }
+    game::WeaponState weapon;
+    weapon.ammo = weapon_config.magazine_size;
+
+    constexpr float kTargetRadius = 0.4f;
+    constexpr float kTargetHeight = 1.8f;
+    constexpr float kTargetRespawnSeconds = 3.0f;
+    std::vector<Target> targets = {
+        {.home = {8.0f, 0.0f, -14.0f}, .position = {}, .health = {50.0f, 50.0f}},
+        {.home = {-8.0f, 0.0f, -14.0f}, .position = {}, .health = {50.0f, 50.0f}},
+        {.home = {0.0f, 1.5f, 0.0f}, .position = {}, .health = {50.0f, 50.0f}},  // on platform
+        {.home = {12.0f, 0.0f, 6.0f},
+         .position = {},
+         .health = {50.0f, 50.0f},
+         .respawn_remaining = 0.0f,
+         .patrol_radius = 4.0f},
+        {.home = {-12.0f, 0.0f, 6.0f},
+         .position = {},
+         .health = {50.0f, 50.0f},
+         .respawn_remaining = 0.0f,
+         .patrol_radius = 4.0f,
+         .patrol_phase = 3.14f},
+    };
+    for (Target& target : targets) {
+        target.position = target.home;
+    }
+    int kills = 0;
+    int deaths = 0;
+    std::vector<Tracer> tracers;
+    double sim_time = 0.0;
 
     float view_yaw = 0.0f;
     float view_pitch = 0.0f;
@@ -274,14 +344,113 @@ int main(int argc, char** argv) {
                                     eng::Camera::kMaxPitchRadians);
         }
 
+        const bool reload_requested = input.was_pressed(eng::Key::R);
+        bool reload_consumed = false;
+
         step.advance(dt);
         while (step.consume_tick()) {
+            sim_time += game::kTickSeconds;
             previous_player = player;
-            if (!fly_mode) {
-                const game::InputCommand command =
-                    make_command(input, view_yaw, view_pitch, input_sequence++);
-                game::advance_player(player, command, game::kTickSeconds, controller, world);
+            if (fly_mode) {
+                continue;
             }
+            const game::InputCommand command =
+                make_command(input, view_yaw, view_pitch, input_sequence++);
+            const bool was_on_ground = player.on_ground;
+            game::advance_player(player, command, game::kTickSeconds, controller, world);
+            if (was_on_ground && !player.on_ground && player.velocity.y > 0.0f) {
+                sound("jump.wav", 0.5f);
+            }
+
+            // Fell out of the world -> count a death and respawn.
+            if (player.position.y < -20.0f) {
+                player = {};
+                player.position = spawn;
+                ++deaths;
+                sound("death.wav", 0.8f);
+            }
+
+            // --- weapon -------------------------------------------------
+            const bool fire_held =
+                game::has_button(command, game::Button::Fire) && window->relative_mouse();
+            const game::WeaponTickResult shot = game::update_weapon(
+                weapon, weapon_config, fire_held, reload_requested && !reload_consumed,
+                game::kTickSeconds);
+            reload_consumed = true;
+            if (shot.reload_started) {
+                sound("reload.wav");
+            }
+            if (shot.dry_fired) {
+                sound("dry.wav", 0.7f);
+            }
+            if (shot.fired) {
+                sound("fire.wav", 0.9f);
+                const glm::vec3 eye =
+                    player.position + glm::vec3{0.0f, game::kMove.eye_height, 0.0f};
+                eng::Camera aim;
+                aim.yaw = command.yaw;
+                aim.pitch = command.pitch;
+                const glm::vec3 dir = aim.forward();
+
+                // Wall distance bounds the shot; then find the closest target.
+                float max_t = weapon_config.range;
+                if (const auto wall = world.raycast(eye, dir, weapon_config.range)) {
+                    max_t = wall->distance;
+                }
+                Target* hit_target = nullptr;
+                float hit_t = max_t;
+                for (Target& target : targets) {
+                    if (!target.alive()) {
+                        continue;
+                    }
+                    const auto t = game::ray_vertical_capsule(eye, dir, target.position,
+                                                              kTargetRadius, kTargetHeight);
+                    if (t && *t < hit_t) {
+                        hit_t = *t;
+                        hit_target = &target;
+                    }
+                }
+                tracers.push_back({eye + dir * 0.4f - glm::vec3{0.0f, 0.06f, 0.0f},
+                                   eye + dir * hit_t, 0.08f});
+                if (hit_target != nullptr) {
+                    const float distance = hit_t;
+                    const float volume = std::clamp(1.2f - distance / 40.0f, 0.2f, 1.0f);
+                    if (game::apply_damage(hit_target->health, weapon_config.damage)) {
+                        hit_target->respawn_remaining = kTargetRespawnSeconds;
+                        ++kills;
+                        sound("kill.wav", volume);
+                    } else {
+                        sound("hit.wav", volume);
+                    }
+                }
+            }
+
+            // --- targets --------------------------------------------------
+            for (std::size_t t = 0; t < targets.size(); ++t) {
+                Target& target = targets[t];
+                if (!target.alive()) {
+                    target.respawn_remaining -= game::kTickSeconds;
+                    if (target.alive()) {
+                        game::reset_health(target.health);
+                        target.position = target.home;
+                    }
+                    continue;
+                }
+                if (target.patrol_radius > 0.0f) {
+                    const float phase =
+                        static_cast<float>(sim_time) * 0.8f + target.patrol_phase;
+                    target.position =
+                        target.home +
+                        glm::vec3{std::sin(phase) * target.patrol_radius, 0.0f, 0.0f};
+                }
+            }
+        }
+        for (Tracer& tracer : tracers) {
+            tracer.ttl -= static_cast<float>(dt);
+        }
+        std::erase_if(tracers, [](const Tracer& tracer) { return tracer.ttl <= 0.0f; });
+        if (audio) {
+            audio->update();
         }
 
         eng::Camera camera;
@@ -331,6 +500,26 @@ int main(int argc, char** argv) {
             }
         });
 
+        // Targets: stretched cubes colored by remaining health.
+        for (const Target& target : targets) {
+            if (!target.alive()) {
+                continue;
+            }
+            glm::mat4 model = glm::translate(
+                glm::mat4{1.0f}, target.position + glm::vec3{0.0f, kTargetHeight * 0.5f, 0.0f});
+            model = glm::scale(model, {kTargetRadius * 2.0f, kTargetHeight, kTargetRadius * 2.0f});
+            lit_shader->set_mat4("u_model", model);
+            lit_shader->set_mat3("u_normal_matrix", glm::mat3(glm::transpose(glm::inverse(model))));
+            const float hp = target.health.current / target.health.max;
+            lit_shader->set_vec3("u_tint", {0.9f, 0.15f + 0.6f * hp, 0.15f});
+            cube.draw();
+            ++draw_calls;
+        }
+
+        for (const Tracer& tracer : tracers) {
+            debug_draw->line(tracer.from, tracer.to, {1.0f, 0.9f, 0.4f});
+        }
+
         if (draw_physics) {
             draw_capsule(*debug_draw, player.position, controller.config().radius,
                          controller.config().height,
@@ -370,8 +559,42 @@ int main(int argc, char** argv) {
         ImGui::Text("on_ground: %s", player.on_ground ? "yes" : "no");
         ImGui::Checkbox("physics debug (F3)", &draw_physics);
         ImGui::Checkbox("fly mode (F1)", &fly_mode);
-        ImGui::TextDisabled("Esc: mouse capture | WASD+Space: move");
+        ImGui::TextDisabled("Esc: mouse capture | WASD+Space: move | LMB: fire | R: reload");
         ImGui::End();
+
+        // --- HUD ---------------------------------------------------------
+        if (!fly_mode) {
+            ImDrawList* overlay = ImGui::GetForegroundDrawList();
+            const ImVec2 center{ImGui::GetIO().DisplaySize.x * 0.5f,
+                                ImGui::GetIO().DisplaySize.y * 0.5f};
+            const ImU32 cross_color = IM_COL32(240, 240, 240, 220);
+            constexpr float kGap = 4.0f;
+            constexpr float kArm = 9.0f;
+            overlay->AddLine({center.x - kGap - kArm, center.y}, {center.x - kGap, center.y},
+                             cross_color, 2.0f);
+            overlay->AddLine({center.x + kGap, center.y}, {center.x + kGap + kArm, center.y},
+                             cross_color, 2.0f);
+            overlay->AddLine({center.x, center.y - kGap - kArm}, {center.x, center.y - kGap},
+                             cross_color, 2.0f);
+            overlay->AddLine({center.x, center.y + kGap}, {center.x, center.y + kGap + kArm},
+                             cross_color, 2.0f);
+
+            const ImVec2 display = ImGui::GetIO().DisplaySize;
+            ImGui::SetNextWindowPos({display.x * 0.5f, display.y - 20.0f}, ImGuiCond_Always,
+                                    {0.5f, 1.0f});
+            ImGui::Begin("##hud", nullptr,
+                         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                             ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBackground);
+            ImGui::SetWindowFontScale(1.6f);
+            if (weapon.reloading()) {
+                ImGui::Text("HP 100    RELOADING (%.1fs)    K %d / D %d",
+                            weapon.reload_remaining_seconds, kills, deaths);
+            } else {
+                ImGui::Text("HP 100    %d / %d    K %d / D %d", weapon.ammo,
+                            weapon_config.magazine_size, kills, deaths);
+            }
+            ImGui::End();
+        }
         imgui->end_frame();
 
         window->swap();

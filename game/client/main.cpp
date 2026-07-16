@@ -8,6 +8,8 @@
 #include <string_view>
 #include <vector>
 
+#include "engine/assets/asset_cache.h"
+#include "engine/assets/paths.h"
 #include "engine/core/log.h"
 #include "engine/core/time.h"
 #include "engine/core/version.h"
@@ -20,6 +22,7 @@
 #include "engine/rendering/gpu_mesh.h"
 #include "engine/rendering/shader.h"
 #include "engine/rendering/texture.h"
+#include "engine/scene/scene.h"
 
 #include "game/client/fly_camera.h"
 
@@ -27,8 +30,6 @@ namespace {
 
 constexpr double kTickRate = 60.0;
 
-// Blinn-Phong with one directional light. Built-in engine-style shader kept
-// inline until the asset system lands in Milestone 3.
 constexpr std::string_view kLitVertexSource = R"(#version 410 core
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec3 a_normal;
@@ -99,33 +100,12 @@ ClientArgs parse_args(int argc, char** argv) {
     return args;
 }
 
-struct SceneObject {
-    glm::vec3 position;
-    glm::vec3 scale;
-    glm::vec3 tint;
+// GPU-side copy of one glTF mesh: one GpuMesh per primitive plus its
+// material color.
+struct RenderPrimitive {
+    eng::GpuMesh gpu;
+    glm::vec3 color{1.0f};
 };
-
-std::vector<SceneObject> build_demo_scene() {
-    std::vector<SceneObject> objects;
-    // Ground slab.
-    objects.push_back({{0.0f, -0.5f, 0.0f}, {40.0f, 1.0f, 40.0f}, {0.85f, 0.85f, 0.9f}});
-    // Grid of cubes with varied tints and heights.
-    for (int x = -4; x <= 4; ++x) {
-        for (int z = -4; z <= 4; ++z) {
-            if (x == 0 && z == 0) {
-                continue;
-            }
-            const float height = 1.0f + static_cast<float>((x * x + z * z) % 5) * 0.4f;
-            objects.push_back({
-                {static_cast<float>(x) * 3.0f, height * 0.5f, static_cast<float>(z) * 3.0f},
-                {1.0f, height, 1.0f},
-                {0.4f + 0.06f * static_cast<float>(x + 4), 0.5f,
-                 0.4f + 0.06f * static_cast<float>(z + 4)},
-            });
-        }
-    }
-    return objects;
-}
 
 }  // namespace
 
@@ -140,23 +120,59 @@ int main(int argc, char** argv) {
         return 1;
     }
     auto imgui = eng::ImGuiLayer::create(*window);
-    if (!imgui) {
-        return 1;
-    }
     auto lit_shader = eng::Shader::create("lit", kLitVertexSource, kLitFragmentSource);
     auto debug_draw = eng::DebugDraw::create();
-    if (!lit_shader || !debug_draw) {
+    if (!imgui || !lit_shader || !debug_draw) {
         return 1;
     }
 
-    const eng::GpuMesh cube = eng::GpuMesh::upload(eng::MeshData::unit_cube());
-    const eng::Texture2D checker =
-        eng::Texture2D::checkerboard(256, 8, {220, 220, 220}, {130, 130, 140});
+    // --- assets ----------------------------------------------------------
+    const auto assets_root = eng::find_assets_root();
+    if (!assets_root) {
+        eng::log::error("Could not locate the assets/ directory; run from the repo or build tree");
+        return 1;
+    }
+    eng::AssetCache assets{*assets_root};
+    const eng::GltfModel* arena = assets.model("maps/arena01.glb");
+    if (arena == nullptr) {
+        return 1;
+    }
 
-    const std::vector<SceneObject> scene = build_demo_scene();
+    // Upload every glTF mesh primitive once; entities reference mesh indices.
+    std::vector<std::vector<RenderPrimitive>> render_meshes;
+    render_meshes.reserve(arena->meshes.size());
+    for (const eng::GltfMesh& mesh : arena->meshes) {
+        std::vector<RenderPrimitive> primitives;
+        for (const eng::GltfPrimitive& primitive : mesh.primitives) {
+            RenderPrimitive rp{eng::GpuMesh::upload(primitive.mesh), glm::vec3{1.0f}};
+            if (primitive.material >= 0) {
+                rp.color = glm::vec3(
+                    arena->materials[static_cast<std::size_t>(primitive.material)].base_color);
+            }
+            primitives.push_back(std::move(rp));
+        }
+        render_meshes.push_back(std::move(primitives));
+    }
+
+    // --- scene -------------------------------------------------------------
+    eng::Scene scene;
+    int spawn_markers = 0;
+    for (const eng::GltfNode& node : arena->nodes) {
+        const eng::EntityId id = scene.create(node.name);
+        eng::Entity* entity = scene.get(id);
+        entity->transform = eng::Transform::from_matrix(node.transform);
+        entity->mesh = node.mesh;
+        if (node.mesh < 0) {
+            ++spawn_markers;
+        }
+    }
+    eng::log::info("Scene: {} entities ({} markers)", scene.count(), spawn_markers);
+
+    const eng::Texture2D white = eng::Texture2D::checkerboard(4, 1, {255, 255, 255}, {255, 255, 255});
 
     game::FlyCamera fly;
-    fly.camera.position = {0.0f, 3.0f, 10.0f};
+    fly.camera.position = {0.0f, 6.0f, 18.0f};
+    fly.camera.pitch = -0.25f;
 
     eng::InputState input;
     eng::Clock clock;
@@ -166,9 +182,10 @@ int main(int argc, char** argv) {
     glEnable(GL_CULL_FACE);
     glEnable(GL_FRAMEBUFFER_SRGB);
 
-    // Frame time history for the debug graph.
     std::array<float, 240> frame_ms_history{};
     std::size_t frame_ms_cursor = 0;
+    eng::EntityId selected{};
+    bool show_markers = true;
 
     bool running = true;
     while (running) {
@@ -187,7 +204,7 @@ int main(int argc, char** argv) {
         fly.update(input, static_cast<float>(dt), window->relative_mouse());
         fly.camera.aspect = window->aspect();
 
-        // --- render ---------------------------------------------------
+        // --- render ----------------------------------------------------
         glViewport(0, 0, window->width_px(), window->height_px());
         glClearColor(0.055f, 0.07f, 0.09f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -199,29 +216,43 @@ int main(int argc, char** argv) {
         lit_shader->set_mat4("u_view_projection", view_projection);
         lit_shader->set_vec3("u_light_direction", glm::normalize(glm::vec3{-0.4f, -1.0f, -0.3f}));
         lit_shader->set_vec3("u_light_color", {1.0f, 0.97f, 0.9f});
-        lit_shader->set_vec3("u_ambient", {0.18f, 0.20f, 0.24f});
+        lit_shader->set_vec3("u_ambient", {0.20f, 0.22f, 0.26f});
         lit_shader->set_vec3("u_camera_pos", fly.camera.position);
         lit_shader->set_int("u_base_color", 0);
-        checker.bind(0);
+        white.bind(0);
 
-        for (const SceneObject& object : scene) {
-            glm::mat4 model = glm::translate(glm::mat4{1.0f}, object.position);
-            model = glm::scale(model, object.scale);
+        scene.each([&](eng::EntityId, eng::Entity& entity) {
+            if (!entity.visible || entity.mesh < 0) {
+                return;
+            }
+            const glm::mat4 model = entity.transform.to_matrix();
             lit_shader->set_mat4("u_model", model);
-            lit_shader->set_mat3("u_normal_matrix",
-                                 glm::mat3(glm::transpose(glm::inverse(model))));
-            lit_shader->set_vec3("u_tint", object.tint);
-            cube.draw();
-            ++draw_calls;
-        }
+            lit_shader->set_mat3("u_normal_matrix", glm::mat3(glm::transpose(glm::inverse(model))));
+            for (const RenderPrimitive& primitive :
+                 render_meshes[static_cast<std::size_t>(entity.mesh)]) {
+                lit_shader->set_vec3("u_tint", primitive.color * glm::vec3(entity.tint));
+                primitive.gpu.draw();
+                ++draw_calls;
+            }
+        });
 
         debug_draw->axes(glm::mat4{1.0f}, 2.0f);
+        if (show_markers) {
+            scene.each([&](eng::EntityId, eng::Entity& entity) {
+                if (entity.mesh < 0) {
+                    const glm::vec3 p = entity.transform.position;
+                    debug_draw->aabb(p - glm::vec3{0.3f, 0.0f, 0.3f}, p + glm::vec3{0.3f, 1.8f, 0.3f},
+                                     {1.0f, 0.8f, 0.1f});
+                }
+            });
+        }
         draw_calls += debug_draw->flush(view_projection) > 0 ? 1 : 0;
 
-        // --- debug UI ---------------------------------------------------
+        // --- debug UI ----------------------------------------------------
         imgui->begin_frame();
         frame_ms_history[frame_ms_cursor] = static_cast<float>(dt * 1000.0);
         frame_ms_cursor = (frame_ms_cursor + 1) % frame_ms_history.size();
+
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_FirstUseEver);
         ImGui::Begin("Debug");
         ImGui::Text("%.1f fps (%.2f ms)", ImGui::GetIO().Framerate,
@@ -230,11 +261,30 @@ int main(int argc, char** argv) {
                          static_cast<int>(frame_ms_history.size()),
                          static_cast<int>(frame_ms_cursor), nullptr, 0.0f, 33.3f, {220, 60});
         ImGui::Text("draw calls: %d", draw_calls);
-        ImGui::Text("ticks: %llu", static_cast<unsigned long long>(step.tick_count()));
-        ImGui::Text("cam: (%.1f, %.1f, %.1f) yaw %.2f pitch %.2f", fly.camera.position.x,
-                    fly.camera.position.y, fly.camera.position.z, fly.camera.yaw,
-                    fly.camera.pitch);
+        ImGui::Text("cam: (%.1f, %.1f, %.1f)", fly.camera.position.x, fly.camera.position.y,
+                    fly.camera.position.z);
+        ImGui::Checkbox("show spawn markers", &show_markers);
         ImGui::TextDisabled("Esc: toggle mouse capture");
+        ImGui::End();
+
+        ImGui::SetNextWindowPos({10, 240}, ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize({320, 380}, ImGuiCond_FirstUseEver);
+        ImGui::Begin("Entities");
+        scene.each([&](eng::EntityId id, eng::Entity& entity) {
+            const bool is_selected = id == selected;
+            if (ImGui::Selectable(entity.name.c_str(), is_selected)) {
+                selected = id;
+            }
+        });
+        ImGui::Separator();
+        if (eng::Entity* entity = scene.get(selected)) {
+            ImGui::Text("%s", entity->name.c_str());
+            ImGui::DragFloat3("position", &entity->transform.position.x, 0.1f);
+            ImGui::DragFloat3("scale", &entity->transform.scale.x, 0.1f, 0.01f, 100.0f);
+            ImGui::Checkbox("visible", &entity->visible);
+        } else {
+            ImGui::TextDisabled("select an entity");
+        }
         ImGui::End();
         imgui->end_frame();
 

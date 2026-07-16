@@ -50,3 +50,14 @@ target_include_directories(imgui SYSTEM PUBLIC
     ${imgui_SOURCE_DIR}/backends
 )
 target_link_libraries(imgui PUBLIC SDL3::SDL3)
+
+# --- cgltf (glTF 2.0 parser, header-only) ----------------------------------
+FetchContent_Declare(
+    cgltf
+    GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
+    GIT_TAG v1.14
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(cgltf)
+add_library(cgltf INTERFACE)
+target_include_directories(cgltf SYSTEM INTERFACE ${cgltf_SOURCE_DIR})

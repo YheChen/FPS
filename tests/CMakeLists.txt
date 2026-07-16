@@ -18,6 +18,9 @@ add_executable(engine_tests
     game/hitscan_tests.cpp
     game/player_movement_tests.cpp
     game/weapon_tests.cpp
+    net/byte_buffer_tests.cpp
+    net/protocol_tests.cpp
+    net/transport_tests.cpp
     rendering/camera_tests.cpp
     rendering/mesh_data_tests.cpp
     scene/scene_tests.cpp

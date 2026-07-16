@@ -6,6 +6,8 @@ add_library(game_shared STATIC
     shared/input_command.h
     shared/player_movement.cpp
     shared/player_movement.h
+    shared/protocol.cpp
+    shared/protocol.h
     shared/weapon.cpp
     shared/weapon.h
 )
@@ -16,6 +18,8 @@ fps_enable_sanitizers(game_shared)
 
 add_executable(fps_client
     client/main.cpp
+    client/net_client.cpp
+    client/net_client.h
 )
 target_link_libraries(fps_client PRIVATE fps::engine_platform fps::game_shared)
 fps_set_warnings(fps_client)
@@ -24,6 +28,8 @@ fps_enable_sanitizers(fps_client)
 # The dedicated server stays headless: engine core only, no SDL/GL.
 add_executable(fps_server
     server/main.cpp
+    server/server_game.cpp
+    server/server_game.h
 )
 target_link_libraries(fps_server PRIVATE fps::engine fps::game_shared)
 fps_set_warnings(fps_server)

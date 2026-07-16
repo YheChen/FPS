@@ -179,7 +179,7 @@ dependent fire rate (gate by tick, not wall clock).
 
 ---
 
-## Milestone 6 — Basic networking (stage 1)
+## Milestone 6 — Basic networking (stage 1) ✅
 
 **Objective:** Two clients see each other move via a dedicated server.
 

@@ -5,8 +5,10 @@
 #include <array>
 #include <charconv>
 #include <cmath>
+#include <deque>
 #include <numbers>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -30,6 +32,7 @@
 #include "engine/scene/scene.h"
 
 #include "game/client/fly_camera.h"
+#include "game/client/net_client.h"
 #include "game/shared/health.h"
 #include "game/shared/hitscan.h"
 #include "game/shared/input_command.h"
@@ -83,22 +86,49 @@ void main() {
 
 struct ClientArgs {
     std::optional<double> run_seconds;
+    std::optional<std::string> connect_host;  // online mode when set
+    std::uint16_t port = 7777;
+    std::string name = "player";
+    bool vsync = true;  // --no-vsync: automated multi-window runs must not
+                        // block on swap (macOS throttles occluded windows)
 };
 
 ClientArgs parse_args(int argc, char** argv) {
     ClientArgs args;
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg = argv[i];
-        if (arg == "--run-seconds" && i + 1 < argc) {
-            const std::string_view value = argv[++i];
-            double seconds = 0.0;
-            const auto [ptr, ec] =
-                std::from_chars(value.data(), value.data() + value.size(), seconds);
-            if (ec == std::errc{} && ptr == value.data() + value.size()) {
-                args.run_seconds = seconds;
-            } else {
-                eng::log::warn("Ignoring invalid --run-seconds value '{}'", value);
+        const auto next_value = [&]() -> std::optional<std::string_view> {
+            if (i + 1 < argc) {
+                return std::string_view{argv[++i]};
             }
+            return std::nullopt;
+        };
+        if (arg == "--run-seconds") {
+            if (const auto value = next_value()) {
+                double seconds = 0.0;
+                if (std::from_chars(value->data(), value->data() + value->size(), seconds).ec ==
+                    std::errc{}) {
+                    args.run_seconds = seconds;
+                }
+            }
+        } else if (arg == "--connect") {
+            if (const auto value = next_value()) {
+                args.connect_host = std::string(*value);
+            }
+        } else if (arg == "--port") {
+            if (const auto value = next_value()) {
+                std::uint16_t port = 0;
+                if (std::from_chars(value->data(), value->data() + value->size(), port).ec ==
+                    std::errc{}) {
+                    args.port = port;
+                }
+            }
+        } else if (arg == "--name") {
+            if (const auto value = next_value()) {
+                args.name = std::string(*value);
+            }
+        } else if (arg == "--no-vsync") {
+            args.vsync = false;
         } else {
             eng::log::warn("Unknown argument '{}'", arg);
         }
@@ -173,7 +203,8 @@ int main(int argc, char** argv) {
 
     const ClientArgs args = parse_args(argc, argv);
 
-    auto window = eng::Window::create({.title = "FPS", .width = 1280, .height = 720});
+    auto window =
+        eng::Window::create({.title = "FPS", .width = 1280, .height = 720, .vsync = args.vsync});
     if (!window) {
         return 1;
     }
@@ -293,6 +324,19 @@ int main(int argc, char** argv) {
     std::vector<Tracer> tracers;
     double sim_time = 0.0;
 
+    // --- networking (stage 1: raw snapshots, no prediction) ---------------
+    std::optional<game::NetClient> net;
+    if (args.connect_host) {
+        net = game::NetClient::connect(*args.connect_host, args.port, args.name);
+        if (!net) {
+            eng::log::error("Failed to start network client");
+            return 1;
+        }
+    }
+    const bool online = net.has_value();
+    std::deque<game::InputCommand> recent_commands;  // newest first
+    std::uint32_t client_tick = 0;
+
     float view_yaw = 0.0f;
     float view_pitch = 0.0f;
     std::uint32_t input_sequence = 0;
@@ -347,13 +391,39 @@ int main(int argc, char** argv) {
         const bool reload_requested = input.was_pressed(eng::Key::R);
         bool reload_consumed = false;
 
+        if (online) {
+            net->poll();
+        }
+
         step.advance(dt);
         while (step.consume_tick()) {
             sim_time += game::kTickSeconds;
+            ++client_tick;
             previous_player = player;
             if (fly_mode) {
                 continue;
             }
+
+            if (online) {
+                // Stage 1: send inputs, apply the authoritative position raw.
+                // Movement feels laggy by design until Milestone 7 adds
+                // prediction and interpolation.
+                const game::InputCommand command =
+                    make_command(input, view_yaw, view_pitch, input_sequence++);
+                recent_commands.push_front(command);
+                if (recent_commands.size() > 8) {
+                    recent_commands.pop_back();
+                }
+                net->send_input(recent_commands, client_tick);
+                if (const auto it = net->players().find(net->my_id());
+                    it != net->players().end() && net->state() == game::NetClient::State::InGame) {
+                    player.position = it->second.position;
+                    player.velocity = it->second.velocity;
+                    player.on_ground = it->second.on_ground;
+                }
+                continue;  // no local simulation, no offline gameplay
+            }
+
             const game::InputCommand command =
                 make_command(input, view_yaw, view_pitch, input_sequence++);
             const bool was_on_ground = player.on_ground;
@@ -500,6 +570,25 @@ int main(int argc, char** argv) {
             }
         });
 
+        // Remote players (online): capsule-sized cubes tinted per id.
+        if (online) {
+            for (const auto& [id, remote] : net->players()) {
+                if (id == net->my_id() || !remote.seen_in_snapshot) {
+                    continue;
+                }
+                glm::mat4 model = glm::translate(glm::mat4{1.0f},
+                                                 remote.position + glm::vec3{0.0f, 0.9f, 0.0f});
+                model = glm::scale(model, {0.8f, 1.8f, 0.8f});
+                lit_shader->set_mat4("u_model", model);
+                lit_shader->set_mat3("u_normal_matrix",
+                                     glm::mat3(glm::transpose(glm::inverse(model))));
+                lit_shader->set_vec3("u_tint", {0.3f + 0.2f * static_cast<float>(id % 4),
+                                                0.4f, 0.9f - 0.2f * static_cast<float>(id % 4)});
+                cube.draw();
+                ++draw_calls;
+            }
+        }
+
         // Targets: stretched cubes colored by remaining health.
         for (const Target& target : targets) {
             if (!target.alive()) {
@@ -557,6 +646,16 @@ int main(int argc, char** argv) {
                     player.velocity.z,
                     std::hypot(player.velocity.x, player.velocity.z));
         ImGui::Text("on_ground: %s", player.on_ground ? "yes" : "no");
+        if (online) {
+            ImGui::Separator();
+            ImGui::Text("net: %s | id %u | rtt %u ms", net->state_name(), net->my_id(),
+                        net->rtt_ms());
+            ImGui::Text("server tick %u | acked input %u", net->server_tick(),
+                        net->last_processed_input());
+            ImGui::Text("players %zu | rx %llu B tx %llu B", net->players().size(),
+                        static_cast<unsigned long long>(net->stats().bytes_received),
+                        static_cast<unsigned long long>(net->stats().bytes_sent));
+        }
         ImGui::Checkbox("physics debug (F3)", &draw_physics);
         ImGui::Checkbox("fly mode (F1)", &fly_mode);
         ImGui::TextDisabled("Esc: mouse capture | WASD+Space: move | LMB: fire | R: reload");

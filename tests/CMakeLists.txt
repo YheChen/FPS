@@ -15,11 +15,12 @@ add_executable(engine_tests
     core/log_tests.cpp
     core/time_tests.cpp
     core/version_tests.cpp
+    game/player_movement_tests.cpp
     rendering/camera_tests.cpp
     rendering/mesh_data_tests.cpp
     scene/scene_tests.cpp
 )
-target_link_libraries(engine_tests PRIVATE fps::engine Catch2::Catch2WithMain)
+target_link_libraries(engine_tests PRIVATE fps::engine fps::game_shared Catch2::Catch2WithMain)
 fps_set_warnings(engine_tests)
 fps_enable_sanitizers(engine_tests)
 

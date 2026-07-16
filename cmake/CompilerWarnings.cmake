@@ -23,7 +23,9 @@ function(fps_set_warnings target)
             -Wold-style-cast
             -Woverloaded-virtual
             -Wnull-dereference
-            -Wdouble-promotion
+            # -Wdouble-promotion is deliberately absent: printf-style APIs
+            # (ImGui::Text) promote float varargs to double by definition,
+            # which floods the build with unfixable warnings.
             -Wimplicit-fallthrough
         )
         if(FPS_WARNINGS_AS_ERRORS)

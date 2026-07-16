@@ -78,7 +78,8 @@ struct NetHost::Impl {
             return;
         }
         ENetPacket* packet =
-            enet_packet_create(data.data(), data.size(), reliable ? ENET_PACKET_FLAG_RELIABLE : 0u);
+            enet_packet_create(data.data(), data.size(),
+                               reliable ? static_cast<enet_uint32>(ENET_PACKET_FLAG_RELIABLE) : 0u);
         if (enet_peer_send(it->second, static_cast<enet_uint8>(channel), packet) != 0) {
             enet_packet_destroy(packet);
             return;

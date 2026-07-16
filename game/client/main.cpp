@@ -34,6 +34,8 @@
 #include "game/client/fly_camera.h"
 #include "game/client/net_client.h"
 #include "game/shared/health.h"
+#include "game/shared/interpolation.h"
+#include "game/shared/prediction.h"
 #include "game/shared/hitscan.h"
 #include "game/shared/input_command.h"
 #include "game/shared/player_movement.h"
@@ -91,6 +93,7 @@ struct ClientArgs {
     std::string name = "player";
     bool vsync = true;  // --no-vsync: automated multi-window runs must not
                         // block on swap (macOS throttles occluded windows)
+    eng::NetSimConfig net_sim;  // --fake-latency/--fake-jitter/--fake-loss
 };
 
 ClientArgs parse_args(int argc, char** argv) {
@@ -129,6 +132,21 @@ ClientArgs parse_args(int argc, char** argv) {
             }
         } else if (arg == "--no-vsync") {
             args.vsync = false;
+        } else if (arg == "--fake-latency") {
+            if (const auto value = next_value()) {
+                std::from_chars(value->data(), value->data() + value->size(),
+                                args.net_sim.latency_ms);
+            }
+        } else if (arg == "--fake-jitter") {
+            if (const auto value = next_value()) {
+                std::from_chars(value->data(), value->data() + value->size(),
+                                args.net_sim.jitter_ms);
+            }
+        } else if (arg == "--fake-loss") {
+            if (const auto value = next_value()) {
+                std::from_chars(value->data(), value->data() + value->size(),
+                                args.net_sim.loss_percent);
+            }
         } else {
             eng::log::warn("Unknown argument '{}'", arg);
         }
@@ -324,18 +342,32 @@ int main(int argc, char** argv) {
     std::vector<Tracer> tracers;
     double sim_time = 0.0;
 
-    // --- networking (stage 1: raw snapshots, no prediction) ---------------
+    // --- networking (stage 2: prediction + interpolation) -----------------
     std::optional<game::NetClient> net;
+    std::optional<game::Prediction> prediction;
     if (args.connect_host) {
         net = game::NetClient::connect(*args.connect_host, args.port, args.name);
         if (!net) {
             eng::log::error("Failed to start network client");
             return 1;
         }
+        // The client predicts on its OWN physics world with the shared
+        // movement code; the server remains authoritative.
+        prediction.emplace(world, spawn);
+        if (args.net_sim.enabled()) {
+            eng::log::warn("Network simulation active: {} ms +{} ms jitter, {:.1f}% loss",
+                           args.net_sim.latency_ms, args.net_sim.jitter_ms,
+                           args.net_sim.loss_percent);
+        }
     }
     const bool online = net.has_value();
     std::deque<game::InputCommand> recent_commands;  // newest first
     std::uint32_t client_tick = 0;
+    double remote_render_tick = -1.0;  // fractional server tick remote players render at
+    std::array<float, 240> prediction_error_history{};
+    std::size_t prediction_error_cursor = 0;
+    float last_reconcile_error = 0.0f;
+    eng::NetSimConfig sim_config = args.net_sim;
 
     float view_yaw = 0.0f;
     float view_pitch = 0.0f;
@@ -392,6 +424,7 @@ int main(int argc, char** argv) {
         bool reload_consumed = false;
 
         if (online) {
+            net->set_simulation(sim_config);
             net->poll();
         }
 
@@ -405,23 +438,19 @@ int main(int argc, char** argv) {
             }
 
             if (online) {
-                // Stage 1: send inputs, apply the authoritative position raw.
-                // Movement feels laggy by design until Milestone 7 adds
-                // prediction and interpolation.
+                // Predict locally with the shared movement code; the server
+                // corrects us via reconcile() below.
                 const game::InputCommand command =
                     make_command(input, view_yaw, view_pitch, input_sequence++);
+                prediction->tick(command);
                 recent_commands.push_front(command);
                 if (recent_commands.size() > 8) {
                     recent_commands.pop_back();
                 }
                 net->send_input(recent_commands, client_tick);
-                if (const auto it = net->players().find(net->my_id());
-                    it != net->players().end() && net->state() == game::NetClient::State::InGame) {
-                    player.position = it->second.position;
-                    player.velocity = it->second.velocity;
-                    player.on_ground = it->second.on_ground;
-                }
-                continue;  // no local simulation, no offline gameplay
+                player = prediction->state();
+                previous_player = prediction->previous_state();
+                continue;  // offline gameplay (targets/weapon) stays offline
             }
 
             const game::InputCommand command =
@@ -523,15 +552,51 @@ int main(int argc, char** argv) {
             audio->update();
         }
 
+        if (online) {
+            // Reconciliation: rewind to the authoritative state and replay
+            // unacked inputs.
+            if (const auto ack = net->take_self_ack()) {
+                const auto result = prediction->reconcile(ack->position, ack->velocity,
+                                                          ack->on_ground,
+                                                          ack->last_processed_input);
+                last_reconcile_error = result.error_meters;
+                prediction_error_history[prediction_error_cursor] = result.error_meters;
+                prediction_error_cursor =
+                    (prediction_error_cursor + 1) % prediction_error_history.size();
+                player = prediction->state();
+                previous_player = prediction->previous_state();
+                if (net->server_tick() % 300 < game::kSnapshotDivisor) {
+                    eng::log::debug(
+                        "net: rtt={}ms pred_err={:.4f}m pending={} interp_buffer_tick={:.1f}",
+                        net->rtt_ms(), result.error_meters, prediction->pending().size(),
+                        remote_render_tick);
+                }
+            }
+            prediction->update_smoothing(static_cast<float>(dt));
+
+            // Remote render time trails the newest snapshot; advance at tick
+            // rate and gently slew toward the target to absorb jitter.
+            const double target_tick =
+                static_cast<double>(net->server_tick()) - game::kInterpolationDelayTicks;
+            if (remote_render_tick < 0.0) {
+                remote_render_tick = target_tick;
+            } else {
+                remote_render_tick += dt * game::kTickRate;
+                remote_render_tick += (target_tick - remote_render_tick) * std::min(1.0, dt * 4.0);
+            }
+        }
+
         eng::Camera camera;
         if (fly_mode) {
             fly.update(input, static_cast<float>(dt), window->relative_mouse());
             camera = fly.camera;
         } else {
             const float alpha = static_cast<float>(step.alpha());
-            const glm::vec3 eye_pos =
-                glm::mix(previous_player.position, player.position, alpha) +
-                glm::vec3{0.0f, game::kMove.eye_height, 0.0f};
+            glm::vec3 eye_pos = glm::mix(previous_player.position, player.position, alpha) +
+                                glm::vec3{0.0f, game::kMove.eye_height, 0.0f};
+            if (online) {
+                eye_pos += prediction->smoothing_offset();
+            }
             camera.position = eye_pos;
             camera.yaw = view_yaw;
             camera.pitch = view_pitch;
@@ -570,14 +635,18 @@ int main(int argc, char** argv) {
             }
         });
 
-        // Remote players (online): capsule-sized cubes tinted per id.
+        // Remote players (online): interpolated ~100 ms in the past.
         if (online) {
             for (const auto& [id, remote] : net->players()) {
-                if (id == net->my_id() || !remote.seen_in_snapshot) {
+                if (id == net->my_id() || remote.history.empty()) {
+                    continue;
+                }
+                const auto pose = remote.history.sample(remote_render_tick);
+                if (!pose) {
                     continue;
                 }
                 glm::mat4 model = glm::translate(glm::mat4{1.0f},
-                                                 remote.position + glm::vec3{0.0f, 0.9f, 0.0f});
+                                                 pose->position + glm::vec3{0.0f, 0.9f, 0.0f});
                 model = glm::scale(model, {0.8f, 1.8f, 0.8f});
                 lit_shader->set_mat4("u_model", model);
                 lit_shader->set_mat3("u_normal_matrix",
@@ -650,11 +719,21 @@ int main(int argc, char** argv) {
             ImGui::Separator();
             ImGui::Text("net: %s | id %u | rtt %u ms", net->state_name(), net->my_id(),
                         net->rtt_ms());
-            ImGui::Text("server tick %u | acked input %u", net->server_tick(),
-                        net->last_processed_input());
+            ImGui::Text("server tick %u | acked input %u | pending %zu", net->server_tick(),
+                        net->last_processed_input(), prediction->pending().size());
             ImGui::Text("players %zu | rx %llu B tx %llu B", net->players().size(),
                         static_cast<unsigned long long>(net->stats().bytes_received),
                         static_cast<unsigned long long>(net->stats().bytes_sent));
+            ImGui::Text("prediction error: %.4f m", last_reconcile_error);
+            ImGui::PlotLines("pred err", prediction_error_history.data(),
+                             static_cast<int>(prediction_error_history.size()),
+                             static_cast<int>(prediction_error_cursor), nullptr, 0.0f, 0.5f,
+                             {220, 50});
+            if (ImGui::CollapsingHeader("network simulation")) {
+                ImGui::SliderInt("latency ms (one-way)", &sim_config.latency_ms, 0, 300);
+                ImGui::SliderInt("jitter ms", &sim_config.jitter_ms, 0, 100);
+                ImGui::SliderFloat("loss %%", &sim_config.loss_percent, 0.0f, 30.0f);
+            }
         }
         ImGui::Checkbox("physics debug (F3)", &draw_physics);
         ImGui::Checkbox("fly mode (F1)", &fly_mode);

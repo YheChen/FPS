@@ -65,8 +65,11 @@ void advance_player(PlayerState& state, const InputCommand& command, float dt,
     velocity = {horizontal.x, vertical, horizontal.y};
 
     // Sync the collision proxy to the authoritative state, then step it.
+    // refresh_ground makes the step a pure function of (position, velocity):
+    // without it, prediction replay would see stale internal contact state.
     controller.set_position(state.position);
     controller.set_velocity(velocity);
+    controller.refresh_ground(world);
     controller.update(world, dt, {0.0f, -config.gravity, 0.0f});
 
     state.position = controller.position();

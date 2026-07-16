@@ -10,20 +10,33 @@
 
 #include "engine/net/transport.h"
 #include "game/shared/input_command.h"
+#include "game/shared/interpolation.h"
 #include "game/shared/protocol.h"
 
-// Client-side connection state machine (networking stage 1: raw snapshot
-// application, no prediction or interpolation yet - that is Milestone 7).
+// Client-side connection state machine (networking stage 2: remote players
+// carry snapshot-interpolation history; the local player's authoritative
+// acks are surfaced for prediction reconciliation).
 namespace game {
 
 struct NetPlayer {
     std::string name;
-    glm::vec3 position{0.0f};
+    glm::vec3 position{0.0f};  // newest raw snapshot state
     glm::vec3 velocity{0.0f};
     float yaw = 0.0f;
     float pitch = 0.0f;
     bool on_ground = false;
     bool seen_in_snapshot = false;
+    SnapshotBuffer history;  // for interpolation (remote players)
+};
+
+// Authoritative state for the LOCAL player from the newest snapshot; input
+// to Prediction::reconcile.
+struct SelfAck {
+    glm::vec3 position{0.0f};
+    glm::vec3 velocity{0.0f};
+    bool on_ground = false;
+    std::uint32_t last_processed_input = 0;
+    std::uint32_t server_tick = 0;
 };
 
 class NetClient {
@@ -53,9 +66,14 @@ public:
     std::uint32_t last_processed_input() const { return last_processed_input_; }
     std::uint32_t rtt_ms() const { return net_.rtt_ms(server_peer_); }
     const eng::NetStats& stats() const { return net_.stats(); }
+    void set_simulation(const eng::NetSimConfig& config) { net_.set_simulation(config); }
 
     // All players by id, including the local one.
     const std::map<std::uint8_t, NetPlayer>& players() const { return players_; }
+
+    // Consumes the newest authoritative self state (nullopt if none arrived
+    // since the last call).
+    std::optional<SelfAck> take_self_ack();
 
 private:
     explicit NetClient(eng::NetHost net) : net_(std::move(net)) {}
@@ -70,6 +88,7 @@ private:
     std::uint32_t latest_server_tick_ = 0;
     std::uint32_t last_processed_input_ = 0;
     std::map<std::uint8_t, NetPlayer> players_;
+    std::optional<SelfAck> pending_self_ack_;
 };
 
 }  // namespace game

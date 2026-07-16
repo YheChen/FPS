@@ -68,6 +68,15 @@ glm::vec3 CharacterController::ground_normal() const {
     return from_jolt(impl_->character->GetGroundNormal());
 }
 
+void CharacterController::refresh_ground(PhysicsWorld& world) {
+    world.optimize();
+    JPH::PhysicsSystem& system = world.impl().system;
+    impl_->character->RefreshContacts(
+        system.GetDefaultBroadPhaseLayerFilter(phys_internal::layers::kMoving),
+        system.GetDefaultLayerFilter(phys_internal::layers::kMoving), {}, {},
+        world.impl().temp_allocator);
+}
+
 void CharacterController::update(PhysicsWorld& world, float dt, const glm::vec3& gravity) {
     world.optimize();  // ensure broadphase is valid before queries
 

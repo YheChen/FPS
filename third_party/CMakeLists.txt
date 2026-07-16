@@ -103,6 +103,11 @@ set(INTERPROCEDURAL_OPTIMIZATION OFF CACHE BOOL "" FORCE)
 # Jolt defaults to the static MSVC CRT (/MT); everything else here uses the
 # dynamic CRT, and mixing them is a link error.
 set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
+# Jolt disables RTTI by default; our translation units compile with RTTI and
+# reference typeinfo for Jolt classes they derive/instantiate - keep ABI
+# consistent or GNU ld fails with "undefined reference to typeinfo".
+set(CPP_RTTI_ENABLED ON CACHE BOOL "" FORCE)
+set(CPP_EXCEPTIONS_ENABLED ON CACHE BOOL "" FORCE)
 # SYSTEM (CMake >= 3.25): consumers see Jolt/glm headers as system includes,
 # so our warnings-as-errors never fires inside them (Jolt trips
 # -Wdouble-promotion, glm trips -Wsign-conversion on some compilers).

@@ -79,7 +79,7 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
                 my_id_ = welcome->player_id;
                 latest_server_tick_ = welcome->server_tick;
                 state_ = State::InGame;
-                players_[my_id_] = NetPlayer{.name = player_name_};
+                players_[my_id_].name = player_name_;
                 eng::log::info("Welcome: player {} on '{}' (tick {}, {} Hz / {} Hz snapshots)",
                                welcome->player_id, welcome->map, welcome->server_tick,
                                welcome->tick_rate, welcome->snapshot_rate);
@@ -96,7 +96,7 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
         }
         case MessageType::PlayerJoined: {
             if (const auto joined = read_player_joined(reader)) {
-                players_[joined->player_id] = NetPlayer{.name = joined->name};
+                players_[joined->player_id].name = joined->name;
                 eng::log::info("Player {} '{}' joined", joined->player_id, joined->name);
             }
             break;

@@ -44,12 +44,10 @@ struct NetStats {
 // real loss would not (ENet retransmits under the hood).
 struct NetSimConfig {
     int latency_ms = 0;
-    int jitter_ms = 0;        // uniform extra [0, jitter_ms]
+    int jitter_ms = 0;  // uniform extra [0, jitter_ms]
     float loss_percent = 0.0f;
 
-    bool enabled() const {
-        return latency_ms > 0 || jitter_ms > 0 || loss_percent > 0.0f;
-    }
+    bool enabled() const { return latency_ms > 0 || jitter_ms > 0 || loss_percent > 0.0f; }
 };
 
 class NetHost {

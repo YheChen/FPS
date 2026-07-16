@@ -11,8 +11,8 @@ using eng::log::Level;
 TEST_CASE("format_line produces timestamp, tag, and message", "[log]") {
     using namespace std::chrono;
     // 13:05:07.042 UTC on day zero of the epoch.
-    const auto timestamp =
-        std::chrono::system_clock::time_point{hours{13} + minutes{5} + seconds{7} + milliseconds{42}};
+    const auto timestamp = std::chrono::system_clock::time_point{hours{13} + minutes{5} +
+                                                                 seconds{7} + milliseconds{42}};
 
     const std::string line = eng::log::format_line(Level::Info, "hello world", timestamp);
 

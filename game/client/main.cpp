@@ -1,6 +1,6 @@
 #include <glad/gl.h>
-#include <glm/gtc/matrix_transform.hpp>
 #include <imgui.h>
+#include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
 #include <array>
@@ -38,11 +38,11 @@
 #include "game/client/fly_camera.h"
 #include "game/client/net_client.h"
 #include "game/shared/health.h"
-#include "game/shared/interpolation.h"
-#include "game/shared/prediction.h"
 #include "game/shared/hitscan.h"
 #include "game/shared/input_command.h"
+#include "game/shared/interpolation.h"
 #include "game/shared/player_movement.h"
+#include "game/shared/prediction.h"
 #include "game/shared/weapon.h"
 
 namespace {
@@ -95,12 +95,12 @@ struct ClientArgs {
     std::optional<std::string> connect_host;  // online mode when set
     std::uint16_t port = 7777;
     std::string name = "player";
-    bool vsync = true;  // --no-vsync: automated multi-window runs must not
-                        // block on swap (macOS throttles occluded windows)
+    bool vsync = true;          // --no-vsync: automated multi-window runs must not
+                                // block on swap (macOS throttles occluded windows)
     eng::NetSimConfig net_sim;  // --fake-latency/--fake-jitter/--fake-loss
     // Automated-verification hooks (harmless in normal play):
-    bool auto_fire = false;                 // hold the trigger every tick
-    std::optional<float> fixed_yaw;         // lock the view yaw (radians)
+    bool auto_fire = false;          // hold the trigger every tick
+    std::optional<float> fixed_yaw;  // lock the view yaw (radians)
 };
 
 ClientArgs parse_args(int argc, char** argv) {
@@ -587,10 +587,9 @@ int main(int argc, char** argv) {
                 if (recent_commands.size() > 8) {
                     recent_commands.pop_back();
                 }
-                net->send_input(recent_commands, client_tick,
-                                remote_render_tick > 0.0
-                                    ? static_cast<std::uint32_t>(remote_render_tick)
-                                    : 0u);
+                net->send_input(
+                    recent_commands, client_tick,
+                    remote_render_tick > 0.0 ? static_cast<std::uint32_t>(remote_render_tick) : 0u);
                 player = prediction->state();
                 previous_player = prediction->previous_state();
                 continue;  // offline gameplay (targets/weapon) stays offline
@@ -615,9 +614,9 @@ int main(int argc, char** argv) {
             // --- weapon -------------------------------------------------
             const bool fire_held =
                 game::has_button(command, game::Button::Fire) && window->relative_mouse();
-            const game::WeaponTickResult shot = game::update_weapon(
-                weapon, weapon_config, fire_held, reload_requested && !reload_consumed,
-                game::kTickSeconds);
+            const game::WeaponTickResult shot =
+                game::update_weapon(weapon, weapon_config, fire_held,
+                                    reload_requested && !reload_consumed, game::kTickSeconds);
             reload_consumed = true;
             if (shot.reload_started) {
                 sound("reload.wav");
@@ -652,8 +651,8 @@ int main(int argc, char** argv) {
                         hit_target = &target;
                     }
                 }
-                tracers.push_back({eye + dir * 0.4f - glm::vec3{0.0f, 0.06f, 0.0f},
-                                   eye + dir * hit_t, 0.08f});
+                tracers.push_back(
+                    {eye + dir * 0.4f - glm::vec3{0.0f, 0.06f, 0.0f}, eye + dir * hit_t, 0.08f});
                 if (hit_target != nullptr) {
                     const float distance = hit_t;
                     const float volume = std::clamp(1.2f - distance / 40.0f, 0.2f, 1.0f);
@@ -679,11 +678,9 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 if (target.patrol_radius > 0.0f) {
-                    const float phase =
-                        static_cast<float>(sim_time) * 0.8f + target.patrol_phase;
+                    const float phase = static_cast<float>(sim_time) * 0.8f + target.patrol_phase;
                     target.position =
-                        target.home +
-                        glm::vec3{std::sin(phase) * target.patrol_radius, 0.0f, 0.0f};
+                        target.home + glm::vec3{std::sin(phase) * target.patrol_radius, 0.0f, 0.0f};
                 }
             }
         }
@@ -734,9 +731,8 @@ int main(int argc, char** argv) {
             // Reconciliation: rewind to the authoritative state and replay
             // unacked inputs.
             if (const auto ack = net->take_self_ack()) {
-                const auto result = prediction->reconcile(ack->position, ack->velocity,
-                                                          ack->on_ground,
-                                                          ack->last_processed_input);
+                const auto result = prediction->reconcile(
+                    ack->position, ack->velocity, ack->on_ground, ack->last_processed_input);
                 last_reconcile_error = result.error_meters;
                 prediction_error_history[prediction_error_cursor] = result.error_meters;
                 prediction_error_cursor =
@@ -831,14 +827,14 @@ int main(int argc, char** argv) {
                 if (!pose || (pose->flags & game::kFlagAlive) == 0) {
                     continue;  // dead players are not drawn
                 }
-                glm::mat4 model = glm::translate(glm::mat4{1.0f},
-                                                 pose->position + glm::vec3{0.0f, 0.9f, 0.0f});
+                glm::mat4 model =
+                    glm::translate(glm::mat4{1.0f}, pose->position + glm::vec3{0.0f, 0.9f, 0.0f});
                 model = glm::scale(model, {0.8f, 1.8f, 0.8f});
                 lit_shader->set_mat4("u_model", model);
                 lit_shader->set_mat3("u_normal_matrix",
                                      glm::mat3(glm::transpose(glm::inverse(model))));
-                lit_shader->set_vec3("u_tint", {0.3f + 0.2f * static_cast<float>(id % 4),
-                                                0.4f, 0.9f - 0.2f * static_cast<float>(id % 4)});
+                lit_shader->set_vec3("u_tint", {0.3f + 0.2f * static_cast<float>(id % 4), 0.4f,
+                                                0.9f - 0.2f * static_cast<float>(id % 4)});
                 cube.draw();
                 ++draw_calls;
             }
@@ -865,10 +861,10 @@ int main(int argc, char** argv) {
         }
 
         if (draw_physics) {
-            draw_capsule(*debug_draw, player.position, controller.config().radius,
-                         controller.config().height,
-                         player.on_ground ? glm::vec3{0.2f, 1.0f, 0.3f}
-                                          : glm::vec3{1.0f, 0.6f, 0.1f});
+            draw_capsule(
+                *debug_draw, player.position, controller.config().radius,
+                controller.config().height,
+                player.on_ground ? glm::vec3{0.2f, 1.0f, 0.3f} : glm::vec3{1.0f, 0.6f, 0.1f});
             debug_draw->line(player.position, player.position + player.velocity * 0.3f,
                              {1.0f, 1.0f, 0.2f});
             // Aim ray from the eye.
@@ -893,9 +889,9 @@ int main(int argc, char** argv) {
             ImGui::SetNextWindowPos({display_size.x * 0.5f, display_size.y * 0.45f},
                                     ImGuiCond_Always, {0.5f, 0.5f});
             ImGui::SetNextWindowSize({420, 0}, ImGuiCond_Always);
-            ImGui::Begin("FPS", nullptr,
-                         ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-                             ImGuiWindowFlags_NoCollapse);
+            ImGui::Begin(
+                "FPS", nullptr,
+                ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
             ImGui::InputText("name", menu_name, sizeof(menu_name));
             ImGui::InputText("server address", menu_ip, sizeof(menu_ip));
 
@@ -959,8 +955,7 @@ int main(int argc, char** argv) {
         ImGui::Text("pos: (%.2f, %.2f, %.2f)", player.position.x, player.position.y,
                     player.position.z);
         ImGui::Text("vel: (%.2f, %.2f, %.2f) |h|=%.2f", player.velocity.x, player.velocity.y,
-                    player.velocity.z,
-                    std::hypot(player.velocity.x, player.velocity.z));
+                    player.velocity.z, std::hypot(player.velocity.x, player.velocity.z));
         ImGui::Text("on_ground: %s", player.on_ground ? "yes" : "no");
         if (online) {
             ImGui::Separator();

@@ -63,8 +63,8 @@ TEST_CASE("projection encodes the vertical field of view", "[camera]") {
     camera.fov_y_degrees = 90.0f;
     camera.aspect = 2.0f;
     const glm::mat4 p = camera.projection();
-    CHECK(p[1][1] == Approx(1.0f));         // 1/tan(45 deg)
-    CHECK(p[0][0] == Approx(0.5f));         // divided by aspect
+    CHECK(p[1][1] == Approx(1.0f));  // 1/tan(45 deg)
+    CHECK(p[0][0] == Approx(0.5f));  // divided by aspect
 }
 
 }  // namespace

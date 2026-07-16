@@ -18,8 +18,7 @@ public:
 
     // Procedural checkerboard, `cells` squares per side. Useful as a test
     // pattern and as the "missing texture" fallback.
-    static Texture2D checkerboard(int size_px, int cells, glm::u8vec3 color_a,
-                                  glm::u8vec3 color_b);
+    static Texture2D checkerboard(int size_px, int cells, glm::u8vec3 color_a, glm::u8vec3 color_b);
 
     ~Texture2D();
     Texture2D(Texture2D&& other) noexcept;

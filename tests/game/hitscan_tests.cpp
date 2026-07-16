@@ -70,7 +70,7 @@ TEST_CASE("damage and death transitions", "[health]") {
     CHECK_FALSE(game::apply_damage(health, 20.0f));  // 30 left
     CHECK_FALSE(game::apply_damage(health, 20.0f));  // 10 left
     CHECK(health.alive());
-    CHECK(game::apply_damage(health, 25.0f));        // dies exactly once
+    CHECK(game::apply_damage(health, 25.0f));  // dies exactly once
     CHECK_FALSE(health.alive());
     CHECK(health.current == 0.0f);
     CHECK_FALSE(game::apply_damage(health, 25.0f));  // dead stays dead

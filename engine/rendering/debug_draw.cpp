@@ -110,9 +110,18 @@ void DebugDraw::aabb(const glm::vec3& min, const glm::vec3& max, const glm::vec3
         {min.x, max.y, max.z},
     }};
     constexpr std::array<std::pair<int, int>, 12> edges = {{
-        {0, 1}, {1, 2}, {2, 3}, {3, 0},  // bottom
-        {4, 5}, {5, 6}, {6, 7}, {7, 4},  // top
-        {0, 4}, {1, 5}, {2, 6}, {3, 7},  // verticals
+        {0, 1},
+        {1, 2},
+        {2, 3},
+        {3, 0},  // bottom
+        {4, 5},
+        {5, 6},
+        {6, 7},
+        {7, 4},  // top
+        {0, 4},
+        {1, 5},
+        {2, 6},
+        {3, 7},  // verticals
     }};
     for (const auto& [a, b] : edges) {
         line(c[static_cast<std::size_t>(a)], c[static_cast<std::size_t>(b)], color);

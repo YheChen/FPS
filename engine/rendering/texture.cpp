@@ -12,8 +12,9 @@ namespace eng {
 Texture2D Texture2D::from_pixels(int width, int height, std::span<const std::uint8_t> pixels,
                                  bool srgb) {
     ENG_ASSERT(width > 0 && height > 0, "texture dimensions must be positive");
-    ENG_ASSERT(pixels.size() == static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4,
-               "pixel buffer size must be width*height*4 (RGBA8)");
+    ENG_ASSERT(
+        pixels.size() == static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4,
+        "pixel buffer size must be width*height*4 (RGBA8)");
 
     Texture2D texture;
     texture.width_ = width;
@@ -34,17 +35,16 @@ Texture2D Texture2D::from_pixels(int width, int height, std::span<const std::uin
 Texture2D Texture2D::checkerboard(int size_px, int cells, glm::u8vec3 color_a,
                                   glm::u8vec3 color_b) {
     ENG_ASSERT(size_px > 0 && cells > 0, "invalid checkerboard parameters");
-    std::vector<std::uint8_t> pixels(
-        static_cast<std::size_t>(size_px) * static_cast<std::size_t>(size_px) * 4);
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(size_px) *
+                                     static_cast<std::size_t>(size_px) * 4);
     const int cell_size = size_px / cells;
     for (int y = 0; y < size_px; ++y) {
         for (int x = 0; x < size_px; ++x) {
             const bool a = ((x / cell_size) + (y / cell_size)) % 2 == 0;
             const glm::u8vec3 color = a ? color_a : color_b;
-            const std::size_t i =
-                (static_cast<std::size_t>(y) * static_cast<std::size_t>(size_px) +
-                 static_cast<std::size_t>(x)) *
-                4;
+            const std::size_t i = (static_cast<std::size_t>(y) * static_cast<std::size_t>(size_px) +
+                                   static_cast<std::size_t>(x)) *
+                                  4;
             pixels[i + 0] = color.r;
             pixels[i + 1] = color.g;
             pixels[i + 2] = color.b;

@@ -55,8 +55,7 @@ struct NetHost::Impl {
     std::vector<DelayedEvent> delayed_in;
 
     std::chrono::steady_clock::time_point delivery_time() {
-        auto when = std::chrono::steady_clock::now() +
-                    std::chrono::milliseconds(sim.latency_ms);
+        auto when = std::chrono::steady_clock::now() + std::chrono::milliseconds(sim.latency_ms);
         if (sim.jitter_ms > 0) {
             std::uniform_int_distribution<int> jitter(0, sim.jitter_ms);
             when += std::chrono::milliseconds(jitter(rng));
@@ -78,8 +77,8 @@ struct NetHost::Impl {
         if (it == peers.end()) {
             return;
         }
-        ENetPacket* packet = enet_packet_create(data.data(), data.size(),
-                                                reliable ? ENET_PACKET_FLAG_RELIABLE : 0u);
+        ENetPacket* packet =
+            enet_packet_create(data.data(), data.size(), reliable ? ENET_PACKET_FLAG_RELIABLE : 0u);
         if (enet_peer_send(it->second, static_cast<enet_uint8>(channel), packet) != 0) {
             enet_packet_destroy(packet);
             return;
@@ -183,8 +182,8 @@ void NetHost::poll(std::vector<NetEvent>& out) {
                 NetEvent message;
                 message.type = NetEvent::Type::Message;
                 message.peer = peer_id_of(event.peer);
-                message.channel = event.channelID == 0 ? NetChannel::Reliable
-                                                       : NetChannel::Sequenced;
+                message.channel =
+                    event.channelID == 0 ? NetChannel::Reliable : NetChannel::Sequenced;
                 message.data.assign(event.packet->data,
                                     event.packet->data + event.packet->dataLength);
                 impl_->stats.bytes_received += event.packet->dataLength;
@@ -220,11 +219,8 @@ void NetHost::send(std::uint32_t peer, std::span<const std::uint8_t> data, NetCh
         if (impl_->should_drop(channel, reliable)) {
             return;
         }
-        impl_->delayed_out.push_back({impl_->delivery_time(),
-                                      peer,
-                                      {data.begin(), data.end()},
-                                      channel,
-                                      reliable});
+        impl_->delayed_out.push_back(
+            {impl_->delivery_time(), peer, {data.begin(), data.end()}, channel, reliable});
         return;
     }
     impl_->raw_send(peer, data, channel, reliable);

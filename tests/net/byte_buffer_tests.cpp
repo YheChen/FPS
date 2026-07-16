@@ -44,7 +44,7 @@ TEST_CASE("truncated reads fail and poison the reader", "[net]") {
     eng::ByteReader r{w.data()};
     CHECK(r.u32() == std::nullopt);  // needs 4, has 2
     CHECK_FALSE(r.ok());
-    CHECK(r.u8() == std::nullopt);   // poisoned: even a valid-size read fails
+    CHECK(r.u8() == std::nullopt);  // poisoned: even a valid-size read fails
     CHECK_FALSE(r.finished());
 }
 

@@ -9,8 +9,7 @@ namespace {
 
 // Wrap-aware angle interpolation (shortest arc).
 float lerp_angle(float a, float b, float t) {
-    const float delta =
-        std::remainder(b - a, 2.0f * std::numbers::pi_v<float>);
+    const float delta = std::remainder(b - a, 2.0f * std::numbers::pi_v<float>);
     return a + delta * t;
 }
 

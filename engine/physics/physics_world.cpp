@@ -44,8 +44,8 @@ PhysicsWorld::PhysicsWorld() {
     constexpr JPH::uint kBodyMutexes = 0;  // default
     constexpr JPH::uint kMaxBodyPairs = 2048;
     constexpr JPH::uint kMaxContacts = 2048;
-    impl_->system.Init(kMaxBodies, kBodyMutexes, kMaxBodyPairs, kMaxContacts,
-                       impl_->bp_layer_map, impl_->ovb_filter, impl_->olp_filter);
+    impl_->system.Init(kMaxBodies, kBodyMutexes, kMaxBodyPairs, kMaxContacts, impl_->bp_layer_map,
+                       impl_->ovb_filter, impl_->olp_filter);
     impl_->system.SetGravity(JPH::Vec3(0.0f, -20.0f, 0.0f));
 }
 
@@ -87,9 +87,9 @@ void PhysicsWorld::add_static_mesh(const MeshData& mesh, const glm::mat4& transf
 }
 
 void PhysicsWorld::add_static_box(const glm::vec3& center, const glm::vec3& half_extents) {
-    JPH::BodyCreationSettings body_settings(
-        new JPH::BoxShape(to_jolt(half_extents)), JPH::RVec3(to_jolt(center)),
-        JPH::Quat::sIdentity(), JPH::EMotionType::Static, kNonMoving);
+    JPH::BodyCreationSettings body_settings(new JPH::BoxShape(to_jolt(half_extents)),
+                                            JPH::RVec3(to_jolt(center)), JPH::Quat::sIdentity(),
+                                            JPH::EMotionType::Static, kNonMoving);
     const JPH::BodyID id = impl_->system.GetBodyInterface().CreateAndAddBody(
         body_settings, JPH::EActivation::DontActivate);
     impl_->bodies.push_back(id);

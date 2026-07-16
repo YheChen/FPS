@@ -129,9 +129,9 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
                 player.on_ground = (sp.flags & 1u) != 0;
                 player.seen_in_snapshot = true;
                 if (sp.player_id == my_id_) {
-                    pending_self_ack_ = SelfAck{sp.position, sp.velocity, player.on_ground,
-                                                snapshot->last_processed_input,
-                                                snapshot->server_tick};
+                    pending_self_ack_ =
+                        SelfAck{sp.position, sp.velocity, player.on_ground,
+                                snapshot->last_processed_input, snapshot->server_tick};
                 } else {
                     player.history.push(RemoteSample{snapshot->server_tick, sp.position, sp.yaw,
                                                      sp.pitch, sp.flags});

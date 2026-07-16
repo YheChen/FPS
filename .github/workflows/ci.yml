@@ -60,4 +60,5 @@ jobs:
 
       - name: clang-format check
         run: |
+          pip install clang-format==22.1.8
           find engine game tests -name '*.cpp' -o -name '*.h' | xargs clang-format --dry-run --Werror

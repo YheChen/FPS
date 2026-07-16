@@ -35,8 +35,7 @@ CharacterController::CharacterController(PhysicsWorld& world, const glm::vec3& f
     settings.mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), -config.radius);
 
     impl_->character = new JPH::CharacterVirtual(&settings, JPH::RVec3(to_jolt(feet_position)),
-                                                 JPH::Quat::sIdentity(), 0,
-                                                 &world.impl().system);
+                                                 JPH::Quat::sIdentity(), 0, &world.impl().system);
 }
 
 CharacterController::~CharacterController() = default;
@@ -60,8 +59,7 @@ void CharacterController::set_velocity(const glm::vec3& velocity) {
 }
 
 bool CharacterController::on_ground() const {
-    return impl_->character->GetGroundState() ==
-           JPH::CharacterBase::EGroundState::OnGround;
+    return impl_->character->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
 }
 
 glm::vec3 CharacterController::ground_normal() const {

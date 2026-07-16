@@ -66,13 +66,11 @@ void AudioEngine::play(const std::filesystem::path& path, float volume) {
         source = it->second.get();
     } else {
         auto loaded = std::make_unique<ma_sound>();
-        const ma_result result =
-            ma_sound_init_from_file(&impl_->engine, key.c_str(),
-                                    MA_SOUND_FLAG_DECODE | MA_SOUND_FLAG_NO_SPATIALIZATION,
-                                    nullptr, nullptr, loaded.get());
+        const ma_result result = ma_sound_init_from_file(
+            &impl_->engine, key.c_str(), MA_SOUND_FLAG_DECODE | MA_SOUND_FLAG_NO_SPATIALIZATION,
+            nullptr, nullptr, loaded.get());
         if (result != MA_SUCCESS) {
-            log::error("Audio: failed to load '{}' (ma_result {})", key,
-                       static_cast<int>(result));
+            log::error("Audio: failed to load '{}' (ma_result {})", key, static_cast<int>(result));
             return;
         }
         source = loaded.get();

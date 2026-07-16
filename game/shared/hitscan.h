@@ -42,11 +42,10 @@ inline std::optional<float> ray_sphere(const glm::vec3& origin, const glm::vec3&
 // (matches CharacterController). Analytic: infinite-cylinder intersection
 // clipped to the cylinder segment, plus the two cap spheres.
 inline std::optional<float> ray_vertical_capsule(const glm::vec3& origin,
-                                                 const glm::vec3& direction,
-                                                 const glm::vec3& feet, float radius,
-                                                 float height) {
-    const float y_bottom = feet.y + radius;          // bottom sphere center height
-    const float y_top = feet.y + height - radius;    // top sphere center height
+                                                 const glm::vec3& direction, const glm::vec3& feet,
+                                                 float radius, float height) {
+    const float y_bottom = feet.y + radius;        // bottom sphere center height
+    const float y_top = feet.y + height - radius;  // top sphere center height
     std::optional<float> best;
     const auto consider = [&best](std::optional<float> t) {
         if (t && (!best || *t < *best)) {

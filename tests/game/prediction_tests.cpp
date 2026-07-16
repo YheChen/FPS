@@ -59,9 +59,8 @@ TEST_CASE("prediction matches the server exactly on a clean network", "[predicti
 
         if (seq >= 5) {
             server.process(arena.world, sent[seq - 5]);
-            const auto result =
-                prediction.reconcile(server.state.position, server.state.velocity,
-                                     server.state.on_ground, server.last_processed);
+            const auto result = prediction.reconcile(server.state.position, server.state.velocity,
+                                                     server.state.on_ground, server.last_processed);
             max_error = std::max(max_error, result.error_meters);
         }
     }
@@ -103,8 +102,7 @@ TEST_CASE("huge corrections snap instead of smoothing", "[prediction]") {
     game::Prediction prediction{arena.world, {0.0f, 0.1f, 0.0f}};
     prediction.tick(forward_command(1));
 
-    const auto result =
-        prediction.reconcile({10.0f, 0.1f, 10.0f}, {0.0f, 0.0f, 0.0f}, true, 1);
+    const auto result = prediction.reconcile({10.0f, 0.1f, 10.0f}, {0.0f, 0.0f, 0.0f}, true, 1);
     CHECK(result.corrected);
     CHECK(result.error_meters > game::Prediction::kSnapThresholdMeters);
     CHECK(glm::length(prediction.smoothing_offset()) == 0.0f);

@@ -9,6 +9,13 @@
 // used against player/target hit volumes (the world itself uses Jolt rays).
 namespace game {
 
+// View direction from yaw/pitch (camera convention: yaw=0 faces -Z,
+// positive pitch looks up). Matches eng::Camera::forward.
+inline glm::vec3 view_direction(float yaw, float pitch) {
+    const float cp = std::cos(pitch);
+    return glm::normalize(glm::vec3{std::sin(yaw) * cp, std::sin(pitch), -std::cos(yaw) * cp});
+}
+
 // Distance along the (normalized) ray to the closest sphere intersection,
 // nullopt on miss or if the sphere is entirely behind the origin. An origin
 // inside the sphere hits at distance 0.

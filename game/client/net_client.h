@@ -75,6 +75,24 @@ public:
     // since the last call).
     std::optional<SelfAck> take_self_ack();
 
+    // --- combat state (server-authoritative) ---------------------------
+    struct Scores {
+        std::uint16_t kills = 0;
+        std::uint16_t deaths = 0;
+    };
+    const std::map<std::uint8_t, Scores>& scores() const { return scores_; }
+    float self_health() const { return self_health_; }
+    std::uint8_t self_ammo() const { return self_ammo_; }
+    bool self_reloading() const { return self_reloading_; }
+    bool self_alive() const { return self_alive_; }
+    MatchPhase match_phase() const { return match_phase_; }
+    std::uint16_t match_seconds() const { return match_seconds_; }
+
+    // Drained event queues (visuals/audio are the caller's job).
+    std::vector<FireEventMsg> take_fire_events();
+    std::vector<PlayerDiedMsg> take_death_events();
+    std::vector<PlayerRespawnedMsg> take_respawn_events();
+
 private:
     explicit NetClient(eng::NetHost net) : net_(std::move(net)) {}
 
@@ -89,6 +107,17 @@ private:
     std::uint32_t last_processed_input_ = 0;
     std::map<std::uint8_t, NetPlayer> players_;
     std::optional<SelfAck> pending_self_ack_;
+
+    std::map<std::uint8_t, Scores> scores_;
+    float self_health_ = 100.0f;
+    std::uint8_t self_ammo_ = 0;
+    bool self_reloading_ = false;
+    bool self_alive_ = true;
+    MatchPhase match_phase_ = MatchPhase::Playing;
+    std::uint16_t match_seconds_ = 0;
+    std::vector<FireEventMsg> fire_events_;
+    std::vector<PlayerDiedMsg> death_events_;
+    std::vector<PlayerRespawnedMsg> respawn_events_;
 };
 
 }  // namespace game

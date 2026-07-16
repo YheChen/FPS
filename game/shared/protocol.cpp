@@ -100,12 +100,64 @@ void write(eng::ByteWriter& w, const Snapshot& m) {
     }
 }
 
+void write(eng::ByteWriter& w, const FireEventMsg& m) {
+    w.u8(static_cast<std::uint8_t>(MessageType::FireEvent));
+    w.u8(m.shooter);
+    w.f32(m.from.x);
+    w.f32(m.from.y);
+    w.f32(m.from.z);
+    w.f32(m.to.x);
+    w.f32(m.to.y);
+    w.f32(m.to.z);
+    w.u8(m.hit_player);
+}
+
+void write(eng::ByteWriter& w, const PlayerDamagedMsg& m) {
+    w.u8(static_cast<std::uint8_t>(MessageType::PlayerDamaged));
+    w.u8(m.victim);
+    w.u8(m.attacker);
+    w.f32(m.health);
+}
+
+void write(eng::ByteWriter& w, const PlayerDiedMsg& m) {
+    w.u8(static_cast<std::uint8_t>(MessageType::PlayerDied));
+    w.u8(m.victim);
+    w.u8(m.killer);
+}
+
+void write(eng::ByteWriter& w, const PlayerRespawnedMsg& m) {
+    w.u8(static_cast<std::uint8_t>(MessageType::PlayerRespawned));
+    w.u8(m.player);
+    w.f32(m.position.x);
+    w.f32(m.position.y);
+    w.f32(m.position.z);
+}
+
+void write(eng::ByteWriter& w, const ScoreUpdateMsg& m) {
+    w.u8(static_cast<std::uint8_t>(MessageType::ScoreUpdate));
+    w.u8(m.player);
+    w.u16(m.kills);
+    w.u16(m.deaths);
+}
+
+void write(eng::ByteWriter& w, const MatchStateMsg& m) {
+    w.u8(static_cast<std::uint8_t>(MessageType::MatchState));
+    w.u8(static_cast<std::uint8_t>(m.phase));
+    w.u16(m.seconds_remaining);
+}
+
+void write(eng::ByteWriter& w, const WeaponStatusMsg& m) {
+    w.u8(static_cast<std::uint8_t>(MessageType::WeaponStatus));
+    w.u8(m.ammo);
+    w.u8(m.reloading ? 1u : 0u);
+}
+
 // --- decode -----------------------------------------------------------------
 
 std::optional<MessageType> read_message_type(eng::ByteReader& r) {
     const auto value = r.u8();
     if (!value || *value < static_cast<std::uint8_t>(MessageType::ClientHello) ||
-        *value > static_cast<std::uint8_t>(MessageType::Snapshot)) {
+        *value > static_cast<std::uint8_t>(MessageType::WeaponStatus)) {
         return std::nullopt;
     }
     return static_cast<MessageType>(*value);
@@ -233,6 +285,95 @@ std::optional<Snapshot> read_snapshot(eng::ByteReader& r) {
         return std::nullopt;
     }
     return m;
+}
+
+namespace {
+
+bool valid_player_or_none(std::uint8_t id) {
+    return id < kMaxPlayers || id == kNoPlayer;
+}
+
+}  // namespace
+
+std::optional<FireEventMsg> read_fire_event(eng::ByteReader& r) {
+    FireEventMsg m;
+    const auto shooter = r.u8();
+    const auto fx = r.f32();
+    const auto fy = r.f32();
+    const auto fz = r.f32();
+    const auto tx = r.f32();
+    const auto ty = r.f32();
+    const auto tz = r.f32();
+    const auto hit = r.u8();
+    if (!shooter || *shooter >= kMaxPlayers || !fx || !fy || !fz || !tx || !ty || !tz || !hit ||
+        !valid_player_or_none(*hit) || !r.finished()) {
+        return std::nullopt;
+    }
+    m.shooter = *shooter;
+    m.from = {*fx, *fy, *fz};
+    m.to = {*tx, *ty, *tz};
+    m.hit_player = *hit;
+    return m;
+}
+
+std::optional<PlayerDamagedMsg> read_player_damaged(eng::ByteReader& r) {
+    const auto victim = r.u8();
+    const auto attacker = r.u8();
+    const auto health = r.f32();
+    if (!victim || *victim >= kMaxPlayers || !attacker || !valid_player_or_none(*attacker) ||
+        !health || *health < 0.0f || *health > 1000.0f || !r.finished()) {
+        return std::nullopt;
+    }
+    return PlayerDamagedMsg{*victim, *attacker, *health};
+}
+
+std::optional<PlayerDiedMsg> read_player_died(eng::ByteReader& r) {
+    const auto victim = r.u8();
+    const auto killer = r.u8();
+    if (!victim || *victim >= kMaxPlayers || !killer || !valid_player_or_none(*killer) ||
+        !r.finished()) {
+        return std::nullopt;
+    }
+    return PlayerDiedMsg{*victim, *killer};
+}
+
+std::optional<PlayerRespawnedMsg> read_player_respawned(eng::ByteReader& r) {
+    const auto player = r.u8();
+    const auto x = r.f32();
+    const auto y = r.f32();
+    const auto z = r.f32();
+    if (!player || *player >= kMaxPlayers || !x || !y || !z || !r.finished()) {
+        return std::nullopt;
+    }
+    return PlayerRespawnedMsg{*player, {*x, *y, *z}};
+}
+
+std::optional<ScoreUpdateMsg> read_score_update(eng::ByteReader& r) {
+    const auto player = r.u8();
+    const auto kills = r.u16();
+    const auto deaths = r.u16();
+    if (!player || *player >= kMaxPlayers || !kills || !deaths || !r.finished()) {
+        return std::nullopt;
+    }
+    return ScoreUpdateMsg{*player, *kills, *deaths};
+}
+
+std::optional<MatchStateMsg> read_match_state(eng::ByteReader& r) {
+    const auto phase = r.u8();
+    const auto seconds = r.u16();
+    if (!phase || *phase < 1 || *phase > 2 || !seconds || !r.finished()) {
+        return std::nullopt;
+    }
+    return MatchStateMsg{static_cast<MatchPhase>(*phase), *seconds};
+}
+
+std::optional<WeaponStatusMsg> read_weapon_status(eng::ByteReader& r) {
+    const auto ammo = r.u8();
+    const auto reloading = r.u8();
+    if (!ammo.has_value() || !reloading || *reloading > 1 || !r.finished()) {
+        return std::nullopt;
+    }
+    return WeaponStatusMsg{*ammo, *reloading == 1};
 }
 
 }  // namespace game

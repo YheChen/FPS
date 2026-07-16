@@ -1,6 +1,7 @@
 #include "game/client/net_client.h"
 
 #include <algorithm>
+#include <utility>
 
 #include "engine/core/log.h"
 
@@ -138,10 +139,76 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
             }
             break;
         }
+        case MessageType::FireEvent: {
+            if (const auto m = read_fire_event(reader)) {
+                fire_events_.push_back(*m);
+            }
+            break;
+        }
+        case MessageType::PlayerDamaged: {
+            if (const auto m = read_player_damaged(reader)) {
+                if (m->victim == my_id_) {
+                    self_health_ = m->health;
+                }
+            }
+            break;
+        }
+        case MessageType::PlayerDied: {
+            if (const auto m = read_player_died(reader)) {
+                if (m->victim == my_id_) {
+                    self_alive_ = false;
+                    self_health_ = 0.0f;
+                }
+                death_events_.push_back(*m);
+            }
+            break;
+        }
+        case MessageType::PlayerRespawned: {
+            if (const auto m = read_player_respawned(reader)) {
+                if (m->player == my_id_) {
+                    self_alive_ = true;
+                    self_health_ = 100.0f;
+                }
+                respawn_events_.push_back(*m);
+            }
+            break;
+        }
+        case MessageType::ScoreUpdate: {
+            if (const auto m = read_score_update(reader)) {
+                scores_[m->player] = {m->kills, m->deaths};
+            }
+            break;
+        }
+        case MessageType::MatchState: {
+            if (const auto m = read_match_state(reader)) {
+                match_phase_ = m->phase;
+                match_seconds_ = m->seconds_remaining;
+            }
+            break;
+        }
+        case MessageType::WeaponStatus: {
+            if (const auto m = read_weapon_status(reader)) {
+                self_ammo_ = m->ammo;
+                self_reloading_ = m->reloading;
+            }
+            break;
+        }
         case MessageType::ClientHello:
         case MessageType::Input:
             break;  // client-to-server only; a server sending these is broken
     }
+}
+
+std::vector<FireEventMsg> NetClient::take_fire_events() {
+    return std::exchange(fire_events_, {});
+}
+
+std::vector<PlayerDiedMsg> NetClient::take_death_events() {
+    return std::exchange(death_events_, {});
+}
+
+std::vector<PlayerRespawnedMsg> NetClient::take_respawn_events() {
+    return std::exchange(respawn_events_, {});
 }
 
 std::optional<SelfAck> NetClient::take_self_ack() {

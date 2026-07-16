@@ -26,6 +26,9 @@ public:
     // Reclaims finished sound instances. Call once per frame.
     void update();
 
+    // Master volume multiplier (0..1) applied to all sounds.
+    void set_master_volume(float volume);
+
 private:
     AudioEngine();
     struct Impl;

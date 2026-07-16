@@ -16,7 +16,7 @@
 // returning nullopt means "hostile or corrupt packet - drop it".
 namespace game {
 
-inline constexpr std::uint16_t kProtocolVersion = 2;
+inline constexpr std::uint16_t kProtocolVersion = 3;
 inline constexpr std::uint8_t kMaxPlayers = 8;
 inline constexpr std::size_t kMaxNameLength = 16;
 inline constexpr int kSnapshotDivisor = 3;  // 60 Hz ticks -> 20 Hz snapshots
@@ -84,6 +84,11 @@ struct PlayerLeft {
 struct InputPacket {
     std::uint32_t newest_sequence = 0;
     std::uint32_t client_tick = 0;
+    // The server tick the client was RENDERING remote players at when these
+    // commands were made (its interpolation render tick). Drives server-side
+    // rewind for hitscan lag compensation; clamped by the server to
+    // [current - kMaxRewindTicks, current]. 0 = no estimate yet.
+    std::uint32_t view_tick = 0;
     std::vector<InputCommand> commands;  // 1..kInputRedundancy, seq filled on read
 };
 

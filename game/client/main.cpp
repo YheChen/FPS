@@ -6,7 +6,10 @@
 #include <array>
 #include <charconv>
 #include <cmath>
+#include <cstring>
 #include <deque>
+#include <format>
+#include <fstream>
 #include <numbers>
 #include <optional>
 #include <string>
@@ -216,6 +219,72 @@ struct KillFeedEntry {
     float ttl;
 };
 
+// User preferences persisted next to the executable's working directory.
+struct Settings {
+    float sensitivity = 0.002f;  // radians per pixel
+    float fov_degrees = 70.0f;
+    float volume = 1.0f;
+    std::string name = "player";
+    std::string last_ip = "127.0.0.1";
+};
+
+constexpr const char* kSettingsFile = "fps_settings.cfg";
+
+Settings load_settings() {
+    Settings s;
+    const auto text = eng::read_text_file(kSettingsFile);
+    if (!text) {
+        return s;  // first run
+    }
+    std::string_view rest = *text;
+    while (!rest.empty()) {
+        const std::size_t nl = rest.find('\n');
+        std::string_view line = rest.substr(0, nl);
+        rest = (nl == std::string_view::npos) ? std::string_view{} : rest.substr(nl + 1);
+        const std::size_t eq = line.find('=');
+        if (eq == std::string_view::npos) {
+            continue;
+        }
+        const std::string_view key = line.substr(0, eq);
+        const std::string_view value = line.substr(eq + 1);
+        const auto to_float = [&](float& out) {
+            std::from_chars(value.data(), value.data() + value.size(), out);
+        };
+        if (key == "sensitivity") {
+            to_float(s.sensitivity);
+        } else if (key == "fov") {
+            to_float(s.fov_degrees);
+        } else if (key == "volume") {
+            to_float(s.volume);
+        } else if (key == "name" && !value.empty() && value.size() <= game::kMaxNameLength) {
+            s.name = std::string(value);
+        } else if (key == "last_ip" && !value.empty() && value.size() < 64) {
+            s.last_ip = std::string(value);
+        }
+    }
+    s.sensitivity = std::clamp(s.sensitivity, 0.0002f, 0.02f);
+    s.fov_degrees = std::clamp(s.fov_degrees, 50.0f, 120.0f);
+    s.volume = std::clamp(s.volume, 0.0f, 1.0f);
+    return s;
+}
+
+void save_settings(const Settings& s) {
+    std::string out = std::format("sensitivity={}\nfov={}\nvolume={}\nname={}\nlast_ip={}\n",
+                                  s.sensitivity, s.fov_degrees, s.volume, s.name, s.last_ip);
+    std::ofstream file(kSettingsFile, std::ios::binary | std::ios::trunc);
+    if (file) {
+        file << out;
+    } else {
+        eng::log::warn("Could not save settings to {}", kSettingsFile);
+    }
+}
+
+enum class Mode : std::uint8_t {
+    Menu,     // main menu over an orbiting arena view
+    Offline,  // practice range (targets)
+    Online,   // connected to a server
+};
+
 game::InputCommand make_command(const eng::InputState& input, float yaw, float pitch,
                                 std::uint32_t sequence) {
     game::InputCommand command;
@@ -361,11 +430,26 @@ int main(int argc, char** argv) {
     std::vector<Tracer> tracers;
     double sim_time = 0.0;
 
-    // --- networking (stage 2: prediction + interpolation) -----------------
+    // --- settings, menu state, networking ---------------------------------
+    Settings settings = load_settings();
+    if (args.name != "player") {
+        settings.name = args.name;  // CLI overrides the saved name
+    }
+    if (audio) {
+        audio->set_master_volume(settings.volume);
+    }
+
     std::optional<game::NetClient> net;
     std::optional<game::Prediction> prediction;
+    Mode mode = Mode::Menu;
+    std::string menu_error;
+    char menu_name[17]{};
+    char menu_ip[64]{};
+    std::snprintf(menu_name, sizeof(menu_name), "%s", settings.name.c_str());
+    std::snprintf(menu_ip, sizeof(menu_ip), "%s", settings.last_ip.c_str());
+
     if (args.connect_host) {
-        net = game::NetClient::connect(*args.connect_host, args.port, args.name);
+        net = game::NetClient::connect(*args.connect_host, args.port, settings.name);
         if (!net) {
             eng::log::error("Failed to start network client");
             return 1;
@@ -373,13 +457,16 @@ int main(int argc, char** argv) {
         // The client predicts on its OWN physics world with the shared
         // movement code; the server remains authoritative.
         prediction.emplace(world, spawn);
+        mode = Mode::Online;
         if (args.net_sim.enabled()) {
             eng::log::warn("Network simulation active: {} ms +{} ms jitter, {:.1f}% loss",
                            args.net_sim.latency_ms, args.net_sim.jitter_ms,
                            args.net_sim.loss_percent);
         }
+    } else if (args.run_seconds) {
+        mode = Mode::Offline;  // automated runs go straight to the range
     }
-    const bool online = net.has_value();
+    bool online = mode == Mode::Online;
     std::deque<game::InputCommand> recent_commands;  // newest first
     std::uint32_t client_tick = 0;
     double remote_render_tick = -1.0;  // fractional server tick remote players render at
@@ -410,7 +497,7 @@ int main(int argc, char** argv) {
     eng::Clock clock;
     eng::FixedTimestep step{1.0 / game::kTickRate};
 
-    window->set_relative_mouse(true);
+    window->set_relative_mouse(mode != Mode::Menu);
 
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
@@ -424,7 +511,7 @@ int main(int argc, char** argv) {
         if (!window->poll(input, &*imgui)) {
             running = false;
         }
-        if (input.was_pressed(eng::Key::Escape)) {
+        if (input.was_pressed(eng::Key::Escape) && mode != Mode::Menu) {
             window->set_relative_mouse(!window->relative_mouse());
         }
         if (input.was_pressed(eng::Key::F1)) {
@@ -439,10 +526,9 @@ int main(int argc, char** argv) {
 
         // View angles update every render frame for minimal aim latency;
         // simulation consumes the latest angles at each fixed tick.
-        if (window->relative_mouse() && !fly_mode) {
-            constexpr float kSensitivity = 0.002f;
-            view_yaw += input.mouse_dx() * kSensitivity;
-            view_pitch -= input.mouse_dy() * kSensitivity;
+        if (window->relative_mouse() && !fly_mode && mode != Mode::Menu) {
+            view_yaw += input.mouse_dx() * settings.sensitivity;
+            view_pitch -= input.mouse_dy() * settings.sensitivity;
             view_pitch = std::clamp(view_pitch, -eng::Camera::kMaxPitchRadians,
                                     eng::Camera::kMaxPitchRadians);
         }
@@ -453,6 +539,21 @@ int main(int argc, char** argv) {
         if (online) {
             net->set_simulation(sim_config);
             net->poll();
+            // Server gone or refused us: back to the menu.
+            if (net->state() == game::NetClient::State::Disconnected ||
+                net->state() == game::NetClient::State::Rejected) {
+                menu_error = net->state() == game::NetClient::State::Rejected
+                                 ? "server rejected the connection"
+                                 : "disconnected from server";
+                net.reset();
+                prediction.reset();
+                online = false;
+                mode = Mode::Menu;
+                kill_feed.clear();
+                recent_commands.clear();
+                remote_render_tick = -1.0;
+                window->set_relative_mouse(false);
+            }
         }
 
         step.advance(dt);
@@ -460,7 +561,7 @@ int main(int argc, char** argv) {
             sim_time += game::kTickSeconds;
             ++client_tick;
             previous_player = player;
-            if (fly_mode) {
+            if (fly_mode || mode == Mode::Menu) {
                 continue;
             }
 
@@ -486,7 +587,10 @@ int main(int argc, char** argv) {
                 if (recent_commands.size() > 8) {
                     recent_commands.pop_back();
                 }
-                net->send_input(recent_commands, client_tick);
+                net->send_input(recent_commands, client_tick,
+                                remote_render_tick > 0.0
+                                    ? static_cast<std::uint32_t>(remote_render_tick)
+                                    : 0u);
                 player = prediction->state();
                 previous_player = prediction->previous_state();
                 continue;  // offline gameplay (targets/weapon) stays offline
@@ -661,7 +765,14 @@ int main(int argc, char** argv) {
         }
 
         eng::Camera camera;
-        if (fly_mode) {
+        if (mode == Mode::Menu) {
+            // Slow orbit around the arena behind the menu.
+            const float angle = static_cast<float>(clock.elapsed()) * 0.15f;
+            camera.position = {std::sin(angle) * 24.0f, 12.0f, std::cos(angle) * 24.0f};
+            const glm::vec3 to_center = glm::normalize(-camera.position);
+            camera.yaw = std::atan2(to_center.x, -to_center.z);
+            camera.pitch = std::asin(to_center.y);
+        } else if (fly_mode) {
             fly.update(input, static_cast<float>(dt), window->relative_mouse());
             camera = fly.camera;
         } else {
@@ -676,6 +787,7 @@ int main(int argc, char** argv) {
             camera.pitch = view_pitch;
         }
         camera.aspect = window->aspect();
+        camera.fov_y_degrees = settings.fov_degrees;
 
         // --- render -----------------------------------------------------
         glViewport(0, 0, window->width_px(), window->height_px());
@@ -774,6 +886,67 @@ int main(int argc, char** argv) {
         imgui->begin_frame();
         frame_ms_history[frame_ms_cursor] = static_cast<float>(dt * 1000.0);
         frame_ms_cursor = (frame_ms_cursor + 1) % frame_ms_history.size();
+
+        // --- main menu ---------------------------------------------------
+        if (mode == Mode::Menu) {
+            const ImVec2 display_size = ImGui::GetIO().DisplaySize;
+            ImGui::SetNextWindowPos({display_size.x * 0.5f, display_size.y * 0.45f},
+                                    ImGuiCond_Always, {0.5f, 0.5f});
+            ImGui::SetNextWindowSize({420, 0}, ImGuiCond_Always);
+            ImGui::Begin("FPS", nullptr,
+                         ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                             ImGuiWindowFlags_NoCollapse);
+            ImGui::InputText("name", menu_name, sizeof(menu_name));
+            ImGui::InputText("server address", menu_ip, sizeof(menu_ip));
+
+            const auto start_session = [&](Mode next) {
+                settings.name = menu_name[0] != '\0' ? menu_name : "player";
+                settings.last_ip = menu_ip;
+                save_settings(settings);
+                menu_error.clear();
+                player = {};
+                player.position = spawn;
+                previous_player = player;
+                controller.set_position(spawn);
+                controller.set_velocity({0.0f, 0.0f, 0.0f});
+                view_yaw = 0.0f;
+                view_pitch = 0.0f;
+                input_sequence = 0;
+                mode = next;
+                online = next == Mode::Online;
+                window->set_relative_mouse(true);
+            };
+
+            if (ImGui::Button("Connect", {200, 0})) {
+                net = game::NetClient::connect(menu_ip, args.port, menu_name);
+                if (net) {
+                    prediction.emplace(world, spawn);
+                    start_session(Mode::Online);
+                } else {
+                    menu_error = "could not start a connection (bad address?)";
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Practice offline", {200, 0})) {
+                start_session(Mode::Offline);
+            }
+            if (!menu_error.empty()) {
+                ImGui::TextColored({1.0f, 0.4f, 0.4f, 1.0f}, "%s", menu_error.c_str());
+            }
+
+            ImGui::SeparatorText("settings");
+            ImGui::SliderFloat("sensitivity", &settings.sensitivity, 0.0005f, 0.01f, "%.4f");
+            ImGui::SliderFloat("field of view", &settings.fov_degrees, 50.0f, 120.0f, "%.0f");
+            if (ImGui::SliderFloat("volume", &settings.volume, 0.0f, 1.0f) && audio) {
+                audio->set_master_volume(settings.volume);
+            }
+
+            ImGui::Separator();
+            if (ImGui::Button("Quit")) {
+                running = false;
+            }
+            ImGui::End();
+        }
 
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_FirstUseEver);
         ImGui::Begin("Debug");
@@ -895,7 +1068,7 @@ int main(int argc, char** argv) {
         }
 
         // --- HUD ---------------------------------------------------------
-        if (!fly_mode) {
+        if (!fly_mode && mode != Mode::Menu) {
             ImDrawList* overlay = ImGui::GetForegroundDrawList();
             const ImVec2 center{ImGui::GetIO().DisplaySize.x * 0.5f,
                                 ImGui::GetIO().DisplaySize.y * 0.5f};
@@ -956,6 +1129,9 @@ int main(int argc, char** argv) {
         }
     }
 
+    settings.name = menu_name[0] != '\0' ? menu_name : settings.name;
+    settings.last_ip = menu_ip[0] != '\0' ? menu_ip : settings.last_ip;
+    save_settings(settings);
     eng::log::info("FPS client shutting down cleanly");
     return 0;
 }

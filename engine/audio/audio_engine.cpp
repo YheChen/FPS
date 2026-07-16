@@ -90,6 +90,12 @@ void AudioEngine::play(const std::filesystem::path& path, float volume) {
     impl_->playing.push_back(std::move(instance));
 }
 
+void AudioEngine::set_master_volume(float volume) {
+    if (impl_->engine_ready) {
+        ma_engine_set_volume(&impl_->engine, volume);
+    }
+}
+
 void AudioEngine::update() {
     std::erase_if(impl_->playing, [](const std::unique_ptr<ma_sound>& sound) {
         if (ma_sound_at_end(sound.get()) != 0) {

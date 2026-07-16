@@ -75,6 +75,7 @@ void write(eng::ByteWriter& w, const InputPacket& m) {
     w.u8(static_cast<std::uint8_t>(MessageType::Input));
     w.u32(m.newest_sequence);
     w.u32(m.client_tick);
+    w.u32(m.view_tick);
     w.u8(static_cast<std::uint8_t>(m.commands.size()));
     for (const InputCommand& c : m.commands) {
         write_command_body(w, c);
@@ -223,8 +224,10 @@ std::optional<InputPacket> read_input_packet(eng::ByteReader& r) {
     InputPacket m;
     const auto newest = r.u32();
     const auto client_tick = r.u32();
+    const auto view_tick = r.u32();
     const auto count = r.u8();
-    if (!newest || !client_tick || !count || *count == 0 || *count > kInputRedundancy) {
+    if (!newest || !client_tick || !view_tick || !count || *count == 0 ||
+        *count > kInputRedundancy) {
         return std::nullopt;
     }
     if (*newest + 1 < static_cast<std::uint32_t>(*count)) {
@@ -232,6 +235,7 @@ std::optional<InputPacket> read_input_packet(eng::ByteReader& r) {
     }
     m.newest_sequence = *newest;
     m.client_tick = *client_tick;
+    m.view_tick = *view_tick;
     for (std::uint8_t i = 0; i < *count; ++i) {
         auto command = read_command_body(r);
         if (!command) {

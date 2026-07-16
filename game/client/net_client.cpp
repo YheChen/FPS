@@ -218,13 +218,14 @@ std::optional<SelfAck> NetClient::take_self_ack() {
 }
 
 void NetClient::send_input(const std::deque<InputCommand>& recent_newest_first,
-                           std::uint32_t client_tick) {
+                           std::uint32_t client_tick, std::uint32_t view_tick) {
     if (state_ != State::InGame || recent_newest_first.empty()) {
         return;
     }
     InputPacket packet;
     packet.newest_sequence = recent_newest_first.front().sequence;
     packet.client_tick = client_tick;
+    packet.view_tick = view_tick;
     const std::size_t count = std::min(recent_newest_first.size(), kInputRedundancy);
     // Wire order is oldest -> newest.
     for (std::size_t i = count; i-- > 0;) {

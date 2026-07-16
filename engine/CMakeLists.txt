@@ -7,6 +7,12 @@
 #                      rendering and debug UI. Client-only.
 
 add_library(engine STATIC
+    assets/asset_cache.cpp
+    assets/asset_cache.h
+    assets/gltf_loader.cpp
+    assets/gltf_loader.h
+    assets/paths.cpp
+    assets/paths.h
     core/assert.h
     core/log.cpp
     core/log.h
@@ -20,6 +26,10 @@ add_library(engine STATIC
     rendering/camera.h
     rendering/mesh_data.cpp
     rendering/mesh_data.h
+    scene/scene.cpp
+    scene/scene.h
+    scene/transform.cpp
+    scene/transform.h
 )
 add_library(fps::engine ALIAS engine)
 
@@ -27,7 +37,10 @@ add_library(fps::engine ALIAS engine)
 # root is the repository root.
 target_include_directories(engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
-target_link_libraries(engine PUBLIC glm::glm)
+target_link_libraries(engine
+    PUBLIC glm::glm
+    PRIVATE cgltf
+)
 
 target_compile_definitions(engine
     PRIVATE ENG_VERSION_STRING="${PROJECT_VERSION}"

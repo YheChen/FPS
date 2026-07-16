@@ -12,6 +12,7 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
     GIT_TAG release-3.2.16
     GIT_SHALLOW TRUE
+    SYSTEM
 )
 FetchContent_MakeAvailable(SDL3)
 
@@ -69,6 +70,7 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/lsalzman/enet.git
     GIT_TAG v1.3.18
     GIT_SHALLOW TRUE
+    SYSTEM
 )
 FetchContent_MakeAvailable(enet)
 target_include_directories(enet SYSTEM PUBLIC ${enet_SOURCE_DIR}/include)

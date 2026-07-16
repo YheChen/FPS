@@ -119,7 +119,7 @@ import); texture color-space bugs (sRGB for albedo, linear for data maps).
 
 ---
 
-## Milestone 4 — Physics and FPS character controller
+## Milestone 4 — Physics and FPS character controller ✅
 
 **Objective:** Jolt-backed collision and a responsive first-person
 controller.

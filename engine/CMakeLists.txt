@@ -20,6 +20,11 @@ add_library(engine STATIC
     core/time.h
     core/version.cpp
     core/version.h
+    physics/character_controller.cpp
+    physics/character_controller.h
+    physics/physics_internal.h
+    physics/physics_world.cpp
+    physics/physics_world.h
     platform/input.cpp
     platform/input.h
     rendering/camera.cpp
@@ -39,7 +44,7 @@ target_include_directories(engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
 target_link_libraries(engine
     PUBLIC glm::glm
-    PRIVATE cgltf
+    PRIVATE cgltf Jolt
 )
 
 target_compile_definitions(engine

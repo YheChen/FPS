@@ -151,7 +151,7 @@ controller update fixed-timestep.
 
 ---
 
-## Milestone 5 — Offline FPS prototype
+## Milestone 5 — Offline FPS prototype ✅
 
 **Objective:** The complete single-player game loop: shoot, damage, die,
 respawn — all offline. This is the vertical slice before networking.

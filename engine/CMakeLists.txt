@@ -57,6 +57,8 @@ fps_set_warnings(engine)
 fps_enable_sanitizers(engine)
 
 add_library(engine_platform STATIC
+    audio/audio_engine.cpp
+    audio/audio_engine.h
     debug/imgui_layer.cpp
     debug/imgui_layer.h
     platform/window.cpp
@@ -76,7 +78,7 @@ add_library(fps::engine_platform ALIAS engine_platform)
 
 target_link_libraries(engine_platform
     PUBLIC fps::engine glad imgui
-    PRIVATE SDL3::SDL3
+    PRIVATE SDL3::SDL3 miniaudio
 )
 
 fps_set_warnings(engine_platform)

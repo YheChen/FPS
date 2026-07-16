@@ -62,6 +62,20 @@ FetchContent_MakeAvailable(cgltf)
 add_library(cgltf INTERFACE)
 target_include_directories(cgltf SYSTEM INTERFACE ${cgltf_SOURCE_DIR})
 
+# --- miniaudio (audio playback, header-only) --------------------------------
+FetchContent_Declare(
+    miniaudio
+    GIT_REPOSITORY https://github.com/mackron/miniaudio.git
+    GIT_TAG 0.11.21
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(miniaudio)
+add_library(miniaudio INTERFACE)
+target_include_directories(miniaudio SYSTEM INTERFACE ${miniaudio_SOURCE_DIR})
+if(UNIX AND NOT APPLE)
+    target_link_libraries(miniaudio INTERFACE ${CMAKE_DL_LIBS} pthread m)
+endif()
+
 # --- Jolt Physics -----------------------------------------------------------
 set(TARGET_UNIT_TESTS OFF CACHE BOOL "" FORCE)
 set(TARGET_HELLO_WORLD OFF CACHE BOOL "" FORCE)

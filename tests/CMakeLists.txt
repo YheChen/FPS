@@ -15,7 +15,9 @@ add_executable(engine_tests
     core/log_tests.cpp
     core/time_tests.cpp
     core/version_tests.cpp
+    game/hitscan_tests.cpp
     game/player_movement_tests.cpp
+    game/weapon_tests.cpp
     rendering/camera_tests.cpp
     rendering/mesh_data_tests.cpp
     scene/scene_tests.cpp

@@ -293,3 +293,38 @@ server tick, bandwidth < 20 kB/s per client, no sanitizer findings.
 **Failure modes:** unbounded rewind (trusting client timestamps blindly);
 lag comp before M7 correctness is proven; polish scope creep — the list
 above is the ceiling, not the floor.
+
+---
+
+## Milestone 10 — Web browser deployment
+
+Goal: play in a browser at a URL, no download. Built in three slices.
+
+### M10a — WebSocket server transport ✅
+
+**Objective:** the dedicated server accepts browser-compatible clients over
+WebSockets, alongside native ENet clients, in one match.
+
+**Deliverables:** `eng::IServerTransport` interface extracted from the ENet
+`NetHost`; `eng::WebSocketHost` — a dependency-free RFC 6455 `ws://` server
+(hand-rolled SHA-1/base64 handshake, masked-frame parser, ping/pong/close,
+cross-platform socket shim); `eng::CompositeTransport` that fans one
+`ServerGame` over several transports and keeps peer ids globally unique
+(child index tagged into the top 8 bits). Server flags `--ws-port` and
+`--no-enet`. WebSockets are reliable-ordered, so both protocol channels map
+to reliable sends (measure whether TCP jitter matters before adding WebRTC).
+
+**Verification:** `tools/ws_smoke.py` (stdlib-only WS client) does a live
+`ClientHello → ServerWelcome` round-trip; composite id-routing unit tests;
+live run with a native ENet client and a WS client joining the same server
+(distinct global ids, both simulated). 75 unit tests.
+
+### M10b — Emscripten WASM client (next)
+
+Port the client to WebAssembly: `emscripten_set_main_loop`, WebGL2 shader
+variants, a browser-WebSocket transport, preloaded assets, Pointer Lock.
+
+### M10c — Deploy
+
+Static WASM client on Vercel; Caddy on the VM terminating `wss://` TLS in
+front of the plain `ws://` server; systemd units; `docs/deploy.md`.

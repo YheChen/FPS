@@ -39,10 +39,10 @@ public:
                std::vector<glm::vec3> spawns, std::string map_name, WeaponConfig weapon_config);
 
     // Handles one transport event (connect/message/disconnect).
-    void handle_event(const eng::NetEvent& event, eng::NetHost& net);
+    void handle_event(const eng::NetEvent& event, eng::IServerTransport& net);
 
     // Advances one fixed tick and sends snapshots when due.
-    void tick(eng::NetHost& net);
+    void tick(eng::IServerTransport& net);
 
     std::uint32_t current_tick() const { return tick_; }
     std::size_t player_count() const;
@@ -79,20 +79,21 @@ private:
         int bad_messages = 0;
     };
 
-    void handle_hello(std::uint32_t peer, eng::ByteReader& reader, eng::NetHost& net);
-    void handle_input(Player& player, eng::ByteReader& reader, eng::NetHost& net);
-    void drop_player(std::uint8_t player_id, eng::NetHost& net);
+    void handle_hello(std::uint32_t peer, eng::ByteReader& reader, eng::IServerTransport& net);
+    void handle_input(Player& player, eng::ByteReader& reader, eng::IServerTransport& net);
+    void drop_player(std::uint8_t player_id, eng::IServerTransport& net);
     std::optional<std::uint8_t> find_player_by_peer(std::uint32_t peer) const;
-    void send_snapshots(eng::NetHost& net);
+    void send_snapshots(eng::IServerTransport& net);
 
     // Combat.
-    void fire_hitscan(std::uint8_t shooter_id, const InputCommand& command, eng::NetHost& net);
-    void kill_player(std::uint8_t victim_id, std::uint8_t killer_id, eng::NetHost& net);
-    void respawn_player(std::uint8_t player_id, eng::NetHost& net);
-    void update_match(eng::NetHost& net);
-    void restart_match(eng::NetHost& net);
-    void broadcast_reliable(const std::vector<std::uint8_t>& data, eng::NetHost& net);
-    void send_weapon_status(const Player& player, eng::NetHost& net);
+    void fire_hitscan(std::uint8_t shooter_id, const InputCommand& command,
+                      eng::IServerTransport& net);
+    void kill_player(std::uint8_t victim_id, std::uint8_t killer_id, eng::IServerTransport& net);
+    void respawn_player(std::uint8_t player_id, eng::IServerTransport& net);
+    void update_match(eng::IServerTransport& net);
+    void restart_match(eng::IServerTransport& net);
+    void broadcast_reliable(const std::vector<std::uint8_t>& data, eng::IServerTransport& net);
+    void send_weapon_status(const Player& player, eng::IServerTransport& net);
     MatchStateMsg match_state() const;
 
     eng::PhysicsWorld world_;

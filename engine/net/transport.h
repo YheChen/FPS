@@ -50,7 +50,25 @@ struct NetSimConfig {
     bool enabled() const { return latency_ms > 0 || jitter_ms > 0 || loss_percent > 0.0f; }
 };
 
-class NetHost {
+// The surface the dedicated server needs from a transport. Lets ServerGame
+// run identically over ENet (native clients) or WebSockets (browser
+// clients). Peers are stable uint32 ids in a shared space; the concrete
+// transport owns id allocation.
+class IServerTransport {
+public:
+    virtual ~IServerTransport() = default;
+
+    virtual void poll(std::vector<NetEvent>& out) = 0;
+    virtual void send(std::uint32_t peer, std::span<const std::uint8_t> data, NetChannel channel,
+                      bool reliable) = 0;
+    virtual void broadcast(std::span<const std::uint8_t> data, NetChannel channel,
+                           bool reliable) = 0;
+    virtual void disconnect(std::uint32_t peer) = 0;
+    virtual std::size_t peer_count() const = 0;
+    virtual const NetStats& stats() const = 0;
+};
+
+class NetHost final : public IServerTransport {
 public:
     static std::optional<NetHost> create_server(std::uint16_t port, std::size_t max_peers);
     static std::optional<NetHost> create_client();
@@ -66,20 +84,20 @@ public:
     std::optional<std::uint32_t> connect(const std::string& host, std::uint16_t port);
 
     // Pumps all pending events (non-blocking).
-    void poll(std::vector<NetEvent>& out);
+    void poll(std::vector<NetEvent>& out) override;
 
     void send(std::uint32_t peer, std::span<const std::uint8_t> data, NetChannel channel,
-              bool reliable);
-    void broadcast(std::span<const std::uint8_t> data, NetChannel channel, bool reliable);
+              bool reliable) override;
+    void broadcast(std::span<const std::uint8_t> data, NetChannel channel, bool reliable) override;
 
     // Graceful disconnect; the Disconnected event arrives via poll().
-    void disconnect(std::uint32_t peer);
+    void disconnect(std::uint32_t peer) override;
 
     // Round-trip time estimate for a peer, milliseconds (0 if unknown).
     std::uint32_t rtt_ms(std::uint32_t peer) const;
 
-    std::size_t peer_count() const;
-    const NetStats& stats() const;
+    std::size_t peer_count() const override;
+    const NetStats& stats() const override;
 
     // Enable/adjust simulated latency/jitter/loss (deterministic RNG).
     void set_simulation(const NetSimConfig& config);

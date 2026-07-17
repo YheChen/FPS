@@ -14,6 +14,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 using socket_t = SOCKET;
+using ws_len_t = int;  // Winsock send/recv take int lengths
 #define ENG_CLOSESOCK closesocket
 #define ENG_WOULDBLOCK (WSAGetLastError() == WSAEWOULDBLOCK)
 #else
@@ -25,6 +26,7 @@ using socket_t = SOCKET;
 #include <sys/socket.h>
 #include <unistd.h>
 using socket_t = int;
+using ws_len_t = std::size_t;  // POSIX send/recv take size_t lengths
 #define INVALID_SOCKET (-1)
 #define ENG_CLOSESOCK ::close
 #define ENG_WOULDBLOCK (errno == EWOULDBLOCK || errno == EAGAIN)
@@ -93,7 +95,7 @@ std::array<std::uint8_t, 20> sha1(const std::string& input) {
     }
 
     std::array<std::uint8_t, 20> out{};
-    for (int i = 0; i < 5; ++i) {
+    for (std::size_t i = 0; i < 5; ++i) {
         out[i * 4 + 0] = static_cast<std::uint8_t>((h[i] >> 24) & 0xff);
         out[i * 4 + 1] = static_cast<std::uint8_t>((h[i] >> 16) & 0xff);
         out[i * 4 + 2] = static_cast<std::uint8_t>((h[i] >> 8) & 0xff);
@@ -247,7 +249,7 @@ struct WebSocketHost::Impl {
         std::size_t sent = 0;
         while (sent < conn.out.size()) {
             const auto n = ::send(conn.fd, reinterpret_cast<const char*>(conn.out.data() + sent),
-                                  static_cast<int>(conn.out.size() - sent), 0);
+                                  static_cast<ws_len_t>(conn.out.size() - sent), 0);
             if (n > 0) {
                 sent += static_cast<std::size_t>(n);
                 stats.bytes_sent += static_cast<std::uint64_t>(n);
@@ -325,7 +327,7 @@ void WebSocketHost::poll(std::vector<NetEvent>& out) {
         bool closed = false;
         while (true) {
             const auto n = recv(conn.fd, reinterpret_cast<char*>(buffer.data()),
-                                static_cast<int>(buffer.size()), 0);
+                                static_cast<ws_len_t>(buffer.size()), 0);
             if (n > 0) {
                 conn.in.insert(conn.in.end(), buffer.begin(),
                                buffer.begin() + static_cast<std::ptrdiff_t>(n));

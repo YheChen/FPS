@@ -22,8 +22,12 @@ add_library(engine STATIC
     core/version.h
     net/byte_buffer.cpp
     net/byte_buffer.h
+    net/composite_transport.cpp
+    net/composite_transport.h
     net/transport.cpp
     net/transport.h
+    net/websocket_host.cpp
+    net/websocket_host.h
     physics/character_controller.cpp
     physics/character_controller.h
     physics/physics_internal.h
@@ -50,6 +54,10 @@ target_link_libraries(engine
     PUBLIC glm::glm
     PRIVATE cgltf Jolt enet
 )
+if(WIN32)
+    # WebSocketHost uses Winsock directly.
+    target_link_libraries(engine PRIVATE ws2_32)
+endif()
 
 target_compile_definitions(engine
     PRIVATE ENG_VERSION_STRING="${PROJECT_VERSION}"

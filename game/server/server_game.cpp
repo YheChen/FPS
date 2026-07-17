@@ -59,7 +59,7 @@ std::optional<std::uint8_t> ServerGame::find_player_by_peer(std::uint32_t peer) 
     return std::nullopt;
 }
 
-void ServerGame::handle_event(const eng::NetEvent& event, eng::NetHost& net) {
+void ServerGame::handle_event(const eng::NetEvent& event, eng::IServerTransport& net) {
     switch (event.type) {
         case eng::NetEvent::Type::Connected:
             eng::log::info("Peer {} connected (awaiting hello)", event.peer);
@@ -97,7 +97,8 @@ void ServerGame::handle_event(const eng::NetEvent& event, eng::NetHost& net) {
     }
 }
 
-void ServerGame::handle_hello(std::uint32_t peer, eng::ByteReader& reader, eng::NetHost& net) {
+void ServerGame::handle_hello(std::uint32_t peer, eng::ByteReader& reader,
+                              eng::IServerTransport& net) {
     const auto hello = read_client_hello(reader);
     if (!hello) {
         eng::log::warn("Peer {}: invalid hello (version/name), rejecting", peer);
@@ -167,7 +168,7 @@ void ServerGame::handle_hello(std::uint32_t peer, eng::ByteReader& reader, eng::
     send_weapon_status(*players_[*slot], net);
 }
 
-void ServerGame::handle_input(Player& player, eng::ByteReader& reader, eng::NetHost& net) {
+void ServerGame::handle_input(Player& player, eng::ByteReader& reader, eng::IServerTransport& net) {
     if (++player.input_packets_this_second > kMaxInputPacketsPerSecond) {
         eng::log::warn("Player '{}': input rate limit exceeded, kicking", player.name);
         net.disconnect(player.peer);
@@ -202,7 +203,7 @@ void ServerGame::handle_input(Player& player, eng::ByteReader& reader, eng::NetH
     }
 }
 
-void ServerGame::drop_player(std::uint8_t player_id, eng::NetHost& net) {
+void ServerGame::drop_player(std::uint8_t player_id, eng::IServerTransport& net) {
     players_[player_id].reset();
     const auto left = encode(PlayerLeft{player_id});
     for (const auto& player : players_) {
@@ -212,7 +213,7 @@ void ServerGame::drop_player(std::uint8_t player_id, eng::NetHost& net) {
     }
 }
 
-void ServerGame::tick(eng::NetHost& net) {
+void ServerGame::tick(eng::IServerTransport& net) {
     ++tick_;
     update_match(net);
 
@@ -291,7 +292,7 @@ void ServerGame::tick(eng::NetHost& net) {
     }
 }
 
-void ServerGame::send_snapshots(eng::NetHost& net) {
+void ServerGame::send_snapshots(eng::IServerTransport& net) {
     // Shared player list; per-recipient last_processed_input header.
     std::vector<SnapshotPlayer> everyone;
     for (std::uint8_t i = 0; i < kMaxPlayers; ++i) {
@@ -323,7 +324,8 @@ void ServerGame::send_snapshots(eng::NetHost& net) {
 
 // --- combat -----------------------------------------------------------------
 
-void ServerGame::broadcast_reliable(const std::vector<std::uint8_t>& data, eng::NetHost& net) {
+void ServerGame::broadcast_reliable(const std::vector<std::uint8_t>& data,
+                                    eng::IServerTransport& net) {
     for (const auto& player : players_) {
         if (player) {
             net.send(player->peer, data, eng::NetChannel::Reliable, true);
@@ -331,7 +333,7 @@ void ServerGame::broadcast_reliable(const std::vector<std::uint8_t>& data, eng::
     }
 }
 
-void ServerGame::send_weapon_status(const Player& player, eng::NetHost& net) {
+void ServerGame::send_weapon_status(const Player& player, eng::IServerTransport& net) {
     net.send(player.peer,
              encode(WeaponStatusMsg{static_cast<std::uint8_t>(player.weapon.ammo),
                                     player.weapon.reloading()}),
@@ -347,7 +349,7 @@ MatchStateMsg ServerGame::match_state() const {
 }
 
 void ServerGame::fire_hitscan(std::uint8_t shooter_id, const InputCommand& command,
-                              eng::NetHost& net) {
+                              eng::IServerTransport& net) {
     Player& shooter = *players_[shooter_id];
     const glm::vec3 eye = shooter.state.position + glm::vec3{0.0f, kMove.eye_height, 0.0f};
     const glm::vec3 dir = view_direction(command.yaw, command.pitch);
@@ -400,7 +402,8 @@ void ServerGame::fire_hitscan(std::uint8_t shooter_id, const InputCommand& comma
     }
 }
 
-void ServerGame::kill_player(std::uint8_t victim_id, std::uint8_t killer_id, eng::NetHost& net) {
+void ServerGame::kill_player(std::uint8_t victim_id, std::uint8_t killer_id,
+                             eng::IServerTransport& net) {
     Player& victim = *players_[victim_id];
     victim.alive = false;
     victim.health.current = 0.0f;
@@ -419,7 +422,7 @@ void ServerGame::kill_player(std::uint8_t victim_id, std::uint8_t killer_id, eng
                    killer_id == kNoPlayer ? -1 : static_cast<int>(killer_id));
 }
 
-void ServerGame::respawn_player(std::uint8_t player_id, eng::NetHost& net) {
+void ServerGame::respawn_player(std::uint8_t player_id, eng::IServerTransport& net) {
     Player& player = *players_[player_id];
     const glm::vec3 spawn = spawns_[next_spawn_++ % spawns_.size()];
     player.state = {};
@@ -434,7 +437,7 @@ void ServerGame::respawn_player(std::uint8_t player_id, eng::NetHost& net) {
     send_weapon_status(player, net);
 }
 
-void ServerGame::update_match(eng::NetHost& net) {
+void ServerGame::update_match(eng::IServerTransport& net) {
     if (phase_ == MatchPhase::Playing) {
         match_remaining_ -= kTickSeconds;
         if (match_remaining_ <= 0.0f) {
@@ -455,7 +458,7 @@ void ServerGame::update_match(eng::NetHost& net) {
     }
 }
 
-void ServerGame::restart_match(eng::NetHost& net) {
+void ServerGame::restart_match(eng::IServerTransport& net) {
     phase_ = MatchPhase::Playing;
     match_remaining_ = kMatchSeconds;
     for (std::uint8_t id = 0; id < kMaxPlayers; ++id) {

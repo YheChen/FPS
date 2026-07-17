@@ -9,7 +9,9 @@
 #include "engine/core/log.h"
 #include "engine/core/time.h"
 #include "engine/core/version.h"
+#include "engine/net/composite_transport.h"
 #include "engine/net/transport.h"
+#include "engine/net/websocket_host.h"
 #include "game/server/server_game.h"
 #include "game/shared/player_movement.h"
 #include "game/shared/weapon.h"
@@ -17,7 +19,9 @@
 namespace {
 
 struct ServerArgs {
-    std::uint16_t port = 7777;
+    std::uint16_t port = 7777;             // ENet/UDP (native clients)
+    std::optional<std::uint16_t> ws_port;  // WebSocket/TCP (browser clients)
+    bool enet = true;                      // --no-enet to run WS-only
     std::optional<double> run_seconds;
     bool verbose = false;
 };
@@ -40,6 +44,16 @@ ServerArgs parse_args(int argc, char** argv) {
                     args.port = port;
                 }
             }
+        } else if (arg == "--ws-port") {
+            if (const auto value = next_value()) {
+                std::uint16_t port = 0;
+                if (std::from_chars(value->data(), value->data() + value->size(), port).ec ==
+                    std::errc{}) {
+                    args.ws_port = port;
+                }
+            }
+        } else if (arg == "--no-enet") {
+            args.enet = false;
         } else if (arg == "--run-seconds") {
             if (const auto value = next_value()) {
                 double seconds = 0.0;
@@ -105,10 +119,27 @@ int main(int argc, char** argv) {
         }
     }
 
-    auto net = eng::NetHost::create_server(args.port, game::kMaxPlayers);
-    if (!net) {
+    // --- transports: ENet (native) and/or WebSocket (browser) -------------
+    std::vector<std::unique_ptr<eng::IServerTransport>> transports;
+    if (args.enet) {
+        auto host = eng::NetHost::create_server(args.port, game::kMaxPlayers);
+        if (!host) {
+            return 1;
+        }
+        transports.push_back(std::make_unique<eng::NetHost>(std::move(*host)));
+    }
+    if (args.ws_port) {
+        auto host = eng::WebSocketHost::create_server(*args.ws_port, game::kMaxPlayers);
+        if (!host) {
+            return 1;
+        }
+        transports.push_back(std::make_unique<eng::WebSocketHost>(std::move(*host)));
+    }
+    if (transports.empty()) {
+        eng::log::error("No transport enabled (use --no-enet only with --ws-port)");
         return 1;
     }
+    eng::CompositeTransport net{std::move(transports)};
 
     game::ServerGame server{std::move(collision), std::move(spawns), kMapPath, weapon_config};
 
@@ -122,14 +153,14 @@ int main(int argc, char** argv) {
     bool running = true;
     while (running) {
         events.clear();
-        net->poll(events);
+        net.poll(events);
         for (const eng::NetEvent& event : events) {
-            server.handle_event(event, *net);
+            server.handle_event(event, net);
         }
 
         step.advance(clock.tick());
         while (step.consume_tick()) {
-            server.tick(*net);
+            server.tick(net);
         }
 
         const double elapsed = clock.elapsed();
@@ -138,7 +169,7 @@ int main(int argc, char** argv) {
                 (server.current_tick() - ticks_at_last_log) / (elapsed - last_stats_log);
             eng::log::info("tick {} ({:.1f}/s) | players {} | rx {} B tx {} B",
                            server.current_tick(), tick_rate, server.player_count(),
-                           net->stats().bytes_received, net->stats().bytes_sent);
+                           net.stats().bytes_received, net.stats().bytes_sent);
             ticks_at_last_log = server.current_tick();
             last_stats_log = elapsed;
         }

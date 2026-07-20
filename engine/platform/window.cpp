@@ -1,7 +1,7 @@
 #include "engine/platform/window.h"
 
 #include <SDL3/SDL.h>
-#include <glad/gl.h>
+#include "engine/rendering/gl.h"
 
 #include <utility>
 
@@ -65,11 +65,18 @@ std::optional<Window> Window::create(const WindowConfig& config) {
         return std::nullopt;
     }
 
+#if defined(__EMSCRIPTEN__)
+    // WebGL 2 == OpenGL ES 3.0. The browser provides the context.
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+#else
     // OpenGL 4.1 core: the highest version available on macOS (ADR 0003).
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
+#endif
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 
@@ -92,10 +99,13 @@ std::optional<Window> Window::create(const WindowConfig& config) {
         return std::nullopt;
     }
 
+#if !defined(__EMSCRIPTEN__)
+    // WebGL functions are provided by the browser; only desktop needs a loader.
     if (gladLoadGL(reinterpret_cast<GLADloadfunc>(SDL_GL_GetProcAddress)) == 0) {
         log::error("gladLoadGL failed: could not load OpenGL functions");
         return std::nullopt;  // destructor cleans up window/context
     }
+#endif
 
     if (!SDL_GL_SetSwapInterval(config.vsync ? 1 : 0)) {
         log::warn("SDL_GL_SetSwapInterval failed: {}", SDL_GetError());

@@ -1,6 +1,6 @@
 #include "engine/rendering/texture.h"
 
-#include <glad/gl.h>
+#include "engine/rendering/gl.h"
 
 #include <utility>
 #include <vector>

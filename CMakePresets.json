@@ -26,12 +26,22 @@
             "cacheVariables": {
                 "FPS_ENABLE_SANITIZERS": "ON"
             }
+        },
+        {
+            "name": "web",
+            "displayName": "Emscripten (WebAssembly client)",
+            "binaryDir": "${sourceDir}/build/web",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "FPS_BUILD_TESTS": "OFF"
+            }
         }
     ],
     "buildPresets": [
         { "name": "debug", "configurePreset": "debug" },
         { "name": "release", "configurePreset": "release" },
-        { "name": "asan", "configurePreset": "asan" }
+        { "name": "asan", "configurePreset": "asan" },
+        { "name": "web", "configurePreset": "web" }
     ],
     "testPresets": [
         {

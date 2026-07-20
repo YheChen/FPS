@@ -1,12 +1,13 @@
 #include "engine/rendering/shader.h"
 
-#include <glad/gl.h>
 #include <glm/gtc/type_ptr.hpp>
 
 #include <array>
+#include <string>
 #include <utility>
 
 #include "engine/core/log.h"
+#include "engine/rendering/gl.h"
 
 namespace eng {
 
@@ -15,8 +16,12 @@ namespace {
 std::optional<GLuint> compile_stage(std::string_view shader_name, GLenum stage,
                                     std::string_view source) {
     const GLuint shader = glCreateShader(stage);
-    const GLchar* text = source.data();
-    const auto length = static_cast<GLint>(source.size());
+    // Shader bodies omit the #version line; we prepend the platform preamble
+    // (desktop GLSL 410 core vs WebGL2 GLSL ES 300) so one source works on
+    // both backends.
+    const std::string full = std::string(glsl_preamble()) + std::string(source);
+    const GLchar* text = full.c_str();
+    const auto length = static_cast<GLint>(full.size());
     glShaderSource(shader, 1, &text, &length);
     glCompileShader(shader);
 

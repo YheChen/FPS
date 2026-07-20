@@ -89,9 +89,14 @@ add_library(engine_platform STATIC
 add_library(fps::engine_platform ALIAS engine_platform)
 
 target_link_libraries(engine_platform
-    PUBLIC fps::engine glad imgui
+    PUBLIC fps::engine imgui
     PRIVATE SDL3::SDL3 miniaudio
 )
+if(NOT EMSCRIPTEN)
+    # glad loads desktop GL entry points; WebGL functions come from the
+    # browser, so the loader is native-only.
+    target_link_libraries(engine_platform PUBLIC glad)
+endif()
 
 fps_set_warnings(engine_platform)
 fps_enable_sanitizers(engine_platform)

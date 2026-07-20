@@ -21,7 +21,16 @@ std::optional<ImGuiLayer> ImGuiLayer::create(Window& window) {
         ImGui::DestroyContext();
         return std::nullopt;
     }
-    if (!ImGui_ImplOpenGL3_Init("#version 410 core")) {
+    // The ImGui GL backend compiles its own shaders with this exact version
+    // string, so it must match the context: GLSL ES 300 on WebGL2, GLSL 410
+    // core on desktop. A desktop string on WebGL2 fails to compile and ImGui
+    // silently renders nothing.
+#if defined(__EMSCRIPTEN__)
+    const char* glsl_version = "#version 300 es";
+#else
+    const char* glsl_version = "#version 410 core";
+#endif
+    if (!ImGui_ImplOpenGL3_Init(glsl_version)) {
         log::error("ImGui OpenGL3 backend init failed");
         ImGui_ImplSDL3_Shutdown();
         ImGui::DestroyContext();

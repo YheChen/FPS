@@ -1,6 +1,6 @@
 #include "engine/rendering/gl_util.h"
 
-#include <glad/gl.h>
+#include "engine/rendering/gl.h"
 
 #include "engine/core/log.h"
 

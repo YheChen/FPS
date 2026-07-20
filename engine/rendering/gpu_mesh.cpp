@@ -1,6 +1,6 @@
 #include "engine/rendering/gpu_mesh.h"
 
-#include <glad/gl.h>
+#include "engine/rendering/gl.h"
 
 #include <cstddef>
 #include <utility>

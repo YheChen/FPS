@@ -1,6 +1,11 @@
-#include <glad/gl.h>
+#include "engine/rendering/gl.h"
+
 #include <imgui.h>
 #include <glm/gtc/matrix_transform.hpp>
+
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/emscripten.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -10,6 +15,7 @@
 #include <deque>
 #include <format>
 #include <fstream>
+#include <functional>
 #include <numbers>
 #include <optional>
 #include <string>
@@ -47,7 +53,9 @@
 
 namespace {
 
-constexpr std::string_view kLitVertexSource = R"(#version 410 core
+// Shaders omit #version; Shader::create prepends the platform preamble
+// (desktop GLSL 410 core vs WebGL2 GLSL ES 300).
+constexpr std::string_view kLitVertexSource = R"(
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec3 a_normal;
 layout(location = 2) in vec2 a_uv;
@@ -66,7 +74,7 @@ void main() {
 }
 )";
 
-constexpr std::string_view kLitFragmentSource = R"(#version 410 core
+constexpr std::string_view kLitFragmentSource = R"(
 in vec3 v_world_pos;
 in vec3 v_normal;
 in vec2 v_uv;
@@ -501,13 +509,20 @@ int main(int argc, char** argv) {
 
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
+#if !defined(__EMSCRIPTEN__)
+    // WebGL's default framebuffer is already sRGB-correct; there is no
+    // GL_FRAMEBUFFER_SRGB enable in GLES 3.0.
     glEnable(GL_FRAMEBUFFER_SRGB);
+#endif
 
     std::array<float, 240> frame_ms_history{};
     std::size_t frame_ms_cursor = 0;
 
     bool running = true;
-    while (running) {
+    // The frame body is a lambda so the same code drives a native while-loop
+    // and the browser's requestAnimationFrame callback (emscripten owns the
+    // loop there and code must not block).
+    const auto frame = [&]() {
         if (!window->poll(input, &*imgui)) {
             running = false;
         }
@@ -893,7 +908,9 @@ int main(int argc, char** argv) {
                 "FPS", nullptr,
                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
             ImGui::InputText("name", menu_name, sizeof(menu_name));
+#if !defined(__EMSCRIPTEN__)
             ImGui::InputText("server address", menu_ip, sizeof(menu_ip));
+#endif
 
             const auto start_session = [&](Mode next) {
                 settings.name = menu_name[0] != '\0' ? menu_name : "player";
@@ -913,6 +930,9 @@ int main(int argc, char** argv) {
                 window->set_relative_mouse(true);
             };
 
+#if !defined(__EMSCRIPTEN__)
+            // Online play uses the ENet (UDP) transport, which browsers can't
+            // open. The browser WebSocket client transport lands in M10b-2.
             if (ImGui::Button("Connect", {200, 0})) {
                 net = game::NetClient::connect(menu_ip, args.port, menu_name);
                 if (net) {
@@ -923,9 +943,13 @@ int main(int argc, char** argv) {
                 }
             }
             ImGui::SameLine();
+#endif
             if (ImGui::Button("Practice offline", {200, 0})) {
                 start_session(Mode::Offline);
             }
+#if defined(__EMSCRIPTEN__)
+            ImGui::TextDisabled("Online multiplayer in the browser is coming soon.");
+#endif
             if (!menu_error.empty()) {
                 ImGui::TextColored({1.0f, 0.4f, 0.4f, 1.0f}, "%s", menu_error.c_str());
             }
@@ -1122,11 +1146,23 @@ int main(int argc, char** argv) {
                            player.position.x, player.position.y, player.position.z);
             running = false;
         }
+    };
+
+#if defined(__EMSCRIPTEN__)
+    // Browser drives frames; the call never returns and keeps main()'s stack
+    // (and thus `frame`'s captures) alive. fps=0 -> requestAnimationFrame.
+    static std::function<void()> web_frame = frame;
+    emscripten_set_main_loop([] { web_frame(); }, 0, 1);
+    (void)running;
+#else
+    while (running) {
+        frame();
     }
 
     settings.name = menu_name[0] != '\0' ? menu_name : settings.name;
     settings.last_ip = menu_ip[0] != '\0' ? menu_ip : settings.last_ip;
     save_settings(settings);
+#endif
     eng::log::info("FPS client shutting down cleanly");
     return 0;
 }

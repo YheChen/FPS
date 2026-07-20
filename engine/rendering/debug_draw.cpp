@@ -1,6 +1,6 @@
 #include "engine/rendering/debug_draw.h"
 
-#include <glad/gl.h>
+#include "engine/rendering/gl.h"
 
 #include <array>
 #include <cstddef>
@@ -10,7 +10,8 @@ namespace eng {
 
 namespace {
 
-constexpr std::string_view kVertexSource = R"(#version 410 core
+// Shaders omit #version; Shader::create prepends the platform preamble.
+constexpr std::string_view kVertexSource = R"(
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec3 a_color;
 uniform mat4 u_view_projection;
@@ -21,7 +22,7 @@ void main() {
 }
 )";
 
-constexpr std::string_view kFragmentSource = R"(#version 410 core
+constexpr std::string_view kFragmentSource = R"(
 in vec3 v_color;
 out vec4 o_color;
 void main() {

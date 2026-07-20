@@ -22,6 +22,33 @@ Other presets:
 | `debug`   | Debug build, assertions enabled      |
 | `release` | Optimized build, assertions disabled |
 | `asan`    | Debug + AddressSanitizer + UBSan     |
+| `web`     | WebAssembly client (Emscripten)      |
+
+## Web (WebAssembly) client
+
+The client compiles to WebAssembly + WebGL 2 with Emscripten (the server is
+native-only). Install the SDK once:
+
+```sh
+git clone https://github.com/emscripten-core/emsdk.git ~/emsdk
+cd ~/emsdk && ./emsdk install latest && ./emsdk activate latest
+```
+
+Then build and serve it:
+
+```sh
+source ~/emsdk/emsdk_env.sh
+emcmake cmake --preset web           # configure into build/web
+cmake --build build/web --target fps_client --parallel
+python3 -m http.server -d build/web/game 8099    # serve
+# open http://localhost:8099/fps_client.html
+```
+
+Outputs `fps_client.{html,js,wasm,data}` — the `.data` bundles `assets/`
+into the virtual filesystem. Currently the browser build plays the offline
+practice range; online multiplayer over WebSockets is the next slice
+(browser tabs cannot open the ENet/UDP transport). Deploying it publicly is
+covered in [deploy.md](deploy.md).
 
 ## Options
 

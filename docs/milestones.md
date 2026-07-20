@@ -319,7 +319,7 @@ to reliable sends (measure whether TCP jitter matters before adding WebRTC).
 live run with a native ENet client and a WS client joining the same server
 (distinct global ids, both simulated). 75 unit tests.
 
-### M10b — Emscripten WASM client (next)
+### M10b — Emscripten WASM client (offline: done) ✅
 
 Port the client to WebAssembly: `emscripten_set_main_loop`, WebGL2 shader
 variants, a browser-WebSocket transport, preloaded assets, Pointer Lock.

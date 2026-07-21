@@ -319,10 +319,16 @@ to reliable sends (measure whether TCP jitter matters before adding WebRTC).
 live run with a native ENet client and a WS client joining the same server
 (distinct global ids, both simulated). 75 unit tests.
 
-### M10b — Emscripten WASM client (offline: done) ✅
+### M10b — Emscripten WASM client ✅
 
-Port the client to WebAssembly: `emscripten_set_main_loop`, WebGL2 shader
-variants, a browser-WebSocket transport, preloaded assets, Pointer Lock.
+Client compiles to WebAssembly + WebGL2 and runs in a browser tab.
+`engine/rendering/gl.h` selects glad vs GLES3; shaders get a `#version`
+preamble; the main loop runs under `emscripten_set_main_loop`. A client
+transport seam (`eng::IClientTransport`) picks ENet natively and a browser
+`emscripten/websocket.h` transport on the web, so the WASM client plays
+online against the native server. **Verified in a browser**: offline
+practice and full authoritative online play (prediction, reconciliation at
+0.0000 m error, snapshots, match timer) at ~80 fps.
 
 ### M10c — Deploy
 

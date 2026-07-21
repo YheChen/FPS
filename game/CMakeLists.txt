@@ -44,6 +44,7 @@ if(EMSCRIPTEN)
         "SHELL:-s STACK_SIZE=4MB"
         "SHELL:-s EXIT_RUNTIME=0"
         "SHELL:-s DISABLE_EXCEPTION_CATCHING=0"
+        "SHELL:-l websocket.js"
         --preload-file "${CMAKE_SOURCE_DIR}/assets@/assets"
         --shell-file "${CMAKE_SOURCE_DIR}/web/shell.html"
     )

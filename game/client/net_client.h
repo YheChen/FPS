@@ -7,8 +7,9 @@
 #include <string>
 
 #include <glm/glm.hpp>
+#include <memory>
 
-#include "engine/net/transport.h"
+#include "engine/net/client_transport.h"
 #include "game/shared/input_command.h"
 #include "game/shared/interpolation.h"
 #include "game/shared/protocol.h"
@@ -42,7 +43,7 @@ struct SelfAck {
 class NetClient {
 public:
     enum class State : std::uint8_t {
-        Connecting,       // ENet handshake in flight
+        Connecting,       // transport handshake in flight
         AwaitingWelcome,  // hello sent
         InGame,
         Rejected,
@@ -65,9 +66,9 @@ public:
     std::uint8_t my_id() const { return my_id_; }
     std::uint32_t server_tick() const { return latest_server_tick_; }
     std::uint32_t last_processed_input() const { return last_processed_input_; }
-    std::uint32_t rtt_ms() const { return net_.rtt_ms(server_peer_); }
-    const eng::NetStats& stats() const { return net_.stats(); }
-    void set_simulation(const eng::NetSimConfig& config) { net_.set_simulation(config); }
+    std::uint32_t rtt_ms() const { return transport_->rtt_ms(); }
+    const eng::NetStats& stats() const { return transport_->stats(); }
+    void set_simulation(const eng::NetSimConfig& config) { transport_->set_simulation(config); }
 
     // All players by id, including the local one.
     const std::map<std::uint8_t, NetPlayer>& players() const { return players_; }
@@ -95,12 +96,12 @@ public:
     std::vector<PlayerRespawnedMsg> take_respawn_events();
 
 private:
-    explicit NetClient(eng::NetHost net) : net_(std::move(net)) {}
+    explicit NetClient(std::unique_ptr<eng::IClientTransport> transport)
+        : transport_(std::move(transport)) {}
 
     void handle_message(const std::vector<std::uint8_t>& data);
 
-    eng::NetHost net_;
-    std::uint32_t server_peer_ = 0;
+    std::unique_ptr<eng::IClientTransport> transport_;
     std::string player_name_;
     State state_ = State::Connecting;
     std::uint8_t my_id_ = 0;

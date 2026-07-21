@@ -49,6 +49,11 @@ if(EMSCRIPTEN)
         --shell-file "${CMAKE_SOURCE_DIR}/web/shell.html"
     )
     target_compile_options(fps_client PRIVATE -fexceptions)
+    # Deployed builds bake in their server URL (docs/deploy.md):
+    #   emcmake cmake --preset web -DFPS_WEB_SERVER_URL=wss://fps.example.com
+    if(FPS_WEB_SERVER_URL)
+        target_compile_definitions(fps_client PRIVATE FPS_WEB_SERVER_URL="${FPS_WEB_SERVER_URL}")
+    endif()
     # Emit fps_client.html (+ .js, .wasm, .data).
     set_target_properties(fps_client PROPERTIES SUFFIX ".html")
 endif()

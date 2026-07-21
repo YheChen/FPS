@@ -1,0 +1,30 @@
+# systemd unit for the FPS dedicated server. See docs/deploy.md.
+# Assumes the repo is at /opt/fps, built with the "release" preset, and a
+# dedicated unprivileged "fps" user owns it.
+[Unit]
+Description=FPS dedicated server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fps
+Group=fps
+WorkingDirectory=/opt/fps
+# --ws-port 7778: WebSocket for browser clients (Caddy proxies wss:// -> here).
+# ENet/UDP stays on 7777 for native clients; drop it with --no-enet if you
+# only want browser players (then no UDP firewall rule is needed). The server
+# locates ./assets relative to WorkingDirectory.
+ExecStart=/opt/fps/build/release/game/fps_server --ws-port 7778
+Restart=on-failure
+RestartSec=2
+
+# Hardening: the server needs only its own directory and the network.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/opt/fps
+
+[Install]
+WantedBy=multi-user.target

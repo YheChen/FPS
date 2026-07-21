@@ -14,8 +14,17 @@ fi
 # shellcheck disable=SC1091
 source "${EMSDK_DIR}/emsdk_env.sh" >/dev/null 2>&1
 
-emcmake cmake --preset web
+# FPS_WEB_SERVER_URL (optional) bakes the deployed server address into the
+# client menu, e.g. FPS_WEB_SERVER_URL=wss://fps.example.com scripts/build_web.sh
+if [ -n "${FPS_WEB_SERVER_URL:-}" ]; then
+    emcmake cmake --preset web "-DFPS_WEB_SERVER_URL=${FPS_WEB_SERVER_URL}"
+else
+    emcmake cmake --preset web
+fi
 cmake --build build/web --target fps_client --parallel
+
+# Stage the Vercel config alongside the artifacts for `vercel deploy`.
+cp web/vercel.json build/web/game/vercel.json
 
 echo "built build/web/game/fps_client.html"
 if [ "${1:-}" = "--serve" ]; then

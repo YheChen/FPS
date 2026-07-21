@@ -330,7 +330,10 @@ online against the native server. **Verified in a browser**: offline
 practice and full authoritative online play (prediction, reconciliation at
 0.0000 m error, snapshots, match timer) at ~80 fps.
 
-### M10c — Deploy
+### M10c — Deploy ✅ (config + guide)
 
 Static WASM client on Vercel; Caddy on the VM terminating `wss://` TLS in
-front of the plain `ws://` server; systemd units; `docs/deploy.md`.
+front of the plain `ws://` server; systemd unit. Config and a step-by-step
+guide are in [deploy.md](deploy.md) and `deploy/`; the deployed client bakes
+its server URL via `-DFPS_WEB_SERVER_URL`. Running the VM/Vercel steps is
+manual (needs the operator's host + domain).

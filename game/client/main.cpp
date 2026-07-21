@@ -456,11 +456,16 @@ int main(int argc, char** argv) {
     std::snprintf(menu_name, sizeof(menu_name), "%s", settings.name.c_str());
     std::snprintf(menu_ip, sizeof(menu_ip), "%s", settings.last_ip.c_str());
 #if defined(__EMSCRIPTEN__)
-    // Browsers connect over WebSockets; default to a ws:// URL (edit to
-    // wss://your-domain for a deployed server). Settings aren't persisted in
-    // the browser, so last_ip is always the native default here.
+    // Browsers connect over WebSockets; default to a ws:// URL. A deployed
+    // build bakes in its server via -DFPS_WEB_SERVER_URL=wss://host (see
+    // docs/deploy.md); otherwise default to a local dev server. Settings are
+    // not persisted in the browser, so last_ip is always the native default.
     if (std::string_view(menu_ip).find("://") == std::string_view::npos) {
+#if defined(FPS_WEB_SERVER_URL)
+        std::snprintf(menu_ip, sizeof(menu_ip), "%s", FPS_WEB_SERVER_URL);
+#else
         std::snprintf(menu_ip, sizeof(menu_ip), "ws://localhost:7778");
+#endif
     }
 #endif
 

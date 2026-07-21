@@ -22,6 +22,8 @@ add_library(engine STATIC
     core/version.h
     net/byte_buffer.cpp
     net/byte_buffer.h
+    net/client_transport.cpp
+    net/client_transport.h
     net/composite_transport.cpp
     net/composite_transport.h
     net/transport.cpp

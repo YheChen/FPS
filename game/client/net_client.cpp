@@ -9,16 +9,11 @@ namespace game {
 
 std::optional<NetClient> NetClient::connect(const std::string& host, std::uint16_t port,
                                             std::string player_name) {
-    auto net = eng::NetHost::create_client();
-    if (!net) {
+    auto transport = eng::make_client_transport(host, port);
+    if (!transport) {
         return std::nullopt;
     }
-    NetClient client{std::move(*net)};
-    const auto peer = client.net_.connect(host, port);
-    if (!peer) {
-        return std::nullopt;
-    }
-    client.server_peer_ = *peer;
+    NetClient client{std::move(transport)};
     client.player_name_ = std::move(player_name);
     if (client.player_name_.empty() || client.player_name_.size() > kMaxNameLength) {
         client.player_name_ = "player";
@@ -44,14 +39,14 @@ const char* NetClient::state_name() const {
 
 void NetClient::poll() {
     std::vector<eng::NetEvent> events;
-    net_.poll(events);
+    transport_->poll(events);
     for (const eng::NetEvent& event : events) {
         switch (event.type) {
             case eng::NetEvent::Type::Connected: {
                 eng::log::info("Connected; sending hello as '{}'", player_name_);
                 eng::ByteWriter writer;
                 write(writer, ClientHello{player_name_});
-                net_.send(server_peer_, writer.data(), eng::NetChannel::Reliable, true);
+                transport_->send(writer.data(), eng::NetChannel::Reliable, true);
                 state_ = State::AwaitingWelcome;
                 break;
             }
@@ -233,7 +228,7 @@ void NetClient::send_input(const std::deque<InputCommand>& recent_newest_first,
     }
     eng::ByteWriter writer;
     write(writer, packet);
-    net_.send(server_peer_, writer.data(), eng::NetChannel::Sequenced, false);
+    transport_->send(writer.data(), eng::NetChannel::Sequenced, false);
 }
 
 }  // namespace game

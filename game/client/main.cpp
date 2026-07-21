@@ -455,6 +455,14 @@ int main(int argc, char** argv) {
     char menu_ip[64]{};
     std::snprintf(menu_name, sizeof(menu_name), "%s", settings.name.c_str());
     std::snprintf(menu_ip, sizeof(menu_ip), "%s", settings.last_ip.c_str());
+#if defined(__EMSCRIPTEN__)
+    // Browsers connect over WebSockets; default to a ws:// URL (edit to
+    // wss://your-domain for a deployed server). Settings aren't persisted in
+    // the browser, so last_ip is always the native default here.
+    if (std::string_view(menu_ip).find("://") == std::string_view::npos) {
+        std::snprintf(menu_ip, sizeof(menu_ip), "ws://localhost:7778");
+    }
+#endif
 
     if (args.connect_host) {
         net = game::NetClient::connect(*args.connect_host, args.port, settings.name);
@@ -908,9 +916,7 @@ int main(int argc, char** argv) {
                 "FPS", nullptr,
                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
             ImGui::InputText("name", menu_name, sizeof(menu_name));
-#if !defined(__EMSCRIPTEN__)
             ImGui::InputText("server address", menu_ip, sizeof(menu_ip));
-#endif
 
             const auto start_session = [&](Mode next) {
                 settings.name = menu_name[0] != '\0' ? menu_name : "player";
@@ -930,9 +936,8 @@ int main(int argc, char** argv) {
                 window->set_relative_mouse(true);
             };
 
-#if !defined(__EMSCRIPTEN__)
-            // Online play uses the ENet (UDP) transport, which browsers can't
-            // open. The browser WebSocket client transport lands in M10b-2.
+            // Native: ENet/UDP to host:port. Browser: WebSocket to the
+            // address (a ws://host:port or wss://domain URL).
             if (ImGui::Button("Connect", {200, 0})) {
                 net = game::NetClient::connect(menu_ip, args.port, menu_name);
                 if (net) {
@@ -943,13 +948,9 @@ int main(int argc, char** argv) {
                 }
             }
             ImGui::SameLine();
-#endif
             if (ImGui::Button("Practice offline", {200, 0})) {
                 start_session(Mode::Offline);
             }
-#if defined(__EMSCRIPTEN__)
-            ImGui::TextDisabled("Online multiplayer in the browser is coming soon.");
-#endif
             if (!menu_error.empty()) {
                 ImGui::TextColored({1.0f, 0.4f, 0.4f, 1.0f}, "%s", menu_error.c_str());
             }

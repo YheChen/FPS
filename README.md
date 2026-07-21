@@ -33,7 +33,7 @@ See [docs/build.md](docs/build.md) for presets, sanitizers, and CI details.
 
 ## Status
 
-**All nine milestones complete** — playable online deathmatch with an
+**All milestones (M0–M10) complete** — playable online deathmatch with an
 authoritative dedicated server, client-side prediction + reconciliation,
 snapshot interpolation, and server-side lag compensation. See
 [docs/milestones.md](docs/milestones.md).

@@ -40,6 +40,7 @@
 #include "engine/rendering/light.h"
 #include "engine/rendering/particle_renderer.h"
 #include "engine/rendering/particle_sim.h"
+#include "engine/rendering/postfx.h"
 #include "engine/rendering/screenshot.h"
 #include "engine/rendering/shader.h"
 #include "engine/rendering/shadow_map.h"
@@ -534,11 +535,13 @@ int main(int argc, char** argv) {
     auto debug_draw = eng::DebugDraw::create();
     auto shadow_map = eng::ShadowMap::create(kShadowResolution);
     auto particle_renderer = eng::ParticleRenderer::create(kMaxParticles);
+    auto postfx = eng::PostFx::create(window->width_px(), window->height_px());
     if (!imgui || !lit_shader || !depth_shader || !debug_draw || !shadow_map ||
-        !particle_renderer) {
+        !particle_renderer || !postfx) {
         return 1;
     }
     eng::ParticlePool particles{kMaxParticles};
+    eng::PostFx::Settings postfx_settings;
 
     // --- assets & scene ---------------------------------------------------
     const auto assets_root = eng::find_assets_root();
@@ -1238,6 +1241,16 @@ int main(int argc, char** argv) {
 
         int draw_calls = 0;
 
+        // Window resizes have to reach the off-screen targets too, or the
+        // post chain keeps resolving at the old size and the image stretches.
+        // Skipped while the drawable is degenerate -- the browser canvas
+        // reports 0x0 until it is laid out, and reallocating every frame
+        // against that would churn for nothing.
+        if (window->width_px() > 0 && window->height_px() > 0 &&
+            (window->width_px() != postfx->width() || window->height_px() != postfx->height())) {
+            postfx->resize(window->width_px(), window->height_px());
+        }
+
         // Pass 1: depth from the sun. Front faces are culled so the depth
         // recorded is the caster's back face, which pushes self-shadowing
         // acne to surfaces that are facing away from the light anyway.
@@ -1261,9 +1274,9 @@ int main(int argc, char** argv) {
         glDisable(GL_CULL_FACE);
         shadow_map->end_depth_pass(window->width_px(), window->height_px());
 
-        // Pass 2: lit, from the camera.
-        glClearColor(0.055f, 0.07f, 0.09f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        // Pass 2: lit, from the camera, into the HDR post-processing target.
+        // The sky is above 1.0 so the tonemap has something to roll off.
+        postfx->begin_scene({0.075f, 0.095f, 0.125f, 1.0f});
 
         const glm::mat4 view_projection = camera.view_projection();
 
@@ -1342,6 +1355,12 @@ int main(int argc, char** argv) {
         }
         debug_draw->axes(glm::mat4{1.0f}, 2.0f);
         draw_calls += debug_draw->flush(view_projection) > 0 ? 1 : 0;
+
+        // Resolve the HDR scene to the screen. Everything below this point
+        // (HUD, ImGui) draws straight to the default framebuffer, so it is
+        // never tonemapped, bloomed or blurred -- text must stay crisp.
+        postfx->resolve(postfx_settings);
+        draw_calls += postfx->last_pass_count();
 
         // --- debug UI -----------------------------------------------------
         imgui->begin_frame();
@@ -1446,6 +1465,17 @@ int main(int argc, char** argv) {
         }
         ImGui::Checkbox("physics debug (F3)", &draw_physics);
         ImGui::Checkbox("fly mode (F1)", &fly_mode);
+
+        if (ImGui::CollapsingHeader("post-processing")) {
+            ImGui::Text("scene target: %s", postfx->hdr() ? "RGBA16F" : "RGBA8 (no HDR)");
+            ImGui::Checkbox("bloom", &postfx_settings.bloom);
+            ImGui::SameLine();
+            ImGui::Checkbox("fxaa", &postfx_settings.fxaa);
+            ImGui::SliderFloat("exposure", &postfx_settings.exposure, 0.1f, 4.0f);
+            ImGui::SliderFloat("bloom threshold", &postfx_settings.bloom_threshold, 0.0f, 4.0f);
+            ImGui::SliderFloat("bloom knee", &postfx_settings.bloom_knee, 0.0f, 1.0f);
+            ImGui::SliderFloat("bloom intensity", &postfx_settings.bloom_intensity, 0.0f, 2.0f);
+        }
         ImGui::TextDisabled(
             "Esc: capture | WASD+Space | Shift: sprint | Ctrl: crouch | 1-4: weapon | LMB "
             "fire | R reload");

@@ -30,8 +30,58 @@ Milestone 2 (renderer). This document grows with the code.
 5. Textured materials from glTF images (M12) ✅
 6. Directional shadow map for the sun (M13) ✅
 7. Particles (M14) ✅
-8. Point lights — later, if the maps ever need them
-9. Frustum culling — only when the map is big enough to need it
+8. Post-processing: bloom, ACES tonemap, FXAA (M15) ✅
+9. Point lights — later, if the maps ever need them
+10. Frustum culling — only when the map is big enough to need it
+
+## Post-processing (M15)
+
+The 3D world renders into an off-screen HDR target, then resolves to the
+screen through up to five fullscreen passes:
+
+1. **Bright pass** — keep what should bloom, at half resolution
+2. **Blur H** and 3. **Blur V** — separable Gaussian
+4. **Composite + ACES tonemap** — add bloom, apply exposure, map HDR → LDR
+5. **FXAA** — edge-aware smoothing on the tonemapped result
+
+`PostFx::begin_scene()` binds the HDR target; `PostFx::resolve()` runs the
+chain. **The HUD and ImGui draw after `resolve()`**, straight to the default
+framebuffer, so text is never tonemapped, bloomed or blurred.
+
+`postfx_math.h` holds the curves (`luminance`, `bloom_weight`,
+`aces_tonemap`, `half_resolution`) in `engine`, headless and unit-tested.
+Note the shaders in `postfx.cpp` implement the same formulas in GLSL — the
+tests lock the curve shape down, they cannot prove the GLSL copy matches. If
+you change a curve, change both.
+
+### Decisions worth keeping
+
+- **HDR is requested, not assumed.** `RenderTarget::create(..., hdr=true)`
+  tries RGBA16F and silently falls back to RGBA8 if the framebuffer is not
+  complete. WebGL 2 only supports float colour attachments with
+  `EXT_color_buffer_float`, and probing the framebuffer beats parsing
+  extension strings — a driver can advertise the extension and still refuse
+  the attachment. Ask `hdr()` for what you actually got.
+- **A soft knee on the bright pass.** A hard `luminance > threshold` cut
+  makes bloom pop on and off as pixels cross it, which is very visible on a
+  moving muzzle flash.
+- **ACES over Reinhard**, because it keeps saturation in the highlights
+  instead of washing bright colours toward white. Be aware the Narkowicz fit
+  used here *reaches* 1.0 near an input of 7.8 — it does not asymptote.
+- **A fullscreen triangle, not a quad**, drawn from `gl_VertexID` with no
+  vertex buffer at all. One primitive, no diagonal seam.
+- **`begin_scene()` re-enables the depth test** that `resolve()` turns off
+  for its 2D passes. Forgetting that renders the world with no depth test,
+  which looks like random geometry sorting.
+- **A degenerate size is clamped, not rejected.** The browser canvas reports
+  0×0 until it is laid out, so failing on it aborts startup on the web while
+  working fine natively.
+
+Colour management is deliberately unchanged from before this milestone:
+`GL_FRAMEBUFFER_SRGB` still does the final encode natively, and the LDR
+intermediate stores tonemapped *linear* values in 8 bits. That can band in
+dark gradients; moving the whole chain to an explicit gamma step is a
+separate change.
 
 ## Particles (M14)
 

@@ -240,7 +240,9 @@ std::optional<GltfModel> load_gltf(const std::filesystem::path& path, bool decod
 
     std::size_t decoded = 0;
     for (const GltfImage& image : model.images) {
-        decoded += image.valid() ? 1 : 0;
+        if (image.valid()) {
+            ++decoded;
+        }
     }
     log::info("glTF '{}': {} nodes, {} meshes, {} materials, {}/{} images decoded", path.string(),
               model.nodes.size(), model.meshes.size(), model.materials.size(), decoded,

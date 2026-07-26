@@ -1,5 +1,6 @@
 #include "game/server/server_game.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <utility>

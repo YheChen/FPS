@@ -62,3 +62,8 @@ jobs:
         run: |
           pip install clang-format==22.1.8
           find engine game tests -name '*.cpp' -o -name '*.h' | xargs clang-format --dry-run --Werror
+
+      # libc++ includes <algorithm> transitively, so a missing include builds
+      # on macOS and fails on MSVC. Catch it here rather than three jobs in.
+      - name: Standard header check
+        run: python3 tools/check_includes.py

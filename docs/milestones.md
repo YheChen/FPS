@@ -622,3 +622,47 @@ endpoints; four kinds of malformed skin rejected; and on the real asset —
 weights summing to 1 with in-range joints, 48 blended vertices, a rest pose
 of identity, clips retargeting, the run cycle actually moving the leg and
 looping without a pop, and every matrix staying finite across a full cycle.
+
+---
+
+## Milestone 16b — GPU skinning ✅
+
+**Objective:** actually render the rig M16a built. Remote players stop being
+stretched cubes.
+
+**Deliverables:** `GpuMesh` binds `JOINTS_0` (integer attribute) and
+`WEIGHTS_0`; a shared `skin_matrix()` GLSL helper is prepended to **both** the
+lit and depth vertex shaders, so a skinned mesh cannot cast an unskinned
+shadow; `DrawItem` gained a slice into a per-frame joint-matrix pool that both
+passes read. Animation is driven from velocity — idle/run cross-blend by
+horizontal speed, jump while airborne — and the cycle rate scales with speed
+so feet do not slide. Offline practice gets an animated mannequin, without
+which the feature would only be visible in a networked session.
+
+**The interesting failure: a 1000× WebGL performance cliff.**
+
+The obvious implementation is `uniform mat4 u_joint_matrices[32]` indexed by
+the vertex's joint id. Natively that ran at 400 fps. In the browser the same
+build dropped to **0.7 fps** — and got *worse* over time.
+
+Bisected it in two steps rather than guessing:
+
+1. Skip the mannequin entirely → **60 fps**. So the shader changes and the
+   widened vertex format cost nothing across all 25 other draws.
+2. Keep the CPU pose sampling but skip only the draw → **66 fps**. So the
+   animation maths was free too.
+
+That left one draw call of a 288-vertex mesh costing ~1500 ms: **dynamically
+indexing a uniform array in a vertex shader**. Joint matrices now travel in an
+RGBA32F texture read with `texelFetch` (`eng::JointTexture`), which is what
+WebGL engines do for exactly this reason. Result: **69 fps in the browser**,
+slightly better than the pre-character baseline, and the 32-joint uniform
+ceiling is gone as a bonus.
+
+`Shader::set_mat4_array`, added for the approach that failed, was deleted
+rather than left in the API as a trap.
+
+**Verified:** native screenshots showing the running stride and the idle pose
+as clearly distinct (proving skinning *and* clip blending, not a static bind
+pose); browser at 69 fps with the character rendering; 123 tests; GCC sweep
+(66 TUs); header check.

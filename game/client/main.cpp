@@ -38,6 +38,8 @@
 #include "engine/rendering/gl_util.h"
 #include "engine/rendering/gpu_mesh.h"
 #include "engine/rendering/light.h"
+#include "engine/rendering/particle_renderer.h"
+#include "engine/rendering/particle_sim.h"
 #include "engine/rendering/screenshot.h"
 #include "engine/rendering/shader.h"
 #include "engine/rendering/shadow_map.h"
@@ -260,6 +262,114 @@ struct DrawItem {
 // crisp pillar and player shadows without a cascade split.
 constexpr int kShadowResolution = 2048;
 
+// Enough for a shotgun blast (8 impacts) plus several older bursts still
+// fading. Bursts are clipped rather than queued when it fills.
+constexpr std::size_t kMaxParticles = 4096;
+
+// --- particle effects ----------------------------------------------------
+// Colors are premultiplied alpha: alpha 0 with bright RGB is additive glow,
+// alpha > 0 is an opaque puff. See ParticleRenderer.
+
+void emit_muzzle_flash(eng::ParticlePool& pool, const glm::vec3& position,
+                       const glm::vec3& direction, std::uint32_t seed) {
+    // Deliberately small and slow. The muzzle sits ~0.5 m from the near
+    // plane, so world-space sizes and speeds that look right out in the
+    // arena fill the screen with drifting orbs here.
+    eng::EmitParams params;
+    params.position = position;
+    params.direction = direction;
+    params.cone_radians = 0.34f;
+    params.speed = 1.1f;
+    params.speed_jitter = 0.5f;
+    params.color_start = {2.4f, 1.7f, 0.7f, 0.0f};  // additive, over-bright
+    params.color_end = {0.5f, 0.2f, 0.0f, 0.0f};
+    params.size_start = 0.055f;
+    params.size_end = 0.005f;
+    params.lifetime_seconds = 0.05f;
+    params.lifetime_jitter = 0.3f;
+    params.drag = 12.0f;
+    params.count = 8;
+    pool.emit(params, seed);
+}
+
+void emit_impact(eng::ParticlePool& pool, const glm::vec3& position, const glm::vec3& normal,
+                 std::uint32_t seed) {
+    // Sparks fly back along the surface normal and fall.
+    eng::EmitParams sparks;
+    sparks.position = position;
+    sparks.direction = normal;
+    sparks.cone_radians = 0.9f;
+    sparks.speed = 4.5f;
+    sparks.speed_jitter = 0.7f;
+    sparks.color_start = {2.0f, 1.1f, 0.35f, 0.0f};
+    sparks.color_end = {0.6f, 0.15f, 0.0f, 0.0f};
+    sparks.size_start = 0.035f;
+    sparks.size_end = 0.008f;
+    sparks.lifetime_seconds = 0.32f;
+    sparks.lifetime_jitter = 0.5f;
+    sparks.gravity = 11.0f;
+    sparks.drag = 1.4f;
+    sparks.count = 10;
+    pool.emit(sparks, seed);
+
+    // A slower dust puff, opaque so it reads against a bright wall.
+    eng::EmitParams dust;
+    dust.position = position;
+    dust.direction = normal;
+    dust.cone_radians = 1.2f;
+    dust.speed = 0.9f;
+    dust.speed_jitter = 0.6f;
+    dust.color_start = {0.34f, 0.32f, 0.30f, 0.42f};
+    dust.color_end = {0.0f, 0.0f, 0.0f, 0.0f};
+    dust.size_start = 0.10f;
+    dust.size_end = 0.34f;
+    dust.lifetime_seconds = 0.5f;
+    dust.lifetime_jitter = 0.4f;
+    dust.gravity = -1.2f;  // negative: the puff drifts upward as it thins
+    dust.drag = 3.0f;
+    dust.count = 7;
+    pool.emit(dust, seed ^ 0x5bf03635u);
+}
+
+void emit_blood(eng::ParticlePool& pool, const glm::vec3& position, const glm::vec3& direction,
+                std::uint32_t seed) {
+    eng::EmitParams params;
+    params.position = position;
+    params.direction = direction;
+    params.cone_radians = 1.0f;
+    params.speed = 3.2f;
+    params.speed_jitter = 0.7f;
+    params.color_start = {0.42f, 0.02f, 0.03f, 0.85f};
+    params.color_end = {0.10f, 0.0f, 0.0f, 0.0f};
+    params.size_start = 0.07f;
+    params.size_end = 0.02f;
+    params.lifetime_seconds = 0.45f;
+    params.lifetime_jitter = 0.4f;
+    params.gravity = 9.0f;
+    params.drag = 2.2f;
+    params.count = 14;
+    pool.emit(params, seed);
+}
+
+void emit_death_burst(eng::ParticlePool& pool, const glm::vec3& position, std::uint32_t seed) {
+    eng::EmitParams params;
+    params.position = position;
+    params.direction = {0.0f, 1.0f, 0.0f};
+    params.cone_radians = 1.55f;  // very close to a full hemisphere
+    params.speed = 6.0f;
+    params.speed_jitter = 0.8f;
+    params.color_start = {0.55f, 0.03f, 0.04f, 0.9f};
+    params.color_end = {0.08f, 0.0f, 0.0f, 0.0f};
+    params.size_start = 0.11f;
+    params.size_end = 0.03f;
+    params.lifetime_seconds = 0.8f;
+    params.lifetime_jitter = 0.5f;
+    params.gravity = 10.0f;
+    params.drag = 1.1f;
+    params.count = 46;
+    pool.emit(params, seed);
+}
+
 // Direction the sun's light travels.
 constexpr glm::vec3 kSunDirection{-0.4f, -1.0f, -0.3f};
 
@@ -423,9 +533,12 @@ int main(int argc, char** argv) {
         eng::Shader::create("shadow_depth", kDepthVertexSource, kDepthFragmentSource);
     auto debug_draw = eng::DebugDraw::create();
     auto shadow_map = eng::ShadowMap::create(kShadowResolution);
-    if (!imgui || !lit_shader || !depth_shader || !debug_draw || !shadow_map) {
+    auto particle_renderer = eng::ParticleRenderer::create(kMaxParticles);
+    if (!imgui || !lit_shader || !depth_shader || !debug_draw || !shadow_map ||
+        !particle_renderer) {
         return 1;
     }
+    eng::ParticlePool particles{kMaxParticles};
 
     // --- assets & scene ---------------------------------------------------
     const auto assets_root = eng::find_assets_root();
@@ -797,8 +910,11 @@ int main(int argc, char** argv) {
                 continue;  // offline gameplay (targets/weapon) stays offline
             }
 
-            const game::InputCommand command =
+            game::InputCommand command =
                 make_command(input, view_yaw, view_pitch, input_sequence++, desired_slot);
+            if (args.auto_fire) {
+                game::set_button(command, game::Button::Fire, true);
+            }
             const bool was_on_ground = player.on_ground;
             game::advance_player(player, command, game::kTickSeconds, controller, world);
             if (was_on_ground && !player.on_ground && player.velocity.y > 0.0f) {
@@ -814,8 +930,10 @@ int main(int argc, char** argv) {
             }
 
             // --- weapon -------------------------------------------------
-            const bool fire_held =
-                game::has_button(command, game::Button::Fire) && window->relative_mouse();
+            // Mouse capture gates firing so menu clicks do not shoot;
+            // --auto-fire is an explicit request and bypasses that.
+            const bool fire_held = game::has_button(command, game::Button::Fire) &&
+                                   (window->relative_mouse() || args.auto_fire);
             const game::WeaponTickResult shot =
                 game::update_loadout(loadout, arsenal, desired_slot, fire_held,
                                      reload_requested && !reload_consumed, game::kTickSeconds);
@@ -833,6 +951,15 @@ int main(int argc, char** argv) {
                     player.position + glm::vec3{0.0f, game::eye_height_for(player), 0.0f};
                 const glm::vec3 aim = game::view_direction(command.yaw, command.pitch);
                 const float spread = glm::radians(weapon_config.spread_degrees);
+                // There is no first-person weapon model, so the flash is
+                // placed where a muzzle would be -- forward, right and
+                // slightly down -- rather than dead centre, which reads as
+                // a light in the player's face.
+                const glm::vec3 aim_right =
+                    glm::normalize(glm::cross(aim, glm::vec3{0.0f, 1.0f, 0.0f}));
+                emit_muzzle_flash(
+                    particles, eye + aim * 0.5f + aim_right * 0.16f - glm::vec3{0.0f, 0.13f, 0.0f},
+                    aim, input_sequence);
 
                 // Same pellet loop the server runs, so offline practice and
                 // online play behave identically.
@@ -843,7 +970,8 @@ int main(int argc, char** argv) {
                     const glm::vec3 dir = game::spread_direction(aim, spread, seed);
 
                     float max_t = weapon_config.range;
-                    if (const auto wall = world.raycast(eye, dir, weapon_config.range)) {
+                    const auto wall = world.raycast(eye, dir, weapon_config.range);
+                    if (wall) {
                         max_t = wall->distance;
                     }
                     Target* hit_target = nullptr;
@@ -862,6 +990,13 @@ int main(int argc, char** argv) {
                     tracers.push_back({eye + dir * 0.4f - glm::vec3{0.0f, 0.06f, 0.0f},
                                        eye + dir * hit_t, 0.08f});
                     if (hit_target != nullptr) {
+                        emit_blood(particles, eye + dir * hit_t, -dir, seed);
+                    } else if (wall) {
+                        // Only a wall hit has a surface to spark off; a shot
+                        // that reaches its max range hits nothing at all.
+                        emit_impact(particles, eye + dir * hit_t, wall->normal, seed);
+                    }
+                    if (hit_target != nullptr) {
                         const float volume = std::clamp(1.2f - hit_t / 40.0f, 0.2f, 1.0f);
                         const bool killed =
                             game::apply_damage(hit_target->health, weapon_config.damage);
@@ -872,6 +1007,10 @@ int main(int argc, char** argv) {
                         if (killed) {
                             hit_target->respawn_remaining = kTargetRespawnSeconds;
                             ++kills;
+                            emit_death_burst(
+                                particles,
+                                hit_target->position + glm::vec3{0.0f, kTargetHeight * 0.5f, 0.0f},
+                                seed);
                             sound("kill.wav", volume);
                         } else {
                             sound("hit.wav", volume);
@@ -902,6 +1041,9 @@ int main(int argc, char** argv) {
             tracer.ttl -= static_cast<float>(dt);
         }
         std::erase_if(tracers, [](const Tracer& tracer) { return tracer.ttl <= 0.0f; });
+        // Particles advance on the render clock, not the fixed tick: they
+        // are cosmetic, so they should stay smooth rather than deterministic.
+        particles.update(static_cast<float>(dt));
         hitmarker.ttl = std::max(0.0f, hitmarker.ttl - static_cast<float>(dt));
         for (DamageNumber& number : damage_numbers) {
             number.ttl -= static_cast<float>(dt);
@@ -920,9 +1062,30 @@ int main(int argc, char** argv) {
                 // One trigger pull = one event with N pellet rays: N tracers,
                 // a single bang.
                 bool any_hit = false;
+                std::uint32_t ray_index = 0;
                 for (const game::FireRay& ray : fire.rays) {
                     tracers.push_back({fire.from + glm::vec3{0.0f, -0.06f, 0.0f}, ray.to, 0.08f});
                     any_hit = any_hit || ray.hit_player != game::kNoPlayer;
+
+                    const glm::vec3 direction = ray.to - fire.from;
+                    const float length = glm::length(direction);
+                    if (length > 1e-4f) {
+                        const glm::vec3 unit = direction / length;
+                        const std::uint32_t seed =
+                            game::hash_combine(fire.shooter * 2654435761u + ray_index,
+                                               static_cast<std::uint32_t>(client_tick));
+                        if (ray.hit_player != game::kNoPlayer) {
+                            emit_blood(particles, ray.to, -unit, seed);
+                        } else {
+                            // The server sends only the endpoint, not the
+                            // surface normal, so spray back along the ray.
+                            emit_impact(particles, ray.to, -unit, seed);
+                        }
+                        if (ray_index == 0) {
+                            emit_muzzle_flash(particles, fire.from + unit * 0.3f, unit, seed);
+                        }
+                    }
+                    ++ray_index;
                 }
                 const float distance = glm::length(fire.from - listener);
                 sound("fire.wav", std::clamp(1.1f - distance / 40.0f, 0.15f, 0.9f));
@@ -1152,6 +1315,11 @@ int main(int argc, char** argv) {
                 ++draw_calls;
             }
         }
+
+        // Particles after the opaque scene so they blend against it, and
+        // before the debug lines so tracers stay readable through smoke.
+        particle_renderer->draw(particles, view_projection, camera.right(),
+                                glm::cross(camera.right(), camera.forward()));
 
         for (const Tracer& tracer : tracers) {
             debug_draw->line(tracer.from, tracer.to, {1.0f, 0.9f, 0.4f});

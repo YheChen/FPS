@@ -458,3 +458,51 @@ the static bounds, and identity fallback on degenerate input.
 **Verified:** native screenshots showing pillars, cover boxes, ramps and
 targets all casting, with no acne on lit surfaces; and the WASM client
 rendering the same shadows in WebGL 2 at ~75 fps.
+
+---
+
+## Milestone 14 — Particle system ✅
+
+**Objective:** combat should have visible impact — muzzle flash, sparks,
+dust, blood, death bursts.
+
+**Deliverables:** `eng::ParticlePool` (headless, in `engine`) and
+`eng::ParticleRenderer` (`engine_platform`), drawing the whole pool as
+camera-facing quads in **one instanced draw call**. Four effects wired into
+both the offline and online paths: muzzle flash on fire, sparks + dust on a
+wall hit, blood on a player/target hit, and a death burst on a kill.
+
+Simulated on the CPU rather than in a compute shader, because GL 4.1 and
+WebGL 2 have neither (ADR 0003) — and a few thousand particles is not close
+to a CPU problem at 60 Hz.
+
+The design decision worth keeping is **premultiplied alpha in a single
+pass**: alpha 0 with bright RGB is additive glow, alpha > 0 is an opaque
+puff, so sparks and smoke coexist in one batch with no sort between them.
+Particles test depth but never write it, so a burst cannot punch holes in
+itself. Details in [rendering.md](rendering.md).
+
+The pool deliberately does **not** use `game/shared/rng.h` and advances on
+the render clock rather than the fixed tick. Gameplay randomness has to stay
+bit-exact for prediction and the M17 replay system; cosmetic effects must
+not be able to perturb it.
+
+**Verification hooks fixed:** `--auto-fire` only worked online, exactly like
+`--fixed-yaw` before it, so the first screenshot run of this milestone fired
+no shots at all and showed no particles. Both now work offline. Mouse
+capture still gates firing so menu clicks do not shoot; `--auto-fire` is an
+explicit request and bypasses that.
+
+**Tests:** 103 total (+7). Pool capacity clipping, emission position and
+cone bounds with genuinely varied directions, exact lifetime expiry, gravity
+integration, frame-rate-independent drag (the same interval split two ways
+gives the same speed), colour/size interpolation endpoints, and degenerate
+input — zero and negative counts, a zero direction that must not produce
+NaN velocities, non-positive timesteps, and a zero-capacity pool.
+
+**Verified:** screenshots of muzzle flash, impact sparks and dust, and
+sparks falling under gravity; a kill registering (so the death-burst path
+runs); and the WASM client initialising the particle renderer in WebGL 2
+with a clean console. Blood and death-burst *colours* were not caught
+mid-flight in a screenshot — they share the emission path that the other
+effects exercise, and differ only in their constants.

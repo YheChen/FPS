@@ -29,8 +29,56 @@ Milestone 2 (renderer). This document grows with the code.
 4. glTF environment, materials (M3) ✅
 5. Textured materials from glTF images (M12) ✅
 6. Directional shadow map for the sun (M13) ✅
-7. Point lights — later, if the maps ever need them
-8. Frustum culling — only when the map is big enough to need it
+7. Particles (M14) ✅
+8. Point lights — later, if the maps ever need them
+9. Frustum culling — only when the map is big enough to need it
+
+## Particles (M14)
+
+Split the same way as shadows: `ParticlePool` (`engine`, headless, unit
+tested) owns the simulation; `ParticleRenderer` (`engine_platform`) draws it
+as camera-facing quads in **one instanced draw call**.
+
+Simulated on the CPU, not in a compute shader — OpenGL 4.1 and WebGL 2 have
+no compute (ADR 0003). A few thousand particles is nowhere near a CPU budget
+problem at 60 Hz, and the alternative (transform feedback) buys nothing at
+this scale.
+
+### Premultiplied alpha, one pass
+
+Blending is `GL_ONE, GL_ONE_MINUS_SRC_ALPHA` and colors are premultiplied.
+That gets both looks a shooter needs out of a single pass and a single
+batch:
+
+- **alpha 0, bright RGB** → pure additive glow (muzzle flash, sparks)
+- **alpha > 0** → an opaque puff (dust, blood)
+
+Without this the system would need two batches and a sort between them.
+
+The sprite is a computed radial falloff, not a texture — one less asset to
+ship for no visual difference at these sizes.
+
+### Other decisions worth keeping
+
+- Particles **test** depth but do not **write** it. Writing depth would make
+  particles from the same burst punch holes in each other.
+- The instance buffer is orphaned (`glBufferData(..., nullptr, ...)`) before
+  each upload so the driver hands back fresh storage instead of stalling on
+  the previous frame's draw.
+- Drag is exponential (`v *= exp(-drag*dt)`), so behaviour does not change
+  with frame rate. A linear `1 - drag*dt` damping would.
+- A full pool **drops** the excess rather than growing. An effect firing
+  every frame must not be able to consume memory without bound.
+- The pool has its own hash, deliberately **not** `game/shared/rng.h`.
+  Gameplay randomness has to stay bit-exact for prediction and replay, and
+  nothing cosmetic should be able to reach into it. Particles also advance
+  on the render clock, not the fixed tick, for the same reason.
+
+Muzzle flash needs its own tuning: the muzzle sits ~0.5 m from the near
+plane, so sizes and speeds that look right out in the arena become
+screen-filling drifting orbs there. It is also offset forward/right/down,
+since there is no first-person weapon model and a flash at dead centre reads
+as a light in the player's face.
 
 ## Shadows (M13)
 

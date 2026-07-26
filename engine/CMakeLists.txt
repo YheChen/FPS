@@ -43,6 +43,8 @@ add_library(engine STATIC
     rendering/light.h
     rendering/mesh_data.cpp
     rendering/mesh_data.h
+    rendering/particle_sim.cpp
+    rendering/particle_sim.h
     scene/scene.cpp
     scene/scene.h
     scene/transform.cpp
@@ -85,6 +87,8 @@ add_library(engine_platform STATIC
     rendering/gl_util.h
     rendering/gpu_mesh.cpp
     rendering/gpu_mesh.h
+    rendering/particle_renderer.cpp
+    rendering/particle_renderer.h
     rendering/screenshot.cpp
     rendering/screenshot.h
     rendering/shader.cpp

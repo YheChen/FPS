@@ -9,6 +9,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(Catch2)
 
 add_executable(engine_tests
+    animation/skeleton_tests.cpp
     assets/gltf_loader_tests.cpp
     assets/paths_tests.cpp
     core/input_tests.cpp

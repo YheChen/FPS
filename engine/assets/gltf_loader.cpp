@@ -9,6 +9,8 @@
 #define STBI_NO_STDIO_WRITE
 #include <stb_image.h>
 
+#include <algorithm>
+#include <array>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -33,6 +35,8 @@ std::optional<MeshData> read_primitive(const cgltf_primitive& primitive,
     const cgltf_accessor* positions = nullptr;
     const cgltf_accessor* normals = nullptr;
     const cgltf_accessor* uvs = nullptr;
+    const cgltf_accessor* joints = nullptr;
+    const cgltf_accessor* weights = nullptr;
     for (cgltf_size i = 0; i < primitive.attributes_count; ++i) {
         const cgltf_attribute& attribute = primitive.attributes[i];
         if (attribute.type == cgltf_attribute_type_position) {
@@ -41,6 +45,10 @@ std::optional<MeshData> read_primitive(const cgltf_primitive& primitive,
             normals = attribute.data;
         } else if (attribute.type == cgltf_attribute_type_texcoord && attribute.index == 0) {
             uvs = attribute.data;
+        } else if (attribute.type == cgltf_attribute_type_joints && attribute.index == 0) {
+            joints = attribute.data;
+        } else if (attribute.type == cgltf_attribute_type_weights && attribute.index == 0) {
+            weights = attribute.data;
         }
     }
     if (positions == nullptr) {
@@ -77,6 +85,26 @@ std::optional<MeshData> read_primitive(const cgltf_primitive& primitive,
         if (cgltf_accessor_unpack_floats(uvs, uv_scratch.data(), vertex_count * 2) != 0) {
             for (cgltf_size v = 0; v < vertex_count; ++v) {
                 mesh.vertices[v].uv = {uv_scratch[v * 2 + 0], uv_scratch[v * 2 + 1]};
+            }
+        }
+    }
+
+    if (joints != nullptr && weights != nullptr && joints->count == vertex_count &&
+        weights->count == vertex_count) {
+        // Joint indices are integers (u8 or u16 in practice), so they go
+        // through read_uint rather than the float unpacker.
+        std::array<cgltf_uint, 4> joint_scratch{};
+        std::vector<float> weight_scratch(vertex_count * 4);
+        const bool weights_ok =
+            cgltf_accessor_unpack_floats(weights, weight_scratch.data(), vertex_count * 4) != 0;
+        for (cgltf_size v = 0; v < vertex_count; ++v) {
+            if (cgltf_accessor_read_uint(joints, v, joint_scratch.data(), 4)) {
+                mesh.vertices[v].joints = {joint_scratch[0], joint_scratch[1], joint_scratch[2],
+                                           joint_scratch[3]};
+            }
+            if (weights_ok) {
+                mesh.vertices[v].weights = {weight_scratch[v * 4 + 0], weight_scratch[v * 4 + 1],
+                                            weight_scratch[v * 4 + 2], weight_scratch[v * 4 + 3]};
             }
         }
     }
@@ -232,10 +260,128 @@ std::optional<GltfModel> load_gltf(const std::filesystem::path& path, bool decod
         GltfNode out;
         out.name = node.name != nullptr ? node.name : "";
         cgltf_node_transform_world(&node, &out.transform[0][0]);
+
+        // Local TRS as well as the flattened world matrix: animation has to
+        // re-pose the hierarchy each frame, which a flattened matrix cannot
+        // express. cgltf leaves these at their defaults when the file used a
+        // matrix instead, and has_* says which form was authored.
+        if (node.has_translation != 0) {
+            out.translation = {node.translation[0], node.translation[1], node.translation[2]};
+        }
+        if (node.has_rotation != 0) {
+            // glTF stores xyzw; glm::quat's constructor takes w first.
+            out.rotation =
+                glm::quat{node.rotation[3], node.rotation[0], node.rotation[1], node.rotation[2]};
+        }
+        if (node.has_scale != 0) {
+            out.scale = {node.scale[0], node.scale[1], node.scale[2]};
+        }
+
         if (node.mesh != nullptr) {
             out.mesh = static_cast<int>(node.mesh - data->meshes);
         }
+        if (node.skin != nullptr) {
+            out.skin = static_cast<int>(node.skin - data->skins);
+        }
+        if (node.parent != nullptr) {
+            out.parent = static_cast<int>(node.parent - data->nodes);
+        }
+        out.children.reserve(node.children_count);
+        for (cgltf_size c = 0; c < node.children_count; ++c) {
+            out.children.push_back(static_cast<int>(node.children[c] - data->nodes));
+        }
         model.nodes.push_back(std::move(out));
+    }
+
+    model.skins.reserve(data->skins_count);
+    for (cgltf_size i = 0; i < data->skins_count; ++i) {
+        const cgltf_skin& skin = data->skins[i];
+        GltfSkin out;
+        out.name = skin.name != nullptr ? skin.name : "";
+        out.joints.reserve(skin.joints_count);
+        for (cgltf_size j = 0; j < skin.joints_count; ++j) {
+            out.joints.push_back(static_cast<int>(skin.joints[j] - data->nodes));
+        }
+        if (skin.skeleton != nullptr) {
+            out.skeleton_root = static_cast<int>(skin.skeleton - data->nodes);
+        }
+        if (skin.inverse_bind_matrices != nullptr) {
+            const cgltf_size count = skin.inverse_bind_matrices->count;
+            std::vector<float> scratch(count * 16);
+            if (cgltf_accessor_unpack_floats(skin.inverse_bind_matrices, scratch.data(),
+                                             count * 16) != 0) {
+                out.inverse_bind_matrices.resize(count);
+                for (cgltf_size m = 0; m < count; ++m) {
+                    // glTF matrices are column-major, same as glm.
+                    std::memcpy(&out.inverse_bind_matrices[m][0][0], &scratch[m * 16],
+                                sizeof(float) * 16);
+                }
+            }
+        }
+        if (out.inverse_bind_matrices.size() != out.joints.size()) {
+            // Without a matching inverse bind matrix per joint the skin
+            // cannot be posed, and guessing identity would silently render a
+            // mangled mesh.
+            log::error("glTF '{}': skin '{}' has {} joints but {} inverse bind matrices",
+                       path.string(), out.name, out.joints.size(),
+                       out.inverse_bind_matrices.size());
+            return std::nullopt;
+        }
+        model.skins.push_back(std::move(out));
+    }
+
+    model.animations.reserve(data->animations_count);
+    for (cgltf_size i = 0; i < data->animations_count; ++i) {
+        const cgltf_animation& animation = data->animations[i];
+        GltfAnimation out;
+        out.name = animation.name != nullptr ? animation.name : "";
+        for (cgltf_size c = 0; c < animation.channels_count; ++c) {
+            const cgltf_animation_channel& channel = animation.channels[c];
+            if (channel.target_node == nullptr || channel.sampler == nullptr) {
+                continue;
+            }
+            GltfAnimationChannel out_channel;
+            out_channel.node = static_cast<int>(channel.target_node - data->nodes);
+            switch (channel.target_path) {
+                case cgltf_animation_path_type_translation:
+                    out_channel.path = GltfAnimationPath::Translation;
+                    break;
+                case cgltf_animation_path_type_rotation:
+                    out_channel.path = GltfAnimationPath::Rotation;
+                    break;
+                case cgltf_animation_path_type_scale:
+                    out_channel.path = GltfAnimationPath::Scale;
+                    break;
+                default:
+                    continue;  // weights (morph targets) are not supported
+            }
+
+            const cgltf_accessor* times = channel.sampler->input;
+            const cgltf_accessor* values = channel.sampler->output;
+            if (times == nullptr || values == nullptr || times->count == 0 ||
+                values->count != times->count) {
+                continue;
+            }
+            const cgltf_size components = out_channel.path == GltfAnimationPath::Rotation ? 4u : 3u;
+
+            out_channel.times.resize(times->count);
+            if (cgltf_accessor_unpack_floats(times, out_channel.times.data(), times->count) == 0) {
+                continue;
+            }
+            std::vector<float> scratch(values->count * components);
+            if (cgltf_accessor_unpack_floats(values, scratch.data(), scratch.size()) == 0) {
+                continue;
+            }
+            out_channel.values.resize(values->count);
+            for (cgltf_size k = 0; k < values->count; ++k) {
+                out_channel.values[k] = {scratch[k * components + 0], scratch[k * components + 1],
+                                         scratch[k * components + 2],
+                                         components == 4 ? scratch[k * components + 3] : 0.0f};
+            }
+            out.duration_seconds = std::max(out.duration_seconds, out_channel.times.back());
+            out.channels.push_back(std::move(out_channel));
+        }
+        model.animations.push_back(std::move(out));
     }
 
     std::size_t decoded = 0;
@@ -244,9 +390,11 @@ std::optional<GltfModel> load_gltf(const std::filesystem::path& path, bool decod
             ++decoded;
         }
     }
-    log::info("glTF '{}': {} nodes, {} meshes, {} materials, {}/{} images decoded", path.string(),
-              model.nodes.size(), model.meshes.size(), model.materials.size(), decoded,
-              model.images.size());
+    log::info(
+        "glTF '{}': {} nodes, {} meshes, {} materials, {}/{} images decoded, {} skins, {} "
+        "animations",
+        path.string(), model.nodes.size(), model.meshes.size(), model.materials.size(), decoded,
+        model.images.size(), model.skins.size(), model.animations.size());
     return model;
 }
 

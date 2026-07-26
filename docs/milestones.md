@@ -561,3 +561,64 @@ detail slightly; the luma early-out keeps that to edges.
 tonemapped *linear* values in 8 bits, which can band in dark gradients.
 Colour management is otherwise exactly as it was before this milestone —
 moving the chain to an explicit gamma step is a separate change.
+
+---
+
+## Milestone 16a — Skeletal animation: asset, loader, sampling ✅
+
+**Objective:** everything skeletal animation needs *except* the GPU. Split
+from the rendering half so each part is verifiable on its own: this one is
+pure data and pure functions, so it is unit-tested rather than eyeballed.
+M16b does GPU skinning and replaces the stretched-cube players.
+
+**Deliverables:**
+
+- `tools/gen_character.py` — a rigged, animated player figure written as a
+  self-contained `.glb`, same pure-python approach as `gen_arena.py`. 12
+  joints, 288 vertices, three clips (`idle`, `run`, `jump`). Blocky on
+  purpose: the engineering risk here is joint-matrix maths, and a small rig
+  makes those failures readable. Swapping in a real glTF character later
+  changes only this asset.
+- `gltf_loader` now reads **skins** (joints, inverse bind matrices),
+  **animations** (translation/rotation/scale channels), and each node's
+  **local TRS plus hierarchy**. The flattened world transform stays for
+  static geometry; animation cannot work from a flattened matrix.
+- `engine/animation/skeleton.h` — `Skeleton`, `AnimationClip`, `Pose`,
+  clip sampling, pose blending, and `pose_to_joint_matrices`. Headless, in
+  `engine`, like `light.h` and `particle_sim.h` before it.
+- `Vertex` gained `joints` + `weights`. One vertex format for skinned and
+  static geometry: 32 wasted bytes on a few hundred arena vertices is worth
+  avoiding a second layout, a second `GpuMesh` path and a second shader
+  family.
+
+**Two problems the tests found, both real:**
+
+1. **The torso could not blend.** The rig is mostly rigid parts, with the
+   torso meant to be the one place multi-joint weights get exercised. But a
+   plain box only has vertices at its extremes, so the height ramp always
+   evaluated to exactly 0 or 1 — zero blended vertices, and the shader's
+   4-bone blend would have gone untested. The torso is now subdivided into 4
+   vertical rings; 48 vertices genuinely blend.
+2. **`Pose::resize()` is a footgun.** It zeroes translations, which collapses
+   every joint onto its parent. I hit this writing the tests. Added
+   `Skeleton::rest_pose(Pose&)` and documented the trap on `resize` itself.
+
+**Invariants worth keeping:** joints are stored in the skin's own order
+(vertex `JOINTS_0` indices refer to it) with parents guaranteed to precede
+children, so a pose resolves in one forward pass. A skin whose parents do not
+precede their children is **rejected**, not silently reordered — reordering
+would invalidate every vertex's joint indices. Poses are blended as local
+TRS, never as world matrices, and rotations use slerp: a component-wise mix
+of quaternions shortens the arc and makes limbs dip toward the origin
+mid-transition.
+
+**Tests:** 123 total (+13). Rest pose *is* the identity (`world *
+inverse_bind`, the invariant that catches a transposed matrix or a reversed
+parent/child multiply before anything renders); a parent rotation carrying
+its child to a hand-computed position; keyframe interpolation, clamping,
+forward looping and negative-time looping; untouched joints keeping their
+bind transform; slerp blending staying unit-length with exact clamped
+endpoints; four kinds of malformed skin rejected; and on the real asset —
+weights summing to 1 with in-range joints, 48 blended vertices, a rest pose
+of identity, clips retargeting, the run cycle actually moving the leg and
+looping without a pop, and every matrix staying finite across a full cycle.

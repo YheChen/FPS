@@ -1,11 +1,13 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 #include "engine/rendering/mesh_data.h"
 
@@ -49,13 +51,51 @@ struct GltfMesh {
     std::vector<GltfPrimitive> primitives;
 };
 
-// Nodes are flattened: `transform` is the world transform. Nodes without a
-// mesh (mesh == -1) are markers (e.g. "spawn_0"); games interpret them by
-// name.
+// `transform` is the flattened world transform of the rest pose, which is
+// what static geometry (arena collision, scene entities) wants. The local
+// TRS and hierarchy are also kept, because animation has to re-pose the
+// hierarchy every frame and cannot work from a flattened matrix.
+//
+// Nodes without a mesh (mesh == -1) are markers (e.g. "spawn_0") or joints;
+// games interpret them by name.
 struct GltfNode {
     std::string name;
-    glm::mat4 transform{1.0f};
+    glm::mat4 transform{1.0f};  // world, rest pose
+    glm::vec3 translation{0.0f};
+    glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f};  // w, x, y, z
+    glm::vec3 scale{1.0f};
     int mesh = -1;
+    int skin = -1;    // index into GltfModel::skins, -1 = not skinned
+    int parent = -1;  // index into GltfModel::nodes, -1 = a scene root
+    std::vector<int> children;
+};
+
+// A skin binds a mesh's vertex joint indices to a set of nodes.
+struct GltfSkin {
+    std::string name;
+    // Vertex JOINTS_0 values index into THIS list, not into `nodes`.
+    std::vector<int> joints;
+    // Parallel to `joints`: transforms model space into each joint's local
+    // space, undoing the rest pose.
+    std::vector<glm::mat4> inverse_bind_matrices;
+    int skeleton_root = -1;  // node index, -1 if the file did not say
+};
+
+enum class GltfAnimationPath : std::uint8_t { Translation, Rotation, Scale };
+
+// One animated property of one node. `times` and `values` are parallel.
+// Rotations are quaternions; translation and scale use only xyz.
+struct GltfAnimationChannel {
+    int node = -1;
+    GltfAnimationPath path = GltfAnimationPath::Rotation;
+    std::vector<float> times;
+    std::vector<glm::vec4> values;
+};
+
+struct GltfAnimation {
+    std::string name;
+    float duration_seconds = 0.0f;
+    std::vector<GltfAnimationChannel> channels;
 };
 
 struct GltfModel {
@@ -63,6 +103,8 @@ struct GltfModel {
     std::vector<GltfMaterial> materials;
     std::vector<GltfMesh> meshes;
     std::vector<GltfNode> nodes;
+    std::vector<GltfSkin> skins;
+    std::vector<GltfAnimation> animations;
 };
 
 // Loads a glTF file. Returns nullopt (with error logs) on any parse or

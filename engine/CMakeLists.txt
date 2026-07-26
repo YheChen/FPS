@@ -7,6 +7,8 @@
 #                      rendering and debug UI. Client-only.
 
 add_library(engine STATIC
+    animation/skeleton.cpp
+    animation/skeleton.h
     assets/asset_cache.cpp
     assets/asset_cache.h
     assets/gltf_loader.cpp

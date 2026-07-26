@@ -37,6 +37,7 @@
 #include "engine/rendering/debug_draw.h"
 #include "engine/rendering/gl_util.h"
 #include "engine/rendering/gpu_mesh.h"
+#include "engine/rendering/screenshot.h"
 #include "engine/rendering/shader.h"
 #include "engine/rendering/texture.h"
 #include "engine/scene/scene.h"
@@ -108,8 +109,9 @@ struct ClientArgs {
                                 // block on swap (macOS throttles occluded windows)
     eng::NetSimConfig net_sim;  // --fake-latency/--fake-jitter/--fake-loss
     // Automated-verification hooks (harmless in normal play):
-    bool auto_fire = false;          // hold the trigger every tick
-    std::optional<float> fixed_yaw;  // lock the view yaw (radians)
+    bool auto_fire = false;                 // hold the trigger every tick
+    std::optional<float> fixed_yaw;         // lock the view yaw (radians)
+    std::optional<std::string> screenshot;  // PNG written on the final frame
 };
 
 ClientArgs parse_args(int argc, char** argv) {
@@ -148,6 +150,10 @@ ClientArgs parse_args(int argc, char** argv) {
             }
         } else if (arg == "--no-vsync") {
             args.vsync = false;
+        } else if (arg == "--screenshot") {
+            if (const auto value = next_value()) {
+                args.screenshot = std::string(*value);
+            }
         } else if (arg == "--auto-fire") {
             args.auto_fire = true;
         } else if (arg == "--fixed-yaw") {
@@ -183,6 +189,7 @@ ClientArgs parse_args(int argc, char** argv) {
 struct RenderPrimitive {
     eng::GpuMesh gpu;
     glm::vec3 color{1.0f};
+    int texture = -1;  // index into the arena texture list, -1 = untextured
 };
 
 void draw_capsule(eng::DebugDraw& draw, const glm::vec3& feet, float radius, float height,
@@ -358,21 +365,48 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Base color images are sRGB-encoded; the shader wants linear values, so
+    // GL does the conversion on sample. No vertical flip: glTF's UV origin is
+    // top-left and stb decodes top-row-first, so the two conventions cancel.
+    // The list stays index-aligned with arena->images so material indices
+    // work directly; anything that failed to decode gets the missing-texture
+    // checkerboard rather than silently rendering untextured.
+    std::vector<eng::Texture2D> arena_textures;
+    arena_textures.reserve(arena->images.size());
+    for (const eng::GltfImage& image : arena->images) {
+        if (image.valid()) {
+            arena_textures.push_back(
+                eng::Texture2D::from_pixels(image.width, image.height, image.pixels, true));
+        } else {
+            eng::log::warn("Arena image '{}' has no pixels; using the missing-texture pattern",
+                           image.name);
+            arena_textures.push_back(
+                eng::Texture2D::checkerboard(64, 8, {255, 0, 255}, {40, 40, 40}));
+        }
+    }
+
     std::vector<std::vector<RenderPrimitive>> render_meshes;
     render_meshes.reserve(arena->meshes.size());
     for (const eng::GltfMesh& mesh : arena->meshes) {
         std::vector<RenderPrimitive> primitives;
         for (const eng::GltfPrimitive& primitive : mesh.primitives) {
-            RenderPrimitive rp{eng::GpuMesh::upload(primitive.mesh), glm::vec3{1.0f}};
+            RenderPrimitive rp{eng::GpuMesh::upload(primitive.mesh), glm::vec3{1.0f}, -1};
             if (primitive.material >= 0) {
-                rp.color = glm::vec3(
-                    arena->materials[static_cast<std::size_t>(primitive.material)].base_color);
+                const eng::GltfMaterial& material =
+                    arena->materials[static_cast<std::size_t>(primitive.material)];
+                rp.color = glm::vec3(material.base_color);
+                if (material.base_color_image >= 0 &&
+                    static_cast<std::size_t>(material.base_color_image) < arena_textures.size()) {
+                    rp.texture = material.base_color_image;
+                }
             }
             primitives.push_back(std::move(rp));
         }
         render_meshes.push_back(std::move(primitives));
     }
 
+    // Stand-in for untextured geometry (players, targets) so the lit shader
+    // always has something bound to sample.
     const eng::Texture2D white =
         eng::Texture2D::checkerboard(4, 1, {255, 255, 255}, {255, 255, 255});
     const eng::GpuMesh cube = eng::GpuMesh::upload(eng::MeshData::unit_cube());
@@ -907,7 +941,22 @@ int main(int argc, char** argv) {
         lit_shader->set_vec3("u_ambient", {0.20f, 0.22f, 0.26f});
         lit_shader->set_vec3("u_camera_pos", camera.position);
         lit_shader->set_int("u_base_color", 0);
+
+        // Texture binds are the only per-draw GL state here, so track the
+        // current one and only switch when the material actually changes.
+        int bound_texture = -1;  // -1 = the white fallback
         white.bind(0);
+        const auto bind_texture = [&](int texture) {
+            if (texture == bound_texture) {
+                return;
+            }
+            bound_texture = texture;
+            if (texture < 0) {
+                white.bind(0);
+            } else {
+                arena_textures[static_cast<std::size_t>(texture)].bind(0);
+            }
+        };
 
         scene.each([&](eng::EntityId, eng::Entity& entity) {
             if (!entity.visible || entity.mesh < 0) {
@@ -918,11 +967,14 @@ int main(int argc, char** argv) {
             lit_shader->set_mat3("u_normal_matrix", glm::mat3(glm::transpose(glm::inverse(model))));
             for (const RenderPrimitive& primitive :
                  render_meshes[static_cast<std::size_t>(entity.mesh)]) {
+                bind_texture(primitive.texture);
                 lit_shader->set_vec3("u_tint", primitive.color * glm::vec3(entity.tint));
                 primitive.gpu.draw();
                 ++draw_calls;
             }
         });
+
+        bind_texture(-1);  // players and targets are untextured
 
         // Remote players (online): interpolated ~100 ms in the past.
         if (online) {
@@ -1210,7 +1262,7 @@ int main(int argc, char** argv) {
                                         : IM_COL32(255, 255, 255, static_cast<int>(230 * fade));
                 constexpr float kInner = 5.0f;
                 constexpr float kOuter = 12.0f;
-                for (const auto [sx, sy] : {std::pair{1.0f, 1.0f}, std::pair{-1.0f, 1.0f}}) {
+                for (const auto& [sx, sy] : {std::pair{1.0f, 1.0f}, std::pair{-1.0f, 1.0f}}) {
                     overlay->AddLine({center.x + sx * kInner, center.y + sy * kInner},
                                      {center.x + sx * kOuter, center.y + sy * kOuter}, color, 2.0f);
                     overlay->AddLine({center.x - sx * kInner, center.y - sy * kInner},
@@ -1290,13 +1342,23 @@ int main(int argc, char** argv) {
         }
         imgui->end_frame();
 
+        const bool last_frame = args.run_seconds && clock.elapsed() >= *args.run_seconds;
+
+#if !defined(__EMSCRIPTEN__)
+        // Grab the finished frame from the back buffer before it is swapped
+        // out; after the swap its contents are undefined.
+        if (last_frame && args.screenshot) {
+            eng::save_framebuffer_png(*args.screenshot, window->width_px(), window->height_px());
+        }
+#endif
+
         window->swap();
 
 #if defined(ENG_ENABLE_ASSERTS)
         eng::check_gl_errors("frame end");
 #endif
 
-        if (args.run_seconds && clock.elapsed() >= *args.run_seconds) {
+        if (last_frame) {
             eng::log::info("--run-seconds elapsed; quitting (pos=({:.2f},{:.2f},{:.2f}))",
                            player.position.x, player.position.y, player.position.z);
             running = false;

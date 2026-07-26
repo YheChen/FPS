@@ -5,6 +5,7 @@ dist/
 
 # Local user state
 fps_settings.cfg
+handover.json
 
 # IDE / editor
 .vscode/

@@ -20,8 +20,10 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
+#include "engine/animation/skeleton.h"
 #include "engine/assets/asset_cache.h"
 #include "engine/assets/paths.h"
 #include "engine/audio/audio_engine.h"
@@ -37,6 +39,7 @@
 #include "engine/rendering/debug_draw.h"
 #include "engine/rendering/gl_util.h"
 #include "engine/rendering/gpu_mesh.h"
+#include "engine/rendering/joint_texture.h"
 #include "engine/rendering/light.h"
 #include "engine/rendering/particle_renderer.h"
 #include "engine/rendering/particle_sim.h"
@@ -62,6 +65,53 @@ namespace {
 
 // Shaders omit #version; Shader::create prepends the platform preamble
 // (desktop GLSL 410 core vs WebGL2 GLSL ES 300).
+// Skinning is shared by the lit and depth shaders, so the two passes cannot
+// disagree about where a vertex is -- a skinned mesh that casts an unskinned
+// shadow is a very confusing bug to look at.
+//
+// 32 joints is 128 vec4 of uniform space. GL 4.1 and WebGL 2 both guarantee
+// at least 256 vertex uniform vectors and the rest of this shader uses ~15,
+// so a plain uniform array is enough; a UBO would only be needed for a much
+// larger rig.
+constexpr std::string_view kSkinningGlsl = R"(
+layout(location = 3) in uvec4 a_joints;
+layout(location = 4) in vec4 a_weights;
+uniform sampler2D u_joint_texture;   // one matrix per row, 4 RGBA texels wide
+uniform bool u_skinned;
+
+mat4 joint_matrix(uint index) {
+    int row = int(index);
+    return mat4(texelFetch(u_joint_texture, ivec2(0, row), 0),
+                texelFetch(u_joint_texture, ivec2(1, row), 0),
+                texelFetch(u_joint_texture, ivec2(2, row), 0),
+                texelFetch(u_joint_texture, ivec2(3, row), 0));
+}
+
+// Returns the matrix to apply before u_model. Static geometry carries all
+// weights at 0, so it must fall through to the identity rather than
+// accumulating nothing and collapsing to the origin.
+//
+// Joint matrices arrive in a texture, not a uniform array: dynamically
+// indexing a uniform array is a severe WebGL 2 performance cliff (see
+// joint_texture.h).
+mat4 skin_matrix() {
+    if (!u_skinned) {
+        return mat4(1.0);
+    }
+    float total = a_weights.x + a_weights.y + a_weights.z + a_weights.w;
+    if (total <= 0.0) {
+        return mat4(1.0);
+    }
+    mat4 skin = a_weights.x * joint_matrix(a_joints.x) +
+                a_weights.y * joint_matrix(a_joints.y) +
+                a_weights.z * joint_matrix(a_joints.z) +
+                a_weights.w * joint_matrix(a_joints.w);
+    // Renormalize rather than trusting the asset: weights that sum to 0.98
+    // would shrink the mesh slightly, which reads as a wobble in motion.
+    return skin / total;
+}
+)";
+
 constexpr std::string_view kLitVertexSource = R"(
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec3 a_normal;
@@ -73,9 +123,13 @@ out vec3 v_world_pos;
 out vec3 v_normal;
 out vec2 v_uv;
 void main() {
-    vec4 world = u_model * vec4(a_position, 1.0);
+    mat4 skin = skin_matrix();
+    vec4 world = u_model * skin * vec4(a_position, 1.0);
     v_world_pos = world.xyz;
-    v_normal = u_normal_matrix * a_normal;
+    // The joint rotation has to reach the normal too, or a skinned limb keeps
+    // the lighting of its bind pose. mat3 of the skin matrix is close enough
+    // here: joints are rigid, with no non-uniform scale to invert-transpose.
+    v_normal = u_normal_matrix * (mat3(skin) * a_normal);
     v_uv = a_uv;
     gl_Position = u_view_projection * world;
 }
@@ -150,7 +204,7 @@ layout(location = 0) in vec3 a_position;
 uniform mat4 u_model;
 uniform mat4 u_light_view_projection;
 void main() {
-    gl_Position = u_light_view_projection * u_model * vec4(a_position, 1.0);
+    gl_Position = u_light_view_projection * u_model * skin_matrix() * vec4(a_position, 1.0);
 }
 )";
 
@@ -250,14 +304,53 @@ struct RenderPrimitive {
     int texture = -1;  // index into the arena texture list, -1 = untextured
 };
 
+// Upper bound on rig size; the joint texture is sized to this.
+constexpr std::size_t kMaxJoints = 32;
+
 // One drawable submission, shared by the shadow pass and the lit pass.
-// `mesh` indexes the arena render meshes; -1 means the unit cube (players
-// and targets).
+enum class DrawKind : std::uint8_t {
+    ArenaMesh,  // `mesh` indexes render_meshes
+    Cube,       // the unit cube (targets)
+    Character,  // the skinned figure, posed by `joint_offset`
+};
+
 struct DrawItem {
     glm::mat4 model{1.0f};
+    DrawKind kind = DrawKind::Cube;
     int mesh = -1;
     glm::vec3 tint{1.0f};
+    // Slice into the frame's joint-matrix pool. Both passes read the same
+    // slice, so a character cannot be posed differently for its shadow.
+    int joint_offset = -1;
+    int joint_count = 0;
 };
+
+// Animation state for one figure. Cosmetic, like particles: driven by the
+// render clock and never fed back into the simulation.
+struct CharacterAnimation {
+    float clip_time = 0.0f;   // position within idle/run
+    float run_weight = 0.0f;  // 0 = idle, 1 = run
+    float air_time = 0.0f;    // position within the jump clip
+    bool airborne = false;
+};
+
+// Blends toward running with horizontal speed and switches to the jump clip
+// off the ground. `run_speed` is the speed at which the run blend saturates.
+void update_character_animation(CharacterAnimation& animation, const glm::vec3& velocity,
+                                bool on_ground, float run_speed, float dt) {
+    const float horizontal = glm::length(glm::vec2{velocity.x, velocity.z});
+    const float target = glm::clamp(horizontal / std::max(run_speed, 0.01f), 0.0f, 1.0f);
+    // Ease toward the target so a stop does not snap mid-stride.
+    animation.run_weight += (target - animation.run_weight) * std::min(1.0f, dt * 9.0f);
+
+    // The cycle advances with speed, so the feet do not appear to slide: a
+    // fixed playback rate looks wrong at every speed but one.
+    const float rate = glm::mix(1.0f, std::max(1.0f, horizontal / 3.0f), animation.run_weight);
+    animation.clip_time += dt * rate;
+
+    animation.airborne = !on_ground;
+    animation.air_time = on_ground ? 0.0f : animation.air_time + dt;
+}
 
 // 2048^2 over a ~45 m arena is roughly 2 cm per texel, which is enough for
 // crisp pillar and player shadows without a cascade split.
@@ -529,15 +622,19 @@ int main(int argc, char** argv) {
         return 1;
     }
     auto imgui = eng::ImGuiLayer::create(*window);
-    auto lit_shader = eng::Shader::create("lit", kLitVertexSource, kLitFragmentSource);
-    auto depth_shader =
-        eng::Shader::create("shadow_depth", kDepthVertexSource, kDepthFragmentSource);
+    // Both vertex stages get the same skinning helper prepended, so the two
+    // passes cannot disagree about where a skinned vertex ends up.
+    const std::string lit_vertex = std::string(kSkinningGlsl) + std::string(kLitVertexSource);
+    const std::string depth_vertex = std::string(kSkinningGlsl) + std::string(kDepthVertexSource);
+    auto lit_shader = eng::Shader::create("lit", lit_vertex, kLitFragmentSource);
+    auto depth_shader = eng::Shader::create("shadow_depth", depth_vertex, kDepthFragmentSource);
     auto debug_draw = eng::DebugDraw::create();
     auto shadow_map = eng::ShadowMap::create(kShadowResolution);
     auto particle_renderer = eng::ParticleRenderer::create(kMaxParticles);
     auto postfx = eng::PostFx::create(window->width_px(), window->height_px());
+    auto joint_texture = eng::JointTexture::create(kMaxJoints);
     if (!imgui || !lit_shader || !depth_shader || !debug_draw || !shadow_map ||
-        !particle_renderer || !postfx) {
+        !particle_renderer || !postfx || !joint_texture) {
         return 1;
     }
     eng::ParticlePool particles{kMaxParticles};
@@ -601,8 +698,76 @@ int main(int argc, char** argv) {
         eng::Texture2D::checkerboard(4, 1, {255, 255, 255}, {255, 255, 255});
     const eng::GpuMesh cube = eng::GpuMesh::upload(eng::MeshData::unit_cube());
 
+    // --- skinned character -------------------------------------------------
+    // One mesh, one skeleton, shared by every figure on screen: only the
+    // joint matrices differ per figure.
+    const eng::GltfModel* character_model = assets.model("models/character.glb");
+    if (character_model == nullptr || character_model->skins.empty() ||
+        character_model->meshes.empty()) {
+        eng::log::error("Character model missing or has no skin");
+        return 1;
+    }
+    auto character_skeleton = eng::Skeleton::from_gltf(*character_model, character_model->skins[0]);
+    if (!character_skeleton) {
+        return 1;
+    }
+    if (character_skeleton->joint_count() > kMaxJoints) {
+        eng::log::error("Character has {} joints; the shader holds {}",
+                        character_skeleton->joint_count(), kMaxJoints);
+        return 1;
+    }
+    const std::vector<eng::AnimationClip> character_clips =
+        eng::build_clips(*character_model, *character_skeleton);
+    const eng::AnimationClip* clip_idle = eng::find_clip(character_clips, "idle");
+    const eng::AnimationClip* clip_run = eng::find_clip(character_clips, "run");
+    const eng::AnimationClip* clip_jump = eng::find_clip(character_clips, "jump");
+    if (clip_idle == nullptr || clip_run == nullptr || clip_jump == nullptr) {
+        eng::log::error("Character is missing one of the idle/run/jump clips");
+        return 1;
+    }
+    const eng::GpuMesh character_mesh =
+        eng::GpuMesh::upload(character_model->meshes[0].primitives[0].mesh);
+    eng::log::info("Character: {} joints, {} clips", character_skeleton->joint_count(),
+                   character_clips.size());
+
+    // Resolves a CharacterAnimation into joint matrices appended to `pool`,
+    // returning the offset. Scratch poses are function-local statics so the
+    // per-frame path does not allocate.
+    const auto append_character_pose = [&](const CharacterAnimation& animation,
+                                           std::vector<glm::mat4>& pool) -> int {
+        static eng::Pose idle_pose;
+        static eng::Pose run_pose;
+        static eng::Pose blended;
+        static std::vector<glm::mat4> matrices;
+
+        eng::sample_clip(*character_skeleton, *clip_idle, animation.clip_time, true, idle_pose);
+        if (animation.airborne) {
+            // Jump does not loop: it holds its last frame while in the air.
+            eng::sample_clip(*character_skeleton, *clip_jump, animation.air_time, false, run_pose);
+            eng::blend_poses(idle_pose, run_pose, 1.0f, blended);
+        } else {
+            eng::sample_clip(*character_skeleton, *clip_run, animation.clip_time, true, run_pose);
+            eng::blend_poses(idle_pose, run_pose, animation.run_weight, blended);
+        }
+        eng::pose_to_joint_matrices(*character_skeleton, blended, matrices);
+
+        const auto offset = static_cast<int>(pool.size());
+        pool.insert(pool.end(), matrices.begin(), matrices.end());
+        return offset;
+    };
+
     // Rebuilt every frame but kept allocated across frames.
     std::vector<DrawItem> draw_items;
+    std::vector<glm::mat4> joint_pool;
+
+    // Offline practice has no remote players, so a mannequin stands near the
+    // centre platform: without it there is nothing skinned to look at, and
+    // the whole feature would only be visible in a networked session.
+    CharacterAnimation dummy_animation;
+    const glm::vec3 dummy_position{11.0f, 0.0f, 10.0f};
+    // Animation phase has to persist per player across frames, or every
+    // figure resets to the start of its cycle every frame and never moves.
+    std::unordered_map<std::uint8_t, CharacterAnimation> remote_animations;
 
     eng::Scene scene;
     std::vector<glm::vec3> spawn_points;
@@ -1199,13 +1364,29 @@ int main(int argc, char** argv) {
         // list once is what keeps the two passes from drifting apart -- a
         // caster missing from one of them is the classic shadow bug.
         draw_items.clear();
+        joint_pool.clear();
         scene.each([&](eng::EntityId, eng::Entity& entity) {
             if (!entity.visible || entity.mesh < 0) {
                 return;
             }
-            draw_items.push_back(
-                {entity.transform.to_matrix(), entity.mesh, glm::vec3(entity.tint)});
+            draw_items.push_back({entity.transform.to_matrix(), DrawKind::ArenaMesh, entity.mesh,
+                                  glm::vec3(entity.tint), -1, 0});
         });
+
+        // Offline: an animated mannequin, so there is something skinned to
+        // look at without a server. It cycles idle -> run -> idle so both the
+        // blend and the cycle rate are visible standing still.
+        if (!online) {
+            const float phase = std::fmod(static_cast<float>(clock.elapsed()), 8.0f);
+            const glm::vec3 fake_velocity =
+                phase < 4.0f ? glm::vec3{0.0f, 0.0f, -5.5f} : glm::vec3{0.0f};
+            update_character_animation(dummy_animation, fake_velocity, true, game::kMove.max_speed,
+                                       static_cast<float>(dt));
+            const int offset = append_character_pose(dummy_animation, joint_pool);
+            draw_items.push_back({glm::translate(glm::mat4{1.0f}, dummy_position),
+                                  DrawKind::Character, -1, glm::vec3{0.85f, 0.86f, 0.92f}, offset,
+                                  static_cast<int>(character_skeleton->joint_count())});
+        }
 
         // Remote players (online): interpolated ~100 ms in the past.
         if (online) {
@@ -1217,13 +1398,33 @@ int main(int argc, char** argv) {
                 if (!pose || (pose->flags & game::kFlagAlive) == 0) {
                     continue;  // dead players are not drawn
                 }
-                glm::mat4 model =
-                    glm::translate(glm::mat4{1.0f}, pose->position + glm::vec3{0.0f, 0.9f, 0.0f});
-                model = glm::scale(model, {0.8f, 1.8f, 0.8f});
+                // The character's feet sit at its origin, so the snapshot
+                // position is used directly -- no half-height offset like the
+                // stretched cube needed. Yaw comes from the snapshot, so a
+                // player faces the way they are looking.
+                glm::mat4 model = glm::translate(glm::mat4{1.0f}, pose->position);
+                model = glm::rotate(model, pose->yaw, glm::vec3{0.0f, 1.0f, 0.0f});
+
+                // Snapshots carry no velocity, so it is estimated from two
+                // interpolated samples. That is only used to pick a clip and
+                // a playback rate; nothing depends on it being exact.
+                const auto earlier = remote.history.sample(remote_render_tick - 4.0);
+                glm::vec3 velocity{0.0f};
+                if (earlier) {
+                    velocity = (pose->position - earlier->position) / (4.0f * game::kTickSeconds);
+                }
+                CharacterAnimation& animation = remote_animations[id];
+                update_character_animation(animation, velocity, std::abs(velocity.y) < 0.6f,
+                                           game::kMove.max_speed, static_cast<float>(dt));
+
+                const int offset = append_character_pose(animation, joint_pool);
                 draw_items.push_back({model,
+                                      DrawKind::Character,
                                       -1,
                                       {0.3f + 0.2f * static_cast<float>(id % 4), 0.4f,
-                                       0.9f - 0.2f * static_cast<float>(id % 4)}});
+                                       0.9f - 0.2f * static_cast<float>(id % 4)},
+                                      offset,
+                                      static_cast<int>(character_skeleton->joint_count())});
             }
         }
 
@@ -1236,7 +1437,8 @@ int main(int argc, char** argv) {
                 glm::mat4{1.0f}, target.position + glm::vec3{0.0f, kTargetHeight * 0.5f, 0.0f});
             model = glm::scale(model, {kTargetRadius * 2.0f, kTargetHeight, kTargetRadius * 2.0f});
             const float hp = target.health.current / target.health.max;
-            draw_items.push_back({model, -1, {0.9f, 0.15f + 0.6f * hp, 0.15f}});
+            draw_items.push_back(
+                {model, DrawKind::Cube, -1, {0.9f, 0.15f + 0.6f * hp, 0.15f}, -1, 0});
         }
 
         int draw_calls = 0;
@@ -1251,6 +1453,21 @@ int main(int argc, char** argv) {
             postfx->resize(window->width_px(), window->height_px());
         }
 
+        // Uploads a draw item's joint matrices, or turns skinning off. Used
+        // by both passes so they read the same slice of the pool.
+        const auto bind_joints = [&](const eng::Shader& shader, const DrawItem& item) {
+            const bool skinned = item.joint_offset >= 0 && item.joint_count > 0;
+            shader.set_int("u_skinned", skinned ? 1 : 0);
+            shader.set_int("u_joint_texture", 2);
+            if (skinned) {
+                joint_texture->upload_and_bind(
+                    std::span<const glm::mat4>{
+                        joint_pool.data() + static_cast<std::size_t>(item.joint_offset),
+                        static_cast<std::size_t>(item.joint_count)},
+                    2);
+            }
+        };
+
         // Pass 1: depth from the sun. Front faces are culled so the depth
         // recorded is the caster's back face, which pushes self-shadowing
         // acne to surfaces that are facing away from the light anyway.
@@ -1261,13 +1478,20 @@ int main(int argc, char** argv) {
         glCullFace(GL_FRONT);
         for (const DrawItem& item : draw_items) {
             depth_shader->set_mat4("u_model", item.model);
-            if (item.mesh < 0) {
-                cube.draw();
-            } else {
-                for (const RenderPrimitive& primitive :
-                     render_meshes[static_cast<std::size_t>(item.mesh)]) {
-                    primitive.gpu.draw();
-                }
+            bind_joints(*depth_shader, item);
+            switch (item.kind) {
+                case DrawKind::Character:
+                    character_mesh.draw();
+                    break;
+                case DrawKind::Cube:
+                    cube.draw();
+                    break;
+                case DrawKind::ArenaMesh:
+                    for (const RenderPrimitive& primitive :
+                         render_meshes[static_cast<std::size_t>(item.mesh)]) {
+                        primitive.gpu.draw();
+                    }
+                    break;
             }
         }
         glCullFace(GL_BACK);
@@ -1313,10 +1537,15 @@ int main(int argc, char** argv) {
             lit_shader->set_mat4("u_model", item.model);
             lit_shader->set_mat3("u_normal_matrix",
                                  glm::mat3(glm::transpose(glm::inverse(item.model))));
-            if (item.mesh < 0) {
-                bind_texture(-1);  // players and targets are untextured
+            bind_joints(*lit_shader, item);
+            if (item.kind != DrawKind::ArenaMesh) {
+                bind_texture(-1);  // characters and targets are untextured
                 lit_shader->set_vec3("u_tint", item.tint);
-                cube.draw();
+                if (item.kind == DrawKind::Character) {
+                    character_mesh.draw();
+                } else {
+                    cube.draw();
+                }
                 ++draw_calls;
                 continue;
             }

@@ -91,6 +91,8 @@ add_library(engine_platform STATIC
     rendering/gl_util.h
     rendering/gpu_mesh.cpp
     rendering/gpu_mesh.h
+    rendering/joint_texture.cpp
+    rendering/joint_texture.h
     rendering/particle_renderer.cpp
     rendering/particle_renderer.h
     rendering/postfx.cpp

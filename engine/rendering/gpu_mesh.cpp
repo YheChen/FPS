@@ -38,6 +38,15 @@ GpuMesh GpuMesh::upload(const MeshData& mesh) {
     glEnableVertexAttribArray(2);
     glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride,
                           reinterpret_cast<const void*>(offsetof(Vertex, uv)));
+    // Joint indices are integers and must go through the I variant: passing
+    // them via glVertexAttribPointer would convert them to floats and the
+    // shader would index the matrix array with rounded garbage.
+    glEnableVertexAttribArray(3);
+    glVertexAttribIPointer(3, 4, GL_UNSIGNED_INT, stride,
+                           reinterpret_cast<const void*>(offsetof(Vertex, joints)));
+    glEnableVertexAttribArray(4);
+    glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, stride,
+                          reinterpret_cast<const void*>(offsetof(Vertex, weights)));
 
     glBindVertexArray(0);
 

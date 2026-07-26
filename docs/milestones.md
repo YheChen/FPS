@@ -408,3 +408,53 @@ to 256×256 RGBA8 with every material pointing at one, floor UVs reaching
 20.0 (proving world-scaled tiling rather than a stretched unwrap), and the
 headless `decode_images = false` path keeping geometry while leaving image
 slots empty.
+
+---
+
+## Milestone 13 — Directional shadow mapping ✅
+
+**Objective:** the sun should occlude. One directional light, one shadow
+map, no cascades.
+
+**Deliverables:** `eng::ShadowMap` (depth-only FBO + comparison-sampled
+depth texture) in `engine_platform`, and `directional_light_view_projection`
++ `Bounds` in `engine` — headless, so the matrix math is unit-tested rather
+than eyeballed. The client renders a depth pass from the sun, then samples
+it in the lit pass with 3×3 PCF over the hardware's own 2×2 comparison
+filtering.
+
+Both passes iterate **one** `DrawItem` list built once per frame. A caster
+present in the lit pass but missing from the depth pass is the classic
+shadow bug; sharing the list makes that impossible rather than merely
+unlikely.
+
+Acne is handled by three things together — front-face culling in the depth
+pass, slope-scaled bias, and hardware comparison sampling. Ambient light is
+deliberately not shadowed, so shadowed areas stay readable.
+
+**Bug caught by browser testing:** GLSL ES has no default precision for
+`sampler2DShadow`. The Emscripten build compiled without a warning and the
+web client then failed to compile the lit shader at runtime, rendering
+everything untextured. Fixed in `glsl_preamble()`. This is the second time
+a web-only defect got through a green emcc build — [build.md](build.md) now
+says to serve the build and read the console, not just to compile it.
+
+**Build fix:** the `web` preset carried no toolchain file, so
+`cmake --preset web` silently produced a **native** binary. Every "web build
+clean" check since the preset was written was therefore vacuous. It now sets
+`CMAKE_TOOLCHAIN_FILE` from `$env{EMSDK}` and fails loudly when emsdk is not
+sourced.
+
+**Tooling:** `tools/gcc_check.py` runs every translation unit through real
+GCC with CI's warning set (AppleClang accepts things GCC rejects);
+`--fixed-yaw` now applies offline as well as online, so screenshot runs can
+aim.
+
+**Tests:** 96 total (+6). Bounds construction and transformed expansion,
+light-projection coverage across six sun angles including straight down
+(where a naive `lookAt` degenerates), tightness of the fit, headroom above
+the static bounds, and identity fallback on degenerate input.
+
+**Verified:** native screenshots showing pillars, cover boxes, ramps and
+targets all casting, with no acne on lit surfaces; and the WASM client
+rendering the same shadows in WebGL 2 at ~75 fps.

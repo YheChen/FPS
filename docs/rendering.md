@@ -28,9 +28,65 @@ Milestone 2 (renderer). This document grows with the code.
 3. Many meshes, camera, Blinn-Phong directional light, debug lines (M2) ✅
 4. glTF environment, materials (M3) ✅
 5. Textured materials from glTF images (M12) ✅
-6. Simple shadow map for the sun (M13)
+6. Directional shadow map for the sun (M13) ✅
 7. Point lights — later, if the maps ever need them
 8. Frustum culling — only when the map is big enough to need it
+
+## Shadows (M13)
+
+One directional light, one 2048² depth map, no cascades. The arena is ~45 m
+across, so a single tightly fitted projection gives roughly 2 cm per texel;
+cascades only pay for their complexity on maps too large for one projection.
+
+The frame is two passes over **one** draw list. Building the list once
+(`DrawItem`, in the client) is deliberate: a caster present in the lit pass
+but missing from the depth pass is the classic shadow bug, and sharing the
+list makes that impossible by construction.
+
+1. **Depth pass** — bind the shadow map, render every caster with a
+   position-only shader from the light's point of view.
+2. **Lit pass** — normal render, sampling the depth map to decide whether
+   the sun reaches each fragment.
+
+`directional_light_view_projection` (in `engine/rendering/light.h`, headless
+and unit-tested) fits an orthographic box to the scene bounds as seen from
+the light. It is the part worth testing, so it lives in `engine` rather than
+`engine_platform`: the tests assert that every corner of the bounds lands
+inside NDC *and* that the fit is tight, which a merely-covering projection
+would fail.
+
+### Acne, and what fixes it here
+
+Three mitigations, because no single one is enough:
+
+- **Front-face culling in the depth pass.** The recorded depth is the
+  caster's back face, so self-shadowing errors land on surfaces already
+  facing away from the light.
+- **Slope-scaled bias.** Surfaces edge-on to the light span more depth per
+  texel, so the bias grows with `1 - dot(normal, light)`. A constant bias
+  large enough for grazing angles causes visible peter-panning everywhere
+  else.
+- **Hardware comparison sampling** (`GL_COMPARE_REF_TO_TEXTURE` +
+  `sampler2DShadow`), which gives 2×2 filtering for free; the shader adds a
+  3×3 PCF kernel on top.
+
+Ambient light is deliberately **not** shadowed — only the sun's direct
+contribution is occluded. Shadowed areas stay readable instead of going
+black, which matters in a game where players hide in them.
+
+### WebGL 2 notes
+
+`GL_DEPTH_COMPONENT24` + `GL_UNSIGNED_INT`, `GL_COMPARE_REF_TO_TEXTURE` and
+`sampler2DShadow` are all core in GLES 3.0, so the same path runs in the
+browser. Two divergences:
+
+- A depth-only framebuffer needs the draw buffer switched off. Desktop uses
+  `glDrawBuffer(GL_NONE)`; GLES has no singular form, so the web path uses
+  `glDrawBuffers(1, {GL_NONE})`.
+- **GLSL ES has no default precision for `sampler2DShadow`**, so the shader
+  fails to compile with "No precision specified" unless `glsl_preamble()`
+  declares one. This compiles fine under emcc and only fails when the
+  shader is actually linked in a browser — see the verification note below.
 
 ## Textures and materials (M12)
 
@@ -79,3 +135,15 @@ before the `--run-seconds` quit:
 It stalls the pipeline on `glReadPixels`, so it is a verification and
 bug-report tool, not something to call in a hot loop. Rendering milestones
 are expected to attach one of these rather than assert "it looks right".
+
+`--fixed-yaw <radians>` locks the view direction so a screenshot run can aim
+at whatever the change under test needs to show.
+
+**A clean emcc build does not mean the web client works.** Shader
+compilation happens at runtime, so GLSL ES errors only surface in a browser.
+M13's missing `sampler2DShadow` precision built without a warning and broke
+every web client. Serve the build and check the console:
+
+```bash
+cd build/web/game && python3 -m http.server 8931
+```

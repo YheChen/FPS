@@ -27,6 +27,7 @@ add_executable(engine_tests
     net/protocol_tests.cpp
     net/transport_tests.cpp
     rendering/camera_tests.cpp
+    rendering/light_tests.cpp
     rendering/mesh_data_tests.cpp
     scene/scene_tests.cpp
 )

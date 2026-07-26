@@ -37,8 +37,10 @@
 #include "engine/rendering/debug_draw.h"
 #include "engine/rendering/gl_util.h"
 #include "engine/rendering/gpu_mesh.h"
+#include "engine/rendering/light.h"
 #include "engine/rendering/screenshot.h"
 #include "engine/rendering/shader.h"
+#include "engine/rendering/shadow_map.h"
 #include "engine/rendering/texture.h"
 #include "engine/scene/scene.h"
 
@@ -81,12 +83,44 @@ in vec3 v_world_pos;
 in vec3 v_normal;
 in vec2 v_uv;
 uniform sampler2D u_base_color;
+uniform sampler2DShadow u_shadow_map;
+uniform mat4 u_light_view_projection;
+uniform float u_shadow_texel;   // 1.0 / shadow map resolution
 uniform vec3 u_tint;
 uniform vec3 u_light_direction;
 uniform vec3 u_light_color;
 uniform vec3 u_ambient;
 uniform vec3 u_camera_pos;
 out vec4 o_color;
+
+// Returns 1.0 in full light, 0.0 in full shadow. 3x3 PCF on top of the
+// hardware's own 2x2 comparison filtering.
+float sun_visibility(vec3 normal, vec3 to_light) {
+    vec4 light_clip = u_light_view_projection * vec4(v_world_pos, 1.0);
+    vec3 proj = light_clip.xyz / light_clip.w * 0.5 + 0.5;
+
+    // Outside the light's frustum (or past its far plane) means unshadowed:
+    // the map simply has no information there.
+    if (proj.z > 1.0 || any(lessThan(proj.xy, vec2(0.0))) ||
+        any(greaterThan(proj.xy, vec2(1.0)))) {
+        return 1.0;
+    }
+
+    // Slope-scaled bias: surfaces edge-on to the light span more depth per
+    // texel, so they need more slack before a texel shadows itself.
+    float slope = clamp(1.0 - dot(normal, to_light), 0.0, 1.0);
+    float bias = 0.0012 + 0.0045 * slope;
+
+    float sum = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            vec2 offset = vec2(float(x), float(y)) * u_shadow_texel;
+            sum += texture(u_shadow_map, vec3(proj.xy + offset, proj.z - bias));
+        }
+    }
+    return sum / 9.0;
+}
+
 void main() {
     vec3 albedo = texture(u_base_color, v_uv).rgb * u_tint;
     vec3 n = normalize(v_normal);
@@ -95,9 +129,30 @@ void main() {
     vec3 view_dir = normalize(u_camera_pos - v_world_pos);
     vec3 half_dir = normalize(l + view_dir);
     float spec = pow(max(dot(n, half_dir), 0.0), 32.0) * 0.25;
-    vec3 color = albedo * (u_ambient + u_light_color * n_dot_l) + u_light_color * spec * n_dot_l;
+
+    // Ambient stays unshadowed; only the sun's direct contribution is
+    // occluded, which is what keeps shadowed areas readable rather than
+    // black.
+    float visibility = sun_visibility(n, l);
+    vec3 direct = u_light_color * n_dot_l * visibility;
+    vec3 color = albedo * (u_ambient + direct) + u_light_color * spec * n_dot_l * visibility;
     o_color = vec4(color, 1.0);
 }
+)";
+
+// Depth-only pass from the light's point of view. No fragment work beyond
+// the implicit depth write.
+constexpr std::string_view kDepthVertexSource = R"(
+layout(location = 0) in vec3 a_position;
+uniform mat4 u_model;
+uniform mat4 u_light_view_projection;
+void main() {
+    gl_Position = u_light_view_projection * u_model * vec4(a_position, 1.0);
+}
+)";
+
+constexpr std::string_view kDepthFragmentSource = R"(
+void main() {}
 )";
 
 struct ClientArgs {
@@ -191,6 +246,22 @@ struct RenderPrimitive {
     glm::vec3 color{1.0f};
     int texture = -1;  // index into the arena texture list, -1 = untextured
 };
+
+// One drawable submission, shared by the shadow pass and the lit pass.
+// `mesh` indexes the arena render meshes; -1 means the unit cube (players
+// and targets).
+struct DrawItem {
+    glm::mat4 model{1.0f};
+    int mesh = -1;
+    glm::vec3 tint{1.0f};
+};
+
+// 2048^2 over a ~45 m arena is roughly 2 cm per texel, which is enough for
+// crisp pillar and player shadows without a cascade split.
+constexpr int kShadowResolution = 2048;
+
+// Direction the sun's light travels.
+constexpr glm::vec3 kSunDirection{-0.4f, -1.0f, -0.3f};
 
 void draw_capsule(eng::DebugDraw& draw, const glm::vec3& feet, float radius, float height,
                   const glm::vec3& color) {
@@ -348,8 +419,11 @@ int main(int argc, char** argv) {
     }
     auto imgui = eng::ImGuiLayer::create(*window);
     auto lit_shader = eng::Shader::create("lit", kLitVertexSource, kLitFragmentSource);
+    auto depth_shader =
+        eng::Shader::create("shadow_depth", kDepthVertexSource, kDepthFragmentSource);
     auto debug_draw = eng::DebugDraw::create();
-    if (!imgui || !lit_shader || !debug_draw) {
+    auto shadow_map = eng::ShadowMap::create(kShadowResolution);
+    if (!imgui || !lit_shader || !depth_shader || !debug_draw || !shadow_map) {
         return 1;
     }
 
@@ -411,6 +485,9 @@ int main(int argc, char** argv) {
         eng::Texture2D::checkerboard(4, 1, {255, 255, 255}, {255, 255, 255});
     const eng::GpuMesh cube = eng::GpuMesh::upload(eng::MeshData::unit_cube());
 
+    // Rebuilt every frame but kept allocated across frames.
+    std::vector<DrawItem> draw_items;
+
     eng::Scene scene;
     std::vector<glm::vec3> spawn_points;
     for (const eng::GltfNode& node : arena->nodes) {
@@ -422,6 +499,27 @@ int main(int argc, char** argv) {
             spawn_points.push_back(entity->transform.position);
         }
     }
+
+    // The sun's shadow projection is fitted to the static geometry once:
+    // the arena never moves, and players are always inside it. Raised a
+    // little so a player standing on the tallest platform still casts.
+    eng::Bounds scene_bounds;
+    for (const eng::GltfNode& node : arena->nodes) {
+        if (node.mesh < 0) {
+            continue;
+        }
+        for (const eng::GltfPrimitive& primitive :
+             arena->meshes[static_cast<std::size_t>(node.mesh)].primitives) {
+            eng::Bounds local;
+            for (const eng::Vertex& vertex : primitive.mesh.vertices) {
+                local.expand(vertex.position);
+            }
+            scene_bounds.expand(local, node.transform);
+        }
+    }
+    scene_bounds.max.y += 2.5f;
+    const glm::mat4 light_view_projection =
+        eng::directional_light_view_projection(kSunDirection, scene_bounds);
 
     // --- physics ------------------------------------------------------------
     eng::PhysicsWorld world;
@@ -666,13 +764,16 @@ int main(int argc, char** argv) {
                 continue;
             }
 
+            // Applied to both modes so screenshot runs can aim at whatever
+            // the change under test needs to show.
+            if (args.fixed_yaw) {
+                view_yaw = *args.fixed_yaw;
+            }
+
             if (online) {
                 // Predict locally with the shared movement code; the server
                 // corrects us via reconcile() below. While dead, inputs keep
                 // flowing (so acks stay in sync) but nothing is predicted.
-                if (args.fixed_yaw) {
-                    view_yaw = *args.fixed_yaw;
-                }
                 game::InputCommand command =
                     make_command(input, view_yaw, view_pitch, input_sequence++, desired_slot);
                 if (!window->relative_mouse() && !args.auto_fire) {
@@ -927,20 +1028,94 @@ int main(int argc, char** argv) {
         camera.fov_y_degrees = settings.fov_degrees;
 
         // --- render -----------------------------------------------------
-        glViewport(0, 0, window->width_px(), window->height_px());
+        // Everything drawable is collected once, then submitted twice: from
+        // the sun for the shadow map, then from the camera. Building the
+        // list once is what keeps the two passes from drifting apart -- a
+        // caster missing from one of them is the classic shadow bug.
+        draw_items.clear();
+        scene.each([&](eng::EntityId, eng::Entity& entity) {
+            if (!entity.visible || entity.mesh < 0) {
+                return;
+            }
+            draw_items.push_back(
+                {entity.transform.to_matrix(), entity.mesh, glm::vec3(entity.tint)});
+        });
+
+        // Remote players (online): interpolated ~100 ms in the past.
+        if (online) {
+            for (const auto& [id, remote] : net->players()) {
+                if (id == net->my_id() || remote.history.empty()) {
+                    continue;
+                }
+                const auto pose = remote.history.sample(remote_render_tick);
+                if (!pose || (pose->flags & game::kFlagAlive) == 0) {
+                    continue;  // dead players are not drawn
+                }
+                glm::mat4 model =
+                    glm::translate(glm::mat4{1.0f}, pose->position + glm::vec3{0.0f, 0.9f, 0.0f});
+                model = glm::scale(model, {0.8f, 1.8f, 0.8f});
+                draw_items.push_back({model,
+                                      -1,
+                                      {0.3f + 0.2f * static_cast<float>(id % 4), 0.4f,
+                                       0.9f - 0.2f * static_cast<float>(id % 4)}});
+            }
+        }
+
+        // Targets: stretched cubes colored by remaining health.
+        for (const Target& target : targets) {
+            if (!target.alive()) {
+                continue;
+            }
+            glm::mat4 model = glm::translate(
+                glm::mat4{1.0f}, target.position + glm::vec3{0.0f, kTargetHeight * 0.5f, 0.0f});
+            model = glm::scale(model, {kTargetRadius * 2.0f, kTargetHeight, kTargetRadius * 2.0f});
+            const float hp = target.health.current / target.health.max;
+            draw_items.push_back({model, -1, {0.9f, 0.15f + 0.6f * hp, 0.15f}});
+        }
+
+        int draw_calls = 0;
+
+        // Pass 1: depth from the sun. Front faces are culled so the depth
+        // recorded is the caster's back face, which pushes self-shadowing
+        // acne to surfaces that are facing away from the light anyway.
+        depth_shader->bind();
+        depth_shader->set_mat4("u_light_view_projection", light_view_projection);
+        shadow_map->begin_depth_pass();
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_FRONT);
+        for (const DrawItem& item : draw_items) {
+            depth_shader->set_mat4("u_model", item.model);
+            if (item.mesh < 0) {
+                cube.draw();
+            } else {
+                for (const RenderPrimitive& primitive :
+                     render_meshes[static_cast<std::size_t>(item.mesh)]) {
+                    primitive.gpu.draw();
+                }
+            }
+        }
+        glCullFace(GL_BACK);
+        glDisable(GL_CULL_FACE);
+        shadow_map->end_depth_pass(window->width_px(), window->height_px());
+
+        // Pass 2: lit, from the camera.
         glClearColor(0.055f, 0.07f, 0.09f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         const glm::mat4 view_projection = camera.view_projection();
-        int draw_calls = 0;
 
         lit_shader->bind();
         lit_shader->set_mat4("u_view_projection", view_projection);
-        lit_shader->set_vec3("u_light_direction", glm::normalize(glm::vec3{-0.4f, -1.0f, -0.3f}));
+        lit_shader->set_vec3("u_light_direction", glm::normalize(kSunDirection));
         lit_shader->set_vec3("u_light_color", {1.0f, 0.97f, 0.9f});
         lit_shader->set_vec3("u_ambient", {0.20f, 0.22f, 0.26f});
         lit_shader->set_vec3("u_camera_pos", camera.position);
         lit_shader->set_int("u_base_color", 0);
+        lit_shader->set_int("u_shadow_map", 1);
+        lit_shader->set_mat4("u_light_view_projection", light_view_projection);
+        lit_shader->set_float("u_shadow_texel",
+                              1.0f / static_cast<float>(shadow_map->resolution()));
+        shadow_map->bind_depth(1);
 
         // Texture binds are the only per-draw GL state here, so track the
         // current one and only switch when the material actually changes.
@@ -958,61 +1133,24 @@ int main(int argc, char** argv) {
             }
         };
 
-        scene.each([&](eng::EntityId, eng::Entity& entity) {
-            if (!entity.visible || entity.mesh < 0) {
-                return;
+        for (const DrawItem& item : draw_items) {
+            lit_shader->set_mat4("u_model", item.model);
+            lit_shader->set_mat3("u_normal_matrix",
+                                 glm::mat3(glm::transpose(glm::inverse(item.model))));
+            if (item.mesh < 0) {
+                bind_texture(-1);  // players and targets are untextured
+                lit_shader->set_vec3("u_tint", item.tint);
+                cube.draw();
+                ++draw_calls;
+                continue;
             }
-            const glm::mat4 model = entity.transform.to_matrix();
-            lit_shader->set_mat4("u_model", model);
-            lit_shader->set_mat3("u_normal_matrix", glm::mat3(glm::transpose(glm::inverse(model))));
             for (const RenderPrimitive& primitive :
-                 render_meshes[static_cast<std::size_t>(entity.mesh)]) {
+                 render_meshes[static_cast<std::size_t>(item.mesh)]) {
                 bind_texture(primitive.texture);
-                lit_shader->set_vec3("u_tint", primitive.color * glm::vec3(entity.tint));
+                lit_shader->set_vec3("u_tint", primitive.color * item.tint);
                 primitive.gpu.draw();
                 ++draw_calls;
             }
-        });
-
-        bind_texture(-1);  // players and targets are untextured
-
-        // Remote players (online): interpolated ~100 ms in the past.
-        if (online) {
-            for (const auto& [id, remote] : net->players()) {
-                if (id == net->my_id() || remote.history.empty()) {
-                    continue;
-                }
-                const auto pose = remote.history.sample(remote_render_tick);
-                if (!pose || (pose->flags & game::kFlagAlive) == 0) {
-                    continue;  // dead players are not drawn
-                }
-                glm::mat4 model =
-                    glm::translate(glm::mat4{1.0f}, pose->position + glm::vec3{0.0f, 0.9f, 0.0f});
-                model = glm::scale(model, {0.8f, 1.8f, 0.8f});
-                lit_shader->set_mat4("u_model", model);
-                lit_shader->set_mat3("u_normal_matrix",
-                                     glm::mat3(glm::transpose(glm::inverse(model))));
-                lit_shader->set_vec3("u_tint", {0.3f + 0.2f * static_cast<float>(id % 4), 0.4f,
-                                                0.9f - 0.2f * static_cast<float>(id % 4)});
-                cube.draw();
-                ++draw_calls;
-            }
-        }
-
-        // Targets: stretched cubes colored by remaining health.
-        for (const Target& target : targets) {
-            if (!target.alive()) {
-                continue;
-            }
-            glm::mat4 model = glm::translate(
-                glm::mat4{1.0f}, target.position + glm::vec3{0.0f, kTargetHeight * 0.5f, 0.0f});
-            model = glm::scale(model, {kTargetRadius * 2.0f, kTargetHeight, kTargetRadius * 2.0f});
-            lit_shader->set_mat4("u_model", model);
-            lit_shader->set_mat3("u_normal_matrix", glm::mat3(glm::transpose(glm::inverse(model))));
-            const float hp = target.health.current / target.health.max;
-            lit_shader->set_vec3("u_tint", {0.9f, 0.15f + 0.6f * hp, 0.15f});
-            cube.draw();
-            ++draw_calls;
         }
 
         for (const Tracer& tracer : tracers) {

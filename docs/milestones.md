@@ -337,3 +337,33 @@ front of the plain `ws://` server; systemd unit. Config and a step-by-step
 guide are in [deploy.md](deploy.md) and `deploy/`; the deployed client bakes
 its server URL via `-DFPS_WEB_SERVER_URL`. Running the VM/Vercel steps is
 manual (needs the operator's host + domain).
+
+---
+
+## Milestone 11 — Weapon arsenal, sprint/crouch, HUD polish ✅
+
+**Objective:** more gameplay depth on the systems already built, without new
+engine foundations.
+
+**Deliverables:** four data-driven weapons (rifle / smg / shotgun / sniper)
+with pellet counts, spread cones, semi-auto gating and per-weapon raise
+times; `Loadout` + `Arsenal` with slot switching (keys 1-4) sent as *state*
+every tick so a lost packet cannot drop a switch; deterministic spread
+(`game/shared/rng.h`: a pure hash of tick/shooter/pellet, so a recorded
+match will replay identically in M17); sprint and crouch in the shared
+movement (crouch shrinks the Jolt capsule and the hitbox, and standing up
+requires a headroom raycast); HUD polish - hitmarkers, floating damage
+numbers, weapon list, spread/motion-aware crosshair, stance indicator.
+Protocol v4: u16 buttons + weapon slot, crouch snapshot flag, multi-ray
+FireEvent, damage amount.
+
+**Bug found and fixed:** sprint initially did nothing. With a fixed
+acceleration in m/s², ground friction alone pinned the terminal speed to
+exactly `max_speed`, so raising the cap changed nothing. Acceleration is now
+Quake-style (a coefficient scaled by the target speed), which converges on
+the stance's actual speed. Walking and air control are numerically unchanged.
+
+**Tests:** 87 total. Arsenal config parsing/validation, semi-auto vs
+automatic gating, switch-raise blocking, slot clamping, spread determinism +
+cone bounds, sprint/crouch speeds, sprint requiring ground + forward input,
+and refusing to stand under a ceiling.

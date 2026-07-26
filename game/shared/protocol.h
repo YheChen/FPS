@@ -9,6 +9,7 @@
 
 #include "engine/net/byte_buffer.h"
 #include "game/shared/input_command.h"
+#include "game/shared/weapon.h"
 
 // Wire protocol (docs/packet-format.md is the human-readable spec; keep in
 // sync). Every message begins with a MessageType byte. Deserializers
@@ -16,7 +17,7 @@
 // returning nullopt means "hostile or corrupt packet - drop it".
 namespace game {
 
-inline constexpr std::uint16_t kProtocolVersion = 3;
+inline constexpr std::uint16_t kProtocolVersion = 4;
 inline constexpr std::uint8_t kMaxPlayers = 8;
 inline constexpr std::size_t kMaxNameLength = 16;
 inline constexpr int kSnapshotDivisor = 3;  // 60 Hz ticks -> 20 Hz snapshots
@@ -46,6 +47,7 @@ inline constexpr std::uint8_t kNoPlayer = 255;  // "no player" id (world/none)
 // Snapshot player flags.
 inline constexpr std::uint8_t kFlagOnGround = 1u << 0;
 inline constexpr std::uint8_t kFlagAlive = 1u << 1;
+inline constexpr std::uint8_t kFlagCrouching = 1u << 2;
 
 enum class RejectReason : std::uint8_t {
     VersionMismatch = 1,
@@ -107,19 +109,30 @@ struct Snapshot {
     std::vector<SnapshotPlayer> players;     // <= kMaxPlayers
 };
 
-// A shot was fired (visuals/audio on every client). hit_player == kNoPlayer
-// means the shot hit world geometry or nothing.
-struct FireEventMsg {
-    std::uint8_t shooter = 0;
-    glm::vec3 from{0.0f};
+// One ray of a shot. hit_player == kNoPlayer means it hit world geometry or
+// nothing.
+struct FireRay {
     glm::vec3 to{0.0f};
     std::uint8_t hit_player = kNoPlayer;
 };
+
+// A shot was fired (visuals/audio on every client). A single trigger pull is
+// ONE event carrying every pellet's ray, so a shotgun draws 8 tracers but
+// plays one bang.
+struct FireEventMsg {
+    std::uint8_t shooter = 0;
+    std::uint8_t slot = 0;  // weapon that fired, for per-weapon sound/FX
+    glm::vec3 from{0.0f};
+    std::vector<FireRay> rays;  // 1..kMaxPellets
+};
+
+inline constexpr std::size_t kMaxPellets = 32;
 
 struct PlayerDamagedMsg {
     std::uint8_t victim = 0;
     std::uint8_t attacker = 0;
     float health = 0.0f;  // victim's health after the hit
+    float amount = 0.0f;  // damage dealt, for the attacker's damage numbers
 };
 
 struct PlayerDiedMsg {
@@ -152,6 +165,9 @@ struct MatchStateMsg {
 struct WeaponStatusMsg {
     std::uint8_t ammo = 0;
     bool reloading = false;
+    std::uint8_t slot = 0;      // which weapon is raised
+    std::uint8_t magazine = 0;  // that weapon's magazine size, for the HUD
+    bool switching = false;     // weapon still being raised
 };
 
 // --- encode ---------------------------------------------------------------

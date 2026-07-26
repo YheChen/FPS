@@ -68,6 +68,18 @@ std::optional<WeaponConfig> parse_weapon_config(std::string_view text) {
             ok = parse_float(value, config.range);
         } else if (key == "spread_degrees") {
             ok = parse_float(value, config.spread_degrees);
+        } else if (key == "pellets") {
+            ok = parse_int(value, config.pellets);
+        } else if (key == "switch_seconds") {
+            ok = parse_float(value, config.switch_seconds);
+        } else if (key == "automatic") {
+            if (value == "true" || value == "1") {
+                config.automatic = true;
+            } else if (value == "false" || value == "0") {
+                config.automatic = false;
+            } else {
+                ok = false;
+            }
         } else {
             eng::log::warn("weapon config line {}: unknown key '{}' (skipped)", line_number, key);
         }
@@ -79,7 +91,9 @@ std::optional<WeaponConfig> parse_weapon_config(std::string_view text) {
     }
 
     if (config.rounds_per_minute <= 0.0f || config.magazine_size <= 0 || config.damage <= 0.0f ||
-        config.range <= 0.0f || config.reload_seconds < 0.0f) {
+        config.range <= 0.0f || config.reload_seconds < 0.0f || config.pellets <= 0 ||
+        config.pellets > 32 || config.spread_degrees < 0.0f || config.spread_degrees > 45.0f ||
+        config.switch_seconds < 0.0f) {
         eng::log::error("weapon config: values out of range");
         return std::nullopt;
     }
@@ -89,6 +103,10 @@ std::optional<WeaponConfig> parse_weapon_config(std::string_view text) {
 WeaponTickResult update_weapon(WeaponState& state, const WeaponConfig& config, bool fire_held,
                                bool reload_requested, float dt) {
     WeaponTickResult result;
+    // Semi-automatic weapons need a fresh pull: the trigger must have been
+    // released since the last shot.
+    const bool trigger_pulled = fire_held && (config.automatic || !state.trigger_was_held);
+    state.trigger_was_held = fire_held;
 
     state.cooldown_seconds = std::max(0.0f, state.cooldown_seconds - dt);
 
@@ -108,7 +126,7 @@ WeaponTickResult update_weapon(WeaponState& state, const WeaponConfig& config, b
         return result;
     }
 
-    if (fire_held && state.cooldown_seconds <= 0.0f) {
+    if (trigger_pulled && state.cooldown_seconds <= 0.0f) {
         if (state.ammo > 0) {
             --state.ammo;
             state.cooldown_seconds = config.shot_interval_seconds();
@@ -121,6 +139,52 @@ WeaponTickResult update_weapon(WeaponState& state, const WeaponConfig& config, b
             result.reload_started = true;
         }
     }
+    return result;
+}
+
+void reset_loadout(Loadout& loadout, const Arsenal& arsenal) {
+    loadout = {};
+    for (std::size_t i = 0; i < kMaxWeapons; ++i) {
+        loadout.weapons[i].ammo = i < arsenal.size() ? arsenal.weapons[i].magazine_size : 0;
+    }
+}
+
+WeaponTickResult update_loadout(Loadout& loadout, const Arsenal& arsenal, std::uint8_t desired_slot,
+                                bool fire_held, bool reload_requested, float dt) {
+    WeaponTickResult result;
+    if (arsenal.empty()) {
+        return result;
+    }
+
+    // A switch request is just "the newest slot the client asked for", so a
+    // dropped input packet cannot lose a weapon change.
+    const std::uint8_t wanted = arsenal.clamp_slot(desired_slot);
+    if (wanted != loadout.slot) {
+        loadout.slot = wanted;
+        loadout.switch_remaining_seconds = arsenal.at(wanted).switch_seconds;
+        // Switching interrupts a reload on the weapon being stowed; the new
+        // weapon comes up in whatever state it was left in.
+        loadout.weapons[loadout.slot].trigger_was_held = true;  // require a fresh pull
+        result.switched = true;
+    }
+
+    WeaponState& state = loadout.weapons[loadout.slot];
+    const WeaponConfig& config = arsenal.at(loadout.slot);
+
+    if (loadout.switch_remaining_seconds > 0.0f) {
+        loadout.switch_remaining_seconds = std::max(0.0f, loadout.switch_remaining_seconds - dt);
+        // Weapon is still coming up: no firing, no reloading, but the cooldown
+        // and trigger state keep tracking so the transition is seamless.
+        state.cooldown_seconds = std::max(0.0f, state.cooldown_seconds - dt);
+        state.trigger_was_held = fire_held;
+        return result;
+    }
+
+    const WeaponTickResult shot = update_weapon(state, config, fire_held, reload_requested, dt);
+    result.fired = shot.fired;
+    result.dry_fired = shot.dry_fired;
+    result.reload_started = shot.reload_started;
+    result.reload_finished = shot.reload_finished;
     return result;
 }
 

@@ -107,22 +107,27 @@ TEST_CASE("snapshot round-trips", "[protocol]") {
 
 TEST_CASE("combat messages round-trip", "[protocol]") {
     {
+        // A shotgun blast: one event, several pellet rays.
         game::FireEventMsg fire;
         fire.shooter = 2;
+        fire.slot = 1;
         fire.from = {1.0f, 1.6f, 3.0f};
-        fire.to = {5.0f, 1.2f, -8.0f};
-        fire.hit_player = game::kNoPlayer;
+        fire.rays.push_back({{5.0f, 1.2f, -8.0f}, game::kNoPlayer});
+        fire.rays.push_back({{6.0f, 1.3f, -8.5f}, 3});
         const auto bytes = encode(fire);
         eng::ByteReader r{{bytes.data(), bytes.size()}};
         REQUIRE(game::read_message_type(r) == game::MessageType::FireEvent);
         const auto m = game::read_fire_event(r);
         REQUIRE(m.has_value());
         CHECK(m->shooter == 2);
-        CHECK(m->to.z == -8.0f);
-        CHECK(m->hit_player == game::kNoPlayer);
+        CHECK(m->slot == 1);
+        REQUIRE(m->rays.size() == 2);
+        CHECK(m->rays[0].to.z == -8.0f);
+        CHECK(m->rays[0].hit_player == game::kNoPlayer);
+        CHECK(m->rays[1].hit_player == 3);
     }
     {
-        const auto bytes = encode(game::PlayerDamagedMsg{1, 0, 75.0f});
+        const auto bytes = encode(game::PlayerDamagedMsg{1, 0, 75.0f, 25.0f});
         eng::ByteReader r{{bytes.data(), bytes.size()}};
         game::read_message_type(r);
         const auto m = game::read_player_damaged(r);

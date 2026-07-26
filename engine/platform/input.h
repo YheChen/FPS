@@ -18,12 +18,17 @@ enum class Key : std::uint8_t {
     R,
     Space,
     LeftShift,
+    LeftControl,
     Tab,
     Escape,
     Enter,
     F1,
     F2,
     F3,
+    Num1,
+    Num2,
+    Num3,
+    Num4,
     kCount,
 };
 

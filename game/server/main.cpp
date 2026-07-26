@@ -1,6 +1,7 @@
 #include <charconv>
 #include <chrono>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <thread>
 
@@ -110,13 +111,22 @@ int main(int argc, char** argv) {
         }
     }
 
-    game::WeaponConfig weapon_config;
-    if (const auto text = eng::read_text_file(*assets_root / "weapons/rifle.cfg")) {
-        if (const auto parsed = game::parse_weapon_config(*text)) {
-            weapon_config = *parsed;
-        } else {
-            eng::log::warn("Weapon config parse failed; using built-in defaults");
+    // Slot order is the arsenal order: 1=rifle, 2=smg, 3=shotgun, 4=sniper.
+    game::Arsenal arsenal;
+    for (const char* weapon : {"rifle", "smg", "shotgun", "sniper"}) {
+        const auto text =
+            eng::read_text_file(*assets_root / "weapons" / (std::string(weapon) + ".cfg"));
+        if (!text) {
+            continue;
         }
+        if (const auto parsed = game::parse_weapon_config(*text)) {
+            arsenal.weapons.push_back(*parsed);
+        } else {
+            eng::log::warn("Weapon '{}' failed to parse; skipping", weapon);
+        }
+    }
+    if (arsenal.empty()) {
+        eng::log::warn("No weapons loaded; falling back to the built-in rifle");
     }
 
     // --- transports: ENet (native) and/or WebSocket (browser) -------------
@@ -141,7 +151,7 @@ int main(int argc, char** argv) {
     }
     eng::CompositeTransport net{std::move(transports)};
 
-    game::ServerGame server{std::move(collision), std::move(spawns), kMapPath, weapon_config};
+    game::ServerGame server{std::move(collision), std::move(spawns), kMapPath, std::move(arsenal)};
 
     // --- fixed-tick headless loop ------------------------------------------
     eng::Clock clock;

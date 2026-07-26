@@ -29,6 +29,8 @@ std::optional<Key> translate_scancode(SDL_Scancode scancode) {
             return Key::Space;
         case SDL_SCANCODE_LSHIFT:
             return Key::LeftShift;
+        case SDL_SCANCODE_LCTRL:
+            return Key::LeftControl;
         case SDL_SCANCODE_TAB:
             return Key::Tab;
         case SDL_SCANCODE_ESCAPE:
@@ -41,6 +43,14 @@ std::optional<Key> translate_scancode(SDL_Scancode scancode) {
             return Key::F2;
         case SDL_SCANCODE_F3:
             return Key::F3;
+        case SDL_SCANCODE_1:
+            return Key::Num1;
+        case SDL_SCANCODE_2:
+            return Key::Num2;
+        case SDL_SCANCODE_3:
+            return Key::Num3;
+        case SDL_SCANCODE_4:
+            return Key::Num4;
         default:
             return std::nullopt;
     }

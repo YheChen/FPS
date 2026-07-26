@@ -26,6 +26,7 @@ struct NetPlayer {
     float yaw = 0.0f;
     float pitch = 0.0f;
     bool on_ground = false;
+    bool crouching = false;
     bool seen_in_snapshot = false;
     SnapshotBuffer history;  // for interpolation (remote players)
 };
@@ -86,12 +87,16 @@ public:
     float self_health() const { return self_health_; }
     std::uint8_t self_ammo() const { return self_ammo_; }
     bool self_reloading() const { return self_reloading_; }
+    std::uint8_t self_weapon_slot() const { return self_slot_; }
+    std::uint8_t self_magazine() const { return self_magazine_; }
+    bool self_switching() const { return self_switching_; }
     bool self_alive() const { return self_alive_; }
     MatchPhase match_phase() const { return match_phase_; }
     std::uint16_t match_seconds() const { return match_seconds_; }
 
     // Drained event queues (visuals/audio are the caller's job).
     std::vector<FireEventMsg> take_fire_events();
+    std::vector<PlayerDamagedMsg> take_damage_events();
     std::vector<PlayerDiedMsg> take_death_events();
     std::vector<PlayerRespawnedMsg> take_respawn_events();
 
@@ -114,10 +119,14 @@ private:
     float self_health_ = 100.0f;
     std::uint8_t self_ammo_ = 0;
     bool self_reloading_ = false;
+    std::uint8_t self_slot_ = 0;
+    std::uint8_t self_magazine_ = 0;
+    bool self_switching_ = false;
     bool self_alive_ = true;
     MatchPhase match_phase_ = MatchPhase::Playing;
     std::uint16_t match_seconds_ = 0;
     std::vector<FireEventMsg> fire_events_;
+    std::vector<PlayerDamagedMsg> damage_events_;
     std::vector<PlayerDiedMsg> death_events_;
     std::vector<PlayerRespawnedMsg> respawn_events_;
 };

@@ -1262,7 +1262,7 @@ int main(int argc, char** argv) {
                                         : IM_COL32(255, 255, 255, static_cast<int>(230 * fade));
                 constexpr float kInner = 5.0f;
                 constexpr float kOuter = 12.0f;
-                for (const auto [sx, sy] : {std::pair{1.0f, 1.0f}, std::pair{-1.0f, 1.0f}}) {
+                for (const auto& [sx, sy] : {std::pair{1.0f, 1.0f}, std::pair{-1.0f, 1.0f}}) {
                     overlay->AddLine({center.x + sx * kInner, center.y + sy * kInner},
                                      {center.x + sx * kOuter, center.y + sy * kOuter}, color, 2.0f);
                     overlay->AddLine({center.x - sx * kInner, center.y - sy * kInner},

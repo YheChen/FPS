@@ -76,10 +76,45 @@ find engine game tests -name '*.cpp' -o -name '*.h' | xargs clang-format -i
 clang-tidy -p build/debug engine/core/log.cpp
 ```
 
+## Before opening a PR
+
+A clean local build is **not** enough to predict CI. Local development is
+AppleClang + libc++; CI also runs GCC (Ubuntu) and MSVC (Windows), both of
+which reject code that AppleClang accepts. Two checks close most of that
+gap, and both are fast:
+
+```sh
+python3 tools/check_includes.py   # std:: symbols used without their header
+python3 tools/gcc_check.py        # every TU through real GCC, CI's warning set
+```
+
+`check_includes.py` catches the libc++ trap: libc++ pulls `<algorithm>` in
+transitively, so `std::clamp` without the include builds on macOS and fails
+on MSVC. It also runs in CI's format-check job.
+
+`gcc_check.py` needs `brew install gcc`. It compiles each translation unit
+with `-fsyntax-only` using that file's own flags from
+`build/debug/compile_commands.json`, so nothing links and SDL's
+Objective-C is never involved. It catches the GCC-only diagnostics that
+AppleClang stays quiet about — `-Wsign-conversion` on `int` → `size_t`,
+`-Wrange-loop-construct` on structured-binding copies. Note it reports on
+*diagnostics*, not exit status: without `-Werror` a warning still exits 0,
+and warnings are exactly what CI promotes to errors.
+
+Neither replaces the Emscripten build, which is still not in CI:
+
+```sh
+source ~/emsdk/emsdk_env.sh && cmake --build --preset web --parallel
+```
+
 ## CI
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on every push and PR:
 
 1. Debug build + tests on Ubuntu, macOS, and Windows, warnings-as-errors.
 2. Ubuntu build + tests under ASan/UBSan.
-3. clang-format check.
+3. clang-format check + the standard-header check.
+
+**Check the run on `main` after merging, not just the PR run.** A PR can be
+green and still leave `main` red if the merge combines with another change
+— that happened once already (M11).

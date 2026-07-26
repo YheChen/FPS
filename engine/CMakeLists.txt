@@ -45,6 +45,8 @@ add_library(engine STATIC
     rendering/mesh_data.h
     rendering/particle_sim.cpp
     rendering/particle_sim.h
+    rendering/postfx_math.cpp
+    rendering/postfx_math.h
     scene/scene.cpp
     scene/scene.h
     scene/transform.cpp
@@ -89,6 +91,10 @@ add_library(engine_platform STATIC
     rendering/gpu_mesh.h
     rendering/particle_renderer.cpp
     rendering/particle_renderer.h
+    rendering/postfx.cpp
+    rendering/postfx.h
+    rendering/render_target.cpp
+    rendering/render_target.h
     rendering/screenshot.cpp
     rendering/screenshot.h
     rendering/shader.cpp

@@ -506,3 +506,58 @@ runs); and the WASM client initialising the particle renderer in WebGL 2
 with a clean console. Blood and death-burst *colours* were not caught
 mid-flight in a screenshot — they share the emission path that the other
 effects exercise, and differ only in their constants.
+
+---
+
+## Milestone 15 — Post-processing ✅
+
+**Objective:** an HDR pipeline with bloom, filmic tonemapping and
+anti-aliasing, so bright things glow and long edges stop crawling.
+
+**Deliverables:** `eng::RenderTarget` (colour + optional depth FBO) and
+`eng::PostFx` in `engine_platform`, plus `postfx_math.h` in `engine` for the
+curves. The world renders into an off-screen HDR target and resolves through
+up to five fullscreen passes: bright pass, blur H, blur V, composite + ACES
+tonemap, FXAA. Bloom runs at half resolution — cheaper, and a wider blur for
+the same kernel. Runtime toggles and sliders live under a "post-processing"
+header in the debug panel.
+
+The HUD and ImGui draw **after** `resolve()`, straight to the default
+framebuffer, so text is never tonemapped, bloomed or blurred.
+
+**HDR is requested, not assumed.** `RenderTarget` tries RGBA16F and silently
+falls back to RGBA8 when the framebuffer does not come out complete. WebGL 2
+needs `EXT_color_buffer_float` for float colour attachments, and probing the
+framebuffer is more reliable than parsing extension strings — a driver can
+advertise the extension and still refuse the attachment. Chromium gave us
+RGBA16F, so the fallback is untested in anger; it exists for the browsers and
+drivers that do not.
+
+**Bug caught by browser testing (again):** the Emscripten canvas reports
+**0×0** until it has been laid out, so `PostFx::create` failed and the client
+returned 1 — the web build started up and then immediately exited, while the
+native build was fine. A degenerate size is now clamped rather than rejected,
+and the frame loop resizes once the real size arrives. That is three
+web-only defects in four milestones that a green emcc build did not catch.
+
+**Test correction:** the first version of the ACES test asserted that very
+bright input "approaches but never reaches" white. That is false for the
+Narkowicz fit, which crosses 1.0 near an input of 7.8. The test was wrong,
+not the curve; it now pins the saturation point instead.
+
+**Tests:** 110 total (+7). Rec.709 luminance ordering, the bloom knee's
+endpoints and monotonicity, a zero and a *negative* knee degenerating to a
+hard cut, ACES bounds/monotonicity/per-channel independence, negative HDR
+input clamping rather than passing through the rational curve, and
+`half_resolution` never collapsing to zero.
+
+**Verified:** an A/B pair of screenshots — off is 21 draw calls at 1.51 ms
+with hard edges and a hard-edged muzzle flash; on is 25 draw calls at 2.49 ms
+with a bloom halo and smoothed edges (2560×1440, M4). The browser runs the
+same chain at 25 draw calls and ~63 fps. FXAA does soften fine texture
+detail slightly; the luma early-out keeps that to edges.
+
+**Known limitation, unchanged on purpose:** the LDR intermediate stores
+tonemapped *linear* values in 8 bits, which can band in dark gradients.
+Colour management is otherwise exactly as it was before this milestone —
+moving the chain to an explicit gamma step is a separate change.

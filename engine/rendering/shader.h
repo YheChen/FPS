@@ -30,6 +30,7 @@ public:
 
     void set_int(std::string_view name, int value) const;
     void set_float(std::string_view name, float value) const;
+    void set_vec2(std::string_view name, const glm::vec2& value) const;
     void set_vec3(std::string_view name, const glm::vec3& value) const;
     void set_vec4(std::string_view name, const glm::vec4& value) const;
     void set_mat3(std::string_view name, const glm::mat3& value) const;

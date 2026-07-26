@@ -30,6 +30,7 @@ add_executable(engine_tests
     rendering/light_tests.cpp
     rendering/mesh_data_tests.cpp
     rendering/particle_tests.cpp
+    rendering/postfx_tests.cpp
     scene/scene_tests.cpp
 )
 target_link_libraries(engine_tests PRIVATE fps::engine fps::game_shared Catch2::Catch2WithMain)

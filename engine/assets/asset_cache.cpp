@@ -7,7 +7,8 @@
 
 namespace eng {
 
-AssetCache::AssetCache(std::filesystem::path root) : root_(std::move(root)) {}
+AssetCache::AssetCache(std::filesystem::path root, bool decode_images)
+    : root_(std::move(root)), decode_images_(decode_images) {}
 
 const GltfModel* AssetCache::model(std::string_view relative_path) {
     const std::string key = normalize_asset_path(relative_path);
@@ -20,7 +21,7 @@ const GltfModel* AssetCache::model(std::string_view relative_path) {
         return it->second.get();
     }
 
-    auto loaded = load_gltf(root_ / key);
+    auto loaded = load_gltf(root_ / key, decode_images_);
     if (!loaded) {
         return nullptr;
     }

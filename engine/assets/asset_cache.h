@@ -15,7 +15,10 @@ namespace eng {
 class AssetCache {
 public:
     // `root` is the assets directory (see find_assets_root()).
-    explicit AssetCache(std::filesystem::path root);
+    // `decode_images` is applied to every model this cache loads: the
+    // renderer needs texture pixels, the dedicated server (collision only)
+    // does not and should not pay to decode them.
+    explicit AssetCache(std::filesystem::path root, bool decode_images = true);
 
     // Loads (or returns the cached) model for an asset-relative path like
     // "maps/arena01.glb". Returns nullptr on failure (logged). Failures are
@@ -26,6 +29,7 @@ public:
 
 private:
     std::filesystem::path root_;
+    bool decode_images_ = true;
     std::unordered_map<std::string, std::unique_ptr<GltfModel>> models_;
 };
 

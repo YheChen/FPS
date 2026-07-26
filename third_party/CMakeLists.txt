@@ -64,6 +64,16 @@ FetchContent_MakeAvailable(cgltf)
 add_library(cgltf INTERFACE)
 target_include_directories(cgltf SYSTEM INTERFACE ${cgltf_SOURCE_DIR})
 
+# --- stb_image (PNG/JPG decoding for glTF textures) ------------------------
+FetchContent_Declare(
+    stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG f0569113c93ad095470c54bf34a17b36646bbbb5
+)
+FetchContent_MakeAvailable(stb)
+add_library(stb INTERFACE)
+target_include_directories(stb SYSTEM INTERFACE ${stb_SOURCE_DIR})
+
 # --- ENet (UDP transport with optional reliability) -------------------------
 FetchContent_Declare(
     enet

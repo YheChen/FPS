@@ -3,13 +3,25 @@
 #define CGLTF_IMPLEMENTATION
 #include <cgltf.h>
 
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#define STBI_ONLY_JPEG
+#define STBI_NO_STDIO_WRITE
+#include <stb_image.h>
+
 #include <cstring>
+#include <fstream>
+#include <iterator>
 
 #include "engine/core/log.h"
 
 namespace eng {
 
 namespace {
+
+std::string path_string(const std::filesystem::path& path) {
+    return path.string();
+}
 
 std::optional<MeshData> read_primitive(const cgltf_primitive& primitive,
                                        const std::filesystem::path& path) {
@@ -82,9 +94,59 @@ std::optional<MeshData> read_primitive(const cgltf_primitive& primitive,
     return mesh;
 }
 
+// Decodes one glTF image to RGBA8. Images live either inside the file
+// (a buffer view, which is what .glb uses) or beside it as a URI.
+GltfImage decode_image(const cgltf_image& image, const std::filesystem::path& gltf_path) {
+    GltfImage out;
+    out.name = image.name != nullptr ? image.name : "";
+
+    const stbi_uc* encoded = nullptr;
+    int encoded_size = 0;
+    std::vector<std::uint8_t> file_bytes;
+
+    if (image.buffer_view != nullptr && image.buffer_view->buffer != nullptr &&
+        image.buffer_view->buffer->data != nullptr) {
+        encoded = static_cast<const stbi_uc*>(image.buffer_view->buffer->data) +
+                  image.buffer_view->offset;
+        encoded_size = static_cast<int>(image.buffer_view->size);
+    } else if (image.uri != nullptr) {
+        if (std::strncmp(image.uri, "data:", 5) == 0) {
+            log::warn("glTF '{}': data: URI images are not supported", path_string(gltf_path));
+            return out;
+        }
+        const std::filesystem::path file = gltf_path.parent_path() / image.uri;
+        std::ifstream stream(file, std::ios::binary);
+        if (!stream) {
+            log::warn("glTF '{}': missing texture file '{}'", path_string(gltf_path), image.uri);
+            return out;
+        }
+        file_bytes.assign(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+        encoded = file_bytes.data();
+        encoded_size = static_cast<int>(file_bytes.size());
+    } else {
+        return out;  // nothing to decode
+    }
+
+    int channels = 0;
+    stbi_uc* pixels =
+        stbi_load_from_memory(encoded, encoded_size, &out.width, &out.height, &channels, 4);
+    if (pixels == nullptr) {
+        log::warn("glTF '{}': failed to decode image '{}' ({})", path_string(gltf_path), out.name,
+                  stbi_failure_reason());
+        out.width = 0;
+        out.height = 0;
+        return out;
+    }
+    const std::size_t byte_count =
+        static_cast<std::size_t>(out.width) * static_cast<std::size_t>(out.height) * 4;
+    out.pixels.assign(pixels, pixels + byte_count);
+    stbi_image_free(pixels);
+    return out;
+}
+
 }  // namespace
 
-std::optional<GltfModel> load_gltf(const std::filesystem::path& path) {
+std::optional<GltfModel> load_gltf(const std::filesystem::path& path, bool decode_images) {
     cgltf_options options{};
     cgltf_data* data = nullptr;
     cgltf_result result = cgltf_parse_file(&options, path.string().c_str(), &data);
@@ -112,15 +174,35 @@ std::optional<GltfModel> load_gltf(const std::filesystem::path& path) {
 
     GltfModel model;
 
+    if (decode_images) {
+        model.images.reserve(data->images_count);
+        for (cgltf_size i = 0; i < data->images_count; ++i) {
+            model.images.push_back(decode_image(data->images[i], path));
+        }
+    } else {
+        // Keep indices valid for code that inspects materials without pixels.
+        model.images.resize(data->images_count);
+    }
+
     model.materials.reserve(data->materials_count);
     for (cgltf_size i = 0; i < data->materials_count; ++i) {
         const cgltf_material& material = data->materials[i];
         GltfMaterial out;
         out.name = material.name != nullptr ? material.name : "";
         if (material.has_pbr_metallic_roughness != 0) {
-            const float* c = material.pbr_metallic_roughness.base_color_factor;
+            const cgltf_pbr_metallic_roughness& pbr = material.pbr_metallic_roughness;
+            const float* c = pbr.base_color_factor;
             out.base_color = {c[0], c[1], c[2], c[3]};
+            out.metallic = pbr.metallic_factor;
+            out.roughness = pbr.roughness_factor;
+            if (pbr.base_color_texture.texture != nullptr &&
+                pbr.base_color_texture.texture->image != nullptr) {
+                out.base_color_image =
+                    static_cast<int>(pbr.base_color_texture.texture->image - data->images);
+            }
         }
+        out.emissive = {material.emissive_factor[0], material.emissive_factor[1],
+                        material.emissive_factor[2]};
         model.materials.push_back(std::move(out));
     }
 
@@ -156,8 +238,13 @@ std::optional<GltfModel> load_gltf(const std::filesystem::path& path) {
         model.nodes.push_back(std::move(out));
     }
 
-    log::info("glTF '{}': {} nodes, {} meshes, {} materials", path.string(), model.nodes.size(),
-              model.meshes.size(), model.materials.size());
+    std::size_t decoded = 0;
+    for (const GltfImage& image : model.images) {
+        decoded += image.valid() ? 1 : 0;
+    }
+    log::info("glTF '{}': {} nodes, {} meshes, {} materials, {}/{} images decoded", path.string(),
+              model.nodes.size(), model.meshes.size(), model.materials.size(), decoded,
+              model.images.size());
     return model;
 }
 

@@ -90,7 +90,9 @@ int main(int argc, char** argv) {
         return 1;
     }
     constexpr const char* kMapPath = "maps/arena01.glb";
-    eng::AssetCache assets{*assets_root};
+    // The server needs collision geometry only, so texture pixels are never
+    // decoded: that is the expensive part of loading a map.
+    eng::AssetCache assets{*assets_root, /*decode_images=*/false};
     const eng::GltfModel* map = assets.model(kMapPath);
     if (map == nullptr) {
         return 1;

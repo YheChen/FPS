@@ -54,7 +54,7 @@ target_include_directories(engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
 target_link_libraries(engine
     PUBLIC glm::glm
-    PRIVATE cgltf Jolt enet
+    PRIVATE cgltf stb Jolt enet
 )
 if(WIN32)
     # WebSocketHost uses Winsock directly.
@@ -83,6 +83,8 @@ add_library(engine_platform STATIC
     rendering/gl_util.h
     rendering/gpu_mesh.cpp
     rendering/gpu_mesh.h
+    rendering/screenshot.cpp
+    rendering/screenshot.h
     rendering/shader.cpp
     rendering/shader.h
     rendering/texture.cpp
@@ -92,7 +94,7 @@ add_library(fps::engine_platform ALIAS engine_platform)
 
 target_link_libraries(engine_platform
     PUBLIC fps::engine imgui
-    PRIVATE SDL3::SDL3 miniaudio
+    PRIVATE SDL3::SDL3 miniaudio stb
 )
 if(NOT EMSCRIPTEN)
     # glad loads desktop GL entry points; WebGL functions come from the

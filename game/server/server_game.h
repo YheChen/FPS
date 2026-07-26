@@ -36,7 +36,7 @@ public:
     // `map_meshes` are (mesh, world transform) pairs for static collision;
     // `spawns` are the map's spawn points.
     ServerGame(std::vector<std::pair<eng::MeshData, glm::mat4>> map_meshes,
-               std::vector<glm::vec3> spawns, std::string map_name, WeaponConfig weapon_config);
+               std::vector<glm::vec3> spawns, std::string map_name, Arsenal arsenal);
 
     // Handles one transport event (connect/message/disconnect).
     void handle_event(const eng::NetEvent& event, eng::IServerTransport& net);
@@ -58,7 +58,7 @@ private:
 
         // Combat (authoritative).
         Health health;
-        WeaponState weapon;
+        Loadout loadout;
         bool alive = true;
         float respawn_remaining = 0.0f;
         std::uint16_t kills = 0;
@@ -99,7 +99,7 @@ private:
     eng::PhysicsWorld world_;
     std::vector<glm::vec3> spawns_;
     std::string map_name_;
-    WeaponConfig weapon_config_;
+    Arsenal arsenal_;
     std::array<std::optional<Player>, kMaxPlayers> players_;
     std::uint32_t tick_ = 0;
     std::size_t next_spawn_ = 0;

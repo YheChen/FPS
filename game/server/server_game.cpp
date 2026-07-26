@@ -1,10 +1,12 @@
 #include "game/server/server_game.h"
 
+#include <array>
 #include <cmath>
 #include <utility>
 
 #include "engine/core/log.h"
 #include "game/shared/hitscan.h"
+#include "game/shared/rng.h"
 
 namespace game {
 
@@ -24,11 +26,8 @@ std::vector<std::uint8_t> encode(const Message& message) {
 }  // namespace
 
 ServerGame::ServerGame(std::vector<std::pair<eng::MeshData, glm::mat4>> map_meshes,
-                       std::vector<glm::vec3> spawns, std::string map_name,
-                       WeaponConfig weapon_config)
-    : spawns_(std::move(spawns)),
-      map_name_(std::move(map_name)),
-      weapon_config_(std::move(weapon_config)) {
+                       std::vector<glm::vec3> spawns, std::string map_name, Arsenal arsenal)
+    : spawns_(std::move(spawns)), map_name_(std::move(map_name)), arsenal_(std::move(arsenal)) {
     for (const auto& [mesh, transform] : map_meshes) {
         world_.add_static_mesh(mesh, transform);
     }
@@ -36,8 +35,11 @@ ServerGame::ServerGame(std::vector<std::pair<eng::MeshData, glm::mat4>> map_mesh
     if (spawns_.empty()) {
         spawns_.push_back({0.0f, 1.0f, 0.0f});
     }
-    eng::log::info("ServerGame: {} static bodies, {} spawns, map '{}'", world_.body_count(),
-                   spawns_.size(), map_name_);
+    if (arsenal_.empty()) {
+        arsenal_.weapons.push_back(WeaponConfig{});  // built-in rifle fallback
+    }
+    eng::log::info("ServerGame: {} static bodies, {} spawns, {} weapons, map '{}'",
+                   world_.body_count(), spawns_.size(), arsenal_.size(), map_name_);
 }
 
 std::size_t ServerGame::player_count() const {
@@ -131,7 +133,7 @@ void ServerGame::handle_hello(std::uint32_t peer, eng::ByteReader& reader,
     const glm::vec3 spawn = spawns_[next_spawn_++ % spawns_.size()];
     player.state.position = spawn;
     player.controller = std::make_unique<eng::CharacterController>(world_, spawn);
-    player.weapon.ammo = weapon_config_.magazine_size;
+    reset_loadout(player.loadout, arsenal_);
     players_[*slot] = std::move(player);
 
     eng::log::info("Player {} '{}' joined (peer {})", *slot, hello->name, peer);
@@ -267,12 +269,12 @@ void ServerGame::tick(eng::IServerTransport& net) {
         if (phase_ == MatchPhase::Playing) {
             const bool fire_held = has_button(command, Button::Fire);
             const bool reload = has_button(command, Button::Reload);
-            const WeaponTickResult shot =
-                update_weapon(player.weapon, weapon_config_, fire_held, reload, kTickSeconds);
+            const WeaponTickResult shot = update_loadout(
+                player.loadout, arsenal_, command.weapon_slot, fire_held, reload, kTickSeconds);
             if (shot.fired) {
                 fire_hitscan(id, command, net);
             }
-            if (shot.fired || shot.reload_started || shot.reload_finished) {
+            if (shot.fired || shot.reload_started || shot.reload_finished || shot.switched) {
                 send_weapon_status(player, net);
             }
         }
@@ -306,7 +308,8 @@ void ServerGame::send_snapshots(eng::IServerTransport& net) {
         sp.velocity = p.state.velocity;
         sp.yaw = p.view_yaw;
         sp.pitch = p.view_pitch;
-        sp.flags = (p.state.on_ground ? kFlagOnGround : 0u) | (p.alive ? kFlagAlive : 0u);
+        sp.flags = (p.state.on_ground ? kFlagOnGround : 0u) | (p.alive ? kFlagAlive : 0u) |
+                   (p.state.crouching ? kFlagCrouching : 0u);
         everyone.push_back(sp);
     }
 
@@ -334,10 +337,14 @@ void ServerGame::broadcast_reliable(const std::vector<std::uint8_t>& data,
 }
 
 void ServerGame::send_weapon_status(const Player& player, eng::IServerTransport& net) {
-    net.send(player.peer,
-             encode(WeaponStatusMsg{static_cast<std::uint8_t>(player.weapon.ammo),
-                                    player.weapon.reloading()}),
-             eng::NetChannel::Reliable, true);
+    const WeaponState& weapon = player.loadout.weapons[player.loadout.slot];
+    const WeaponConfig& config = arsenal_.at(player.loadout.slot);
+    net.send(
+        player.peer,
+        encode(WeaponStatusMsg{static_cast<std::uint8_t>(weapon.ammo), weapon.reloading(),
+                               player.loadout.slot, static_cast<std::uint8_t>(config.magazine_size),
+                               player.loadout.switch_remaining_seconds > 0.0f}),
+        eng::NetChannel::Reliable, true);
 }
 
 MatchStateMsg ServerGame::match_state() const {
@@ -351,53 +358,80 @@ MatchStateMsg ServerGame::match_state() const {
 void ServerGame::fire_hitscan(std::uint8_t shooter_id, const InputCommand& command,
                               eng::IServerTransport& net) {
     Player& shooter = *players_[shooter_id];
-    const glm::vec3 eye = shooter.state.position + glm::vec3{0.0f, kMove.eye_height, 0.0f};
-    const glm::vec3 dir = view_direction(command.yaw, command.pitch);
-
-    // World geometry bounds the shot.
-    float max_t = weapon_config_.range;
-    if (const auto wall = world_.raycast(eye, dir, weapon_config_.range)) {
-        max_t = wall->distance;
-    }
+    const WeaponConfig& weapon = arsenal_.at(shooter.loadout.slot);
+    const glm::vec3 eye =
+        shooter.state.position + glm::vec3{0.0f, eye_height_for(shooter.state), 0.0f};
+    const glm::vec3 aim = view_direction(command.yaw, command.pitch);
 
     // Lag compensation: test victims where the SHOOTER saw them - their
     // positions at the shooter's (bounded) interpolation view tick. A
     // hostile view_tick claim can rewind at most kMaxRewindTicks (~250 ms).
     const std::uint32_t rewind_tick = clamp_rewind_tick(shooter.view_tick, tick_);
-    std::uint8_t hit_id = kNoPlayer;
-    float hit_t = max_t;
-    for (std::uint8_t id = 0; id < kMaxPlayers; ++id) {
-        if (id == shooter_id || !players_[id] || !players_[id]->alive) {
-            continue;
-        }
-        const glm::vec3 victim_position =
-            players_[id]->history.at(rewind_tick).value_or(players_[id]->state.position);
-        const auto& config = players_[id]->controller->config();
-        const auto t =
-            ray_vertical_capsule(eye, dir, victim_position, config.radius, config.height);
-        if (t && *t < hit_t) {
-            hit_t = *t;
-            hit_id = id;
-        }
-    }
-    if (rewind_tick != tick_ && hit_id != kNoPlayer) {
-        eng::log::debug("lag comp: hit resolved {} ticks in the past", tick_ - rewind_tick);
-    }
 
     FireEventMsg event;
     event.shooter = shooter_id;
+    event.slot = shooter.loadout.slot;
     event.from = eye;
-    event.to = eye + dir * hit_t;
-    event.hit_player = hit_id;
+
+    // Damage is accumulated per victim so a shotgun applies one combined hit
+    // (and can only kill a player once, no matter how many pellets land).
+    std::array<float, kMaxPlayers> damage_by_victim{};
+
+    const float spread = glm::radians(weapon.spread_degrees);
+    for (int pellet = 0; pellet < weapon.pellets; ++pellet) {
+        // Deterministic per-pellet spread: a pure hash of tick, shooter and
+        // pellet index, so a recorded match replays identically (M17).
+        const std::uint32_t seed =
+            hash_combine(hash_combine(tick_, shooter_id), static_cast<std::uint32_t>(pellet));
+        const glm::vec3 dir = spread_direction(aim, spread, seed);
+
+        // World geometry bounds each pellet.
+        float max_t = weapon.range;
+        if (const auto wall = world_.raycast(eye, dir, weapon.range)) {
+            max_t = wall->distance;
+        }
+
+        std::uint8_t hit_id = kNoPlayer;
+        float hit_t = max_t;
+        for (std::uint8_t id = 0; id < kMaxPlayers; ++id) {
+            if (id == shooter_id || !players_[id] || !players_[id]->alive) {
+                continue;
+            }
+            const glm::vec3 victim_position =
+                players_[id]->history.at(rewind_tick).value_or(players_[id]->state.position);
+            // Crouched players present a shorter capsule to shoot at.
+            const auto& config = players_[id]->controller->config();
+            const float height =
+                players_[id]->state.crouching ? config.crouch_height : config.height;
+            const auto t = ray_vertical_capsule(eye, dir, victim_position, config.radius, height);
+            if (t && *t < hit_t) {
+                hit_t = *t;
+                hit_id = id;
+            }
+        }
+
+        event.rays.push_back(FireRay{eye + dir * hit_t, hit_id});
+        if (hit_id != kNoPlayer) {
+            damage_by_victim[hit_id] += weapon.damage;
+        }
+    }
+
+    if (rewind_tick != tick_) {
+        eng::log::debug("lag comp: shot resolved {} ticks in the past", tick_ - rewind_tick);
+    }
     broadcast_reliable(encode(event), net);
 
-    if (hit_id != kNoPlayer) {
-        Player& victim = *players_[hit_id];
-        const bool died = apply_damage(victim.health, weapon_config_.damage);
-        broadcast_reliable(encode(PlayerDamagedMsg{hit_id, shooter_id, victim.health.current}),
-                           net);
+    for (std::uint8_t id = 0; id < kMaxPlayers; ++id) {
+        if (damage_by_victim[id] <= 0.0f || !players_[id]) {
+            continue;
+        }
+        Player& victim = *players_[id];
+        const bool died = apply_damage(victim.health, damage_by_victim[id]);
+        broadcast_reliable(
+            encode(PlayerDamagedMsg{id, shooter_id, victim.health.current, damage_by_victim[id]}),
+            net);
         if (died) {
-            kill_player(hit_id, shooter_id, net);
+            kill_player(id, shooter_id, net);
         }
     }
 }
@@ -430,8 +464,7 @@ void ServerGame::respawn_player(std::uint8_t player_id, eng::IServerTransport& n
     player.controller->set_position(spawn);
     player.controller->set_velocity({0.0f, 0.0f, 0.0f});
     reset_health(player.health);
-    player.weapon = {};
-    player.weapon.ammo = weapon_config_.magazine_size;
+    reset_loadout(player.loadout, arsenal_);
     player.alive = true;
     broadcast_reliable(encode(PlayerRespawnedMsg{player_id, spawn}), net);
     send_weapon_status(player, net);

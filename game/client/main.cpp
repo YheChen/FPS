@@ -49,6 +49,7 @@
 #include "game/shared/interpolation.h"
 #include "game/shared/player_movement.h"
 #include "game/shared/prediction.h"
+#include "game/shared/rng.h"
 #include "game/shared/weapon.h"
 
 namespace {
@@ -294,11 +295,12 @@ enum class Mode : std::uint8_t {
 };
 
 game::InputCommand make_command(const eng::InputState& input, float yaw, float pitch,
-                                std::uint32_t sequence) {
+                                std::uint32_t sequence, std::uint8_t weapon_slot) {
     game::InputCommand command;
     command.sequence = sequence;
     command.yaw = yaw;
     command.pitch = pitch;
+    command.weapon_slot = weapon_slot;
     game::set_button(command, game::Button::Forward, input.is_down(eng::Key::W));
     game::set_button(command, game::Button::Back, input.is_down(eng::Key::S));
     game::set_button(command, game::Button::Left, input.is_down(eng::Key::A));
@@ -306,8 +308,23 @@ game::InputCommand make_command(const eng::InputState& input, float yaw, float p
     game::set_button(command, game::Button::Jump, input.is_down(eng::Key::Space));
     game::set_button(command, game::Button::Fire, input.is_down(eng::MouseButton::Left));
     game::set_button(command, game::Button::Reload, input.is_down(eng::Key::R));
+    game::set_button(command, game::Button::Sprint, input.is_down(eng::Key::LeftShift));
+    game::set_button(command, game::Button::Crouch, input.is_down(eng::Key::LeftControl));
     return command;
 }
+
+// Screen-space feedback for a landed shot: a brief crosshair flash.
+struct Hitmarker {
+    float ttl = 0.0f;
+    bool kill = false;
+};
+
+// Damage dealt, floated in world space above where it landed.
+struct DamageNumber {
+    glm::vec3 world;
+    float amount = 0.0f;
+    float ttl = 0.0f;
+};
 
 }  // namespace
 
@@ -400,16 +417,24 @@ int main(int argc, char** argv) {
         }
     };
 
-    game::WeaponConfig weapon_config;
-    if (const auto text = eng::read_text_file(*assets_root / "weapons/rifle.cfg")) {
+    // Slot order must match the server's: 1=rifle, 2=smg, 3=shotgun, 4=sniper.
+    game::Arsenal arsenal;
+    for (const char* weapon_name : {"rifle", "smg", "shotgun", "sniper"}) {
+        const auto text =
+            eng::read_text_file(*assets_root / "weapons" / (std::string(weapon_name) + ".cfg"));
+        if (!text) {
+            continue;
+        }
         if (const auto parsed = game::parse_weapon_config(*text)) {
-            weapon_config = *parsed;
-        } else {
-            eng::log::warn("Using built-in weapon defaults (config parse failed)");
+            arsenal.weapons.push_back(*parsed);
         }
     }
-    game::WeaponState weapon;
-    weapon.ammo = weapon_config.magazine_size;
+    if (arsenal.empty()) {
+        arsenal.weapons.push_back(game::WeaponConfig{});
+    }
+    game::Loadout loadout;
+    game::reset_loadout(loadout, arsenal);
+    std::uint8_t desired_slot = 0;
 
     constexpr float kTargetRadius = 0.4f;
     constexpr float kTargetHeight = 1.8f;
@@ -496,6 +521,8 @@ int main(int argc, char** argv) {
     float last_reconcile_error = 0.0f;
     eng::NetSimConfig sim_config = args.net_sim;
     std::deque<KillFeedEntry> kill_feed;
+    Hitmarker hitmarker;
+    std::vector<DamageNumber> damage_numbers;
     const auto player_name = [&](std::uint8_t id) -> std::string {
         if (!online) {
             return "?";
@@ -508,6 +535,7 @@ int main(int argc, char** argv) {
     float view_pitch = 0.0f;
     std::uint32_t input_sequence = 0;
 
+    float smoothed_eye_height = game::kMove.eye_height;
     game::FlyCamera fly;
     fly.camera.position = spawn + glm::vec3{0.0f, 8.0f, 12.0f};
     fly.camera.pitch = -0.5f;
@@ -548,6 +576,17 @@ int main(int argc, char** argv) {
         }
         if (input.was_pressed(eng::Key::F3)) {
             draw_physics = !draw_physics;
+        }
+        // Weapon selection is state, not an edge: we keep sending the chosen
+        // slot every tick so a dropped packet cannot lose the switch.
+        if (mode != Mode::Menu) {
+            const std::array<eng::Key, 4> slot_keys = {eng::Key::Num1, eng::Key::Num2,
+                                                       eng::Key::Num3, eng::Key::Num4};
+            for (std::uint8_t i = 0; i < slot_keys.size(); ++i) {
+                if (input.was_pressed(slot_keys[i]) && i < arsenal.size()) {
+                    desired_slot = i;
+                }
+            }
         }
 
         const double dt = clock.tick();
@@ -601,7 +640,7 @@ int main(int argc, char** argv) {
                     view_yaw = *args.fixed_yaw;
                 }
                 game::InputCommand command =
-                    make_command(input, view_yaw, view_pitch, input_sequence++);
+                    make_command(input, view_yaw, view_pitch, input_sequence++, desired_slot);
                 if (!window->relative_mouse() && !args.auto_fire) {
                     game::set_button(command, game::Button::Fire, false);  // menu clicks
                 }
@@ -624,7 +663,7 @@ int main(int argc, char** argv) {
             }
 
             const game::InputCommand command =
-                make_command(input, view_yaw, view_pitch, input_sequence++);
+                make_command(input, view_yaw, view_pitch, input_sequence++, desired_slot);
             const bool was_on_ground = player.on_ground;
             game::advance_player(player, command, game::kTickSeconds, controller, world);
             if (was_on_ground && !player.on_ground && player.velocity.y > 0.0f) {
@@ -643,8 +682,9 @@ int main(int argc, char** argv) {
             const bool fire_held =
                 game::has_button(command, game::Button::Fire) && window->relative_mouse();
             const game::WeaponTickResult shot =
-                game::update_weapon(weapon, weapon_config, fire_held,
-                                    reload_requested && !reload_consumed, game::kTickSeconds);
+                game::update_loadout(loadout, arsenal, desired_slot, fire_held,
+                                     reload_requested && !reload_consumed, game::kTickSeconds);
+            const game::WeaponConfig& weapon_config = arsenal.at(loadout.slot);
             reload_consumed = true;
             if (shot.reload_started) {
                 sound("reload.wav");
@@ -655,41 +695,52 @@ int main(int argc, char** argv) {
             if (shot.fired) {
                 sound("fire.wav", 0.9f);
                 const glm::vec3 eye =
-                    player.position + glm::vec3{0.0f, game::kMove.eye_height, 0.0f};
-                eng::Camera aim;
-                aim.yaw = command.yaw;
-                aim.pitch = command.pitch;
-                const glm::vec3 dir = aim.forward();
+                    player.position + glm::vec3{0.0f, game::eye_height_for(player), 0.0f};
+                const glm::vec3 aim = game::view_direction(command.yaw, command.pitch);
+                const float spread = glm::radians(weapon_config.spread_degrees);
 
-                // Wall distance bounds the shot; then find the closest target.
-                float max_t = weapon_config.range;
-                if (const auto wall = world.raycast(eye, dir, weapon_config.range)) {
-                    max_t = wall->distance;
-                }
-                Target* hit_target = nullptr;
-                float hit_t = max_t;
-                for (Target& target : targets) {
-                    if (!target.alive()) {
-                        continue;
+                // Same pellet loop the server runs, so offline practice and
+                // online play behave identically.
+                for (int pellet = 0; pellet < weapon_config.pellets; ++pellet) {
+                    const std::uint32_t seed =
+                        game::hash_combine(game::hash_combine(input_sequence, 0xC0FFEEu),
+                                           static_cast<std::uint32_t>(pellet));
+                    const glm::vec3 dir = game::spread_direction(aim, spread, seed);
+
+                    float max_t = weapon_config.range;
+                    if (const auto wall = world.raycast(eye, dir, weapon_config.range)) {
+                        max_t = wall->distance;
                     }
-                    const auto t = game::ray_vertical_capsule(eye, dir, target.position,
-                                                              kTargetRadius, kTargetHeight);
-                    if (t && *t < hit_t) {
-                        hit_t = *t;
-                        hit_target = &target;
+                    Target* hit_target = nullptr;
+                    float hit_t = max_t;
+                    for (Target& target : targets) {
+                        if (!target.alive()) {
+                            continue;
+                        }
+                        const auto t = game::ray_vertical_capsule(eye, dir, target.position,
+                                                                  kTargetRadius, kTargetHeight);
+                        if (t && *t < hit_t) {
+                            hit_t = *t;
+                            hit_target = &target;
+                        }
                     }
-                }
-                tracers.push_back(
-                    {eye + dir * 0.4f - glm::vec3{0.0f, 0.06f, 0.0f}, eye + dir * hit_t, 0.08f});
-                if (hit_target != nullptr) {
-                    const float distance = hit_t;
-                    const float volume = std::clamp(1.2f - distance / 40.0f, 0.2f, 1.0f);
-                    if (game::apply_damage(hit_target->health, weapon_config.damage)) {
-                        hit_target->respawn_remaining = kTargetRespawnSeconds;
-                        ++kills;
-                        sound("kill.wav", volume);
-                    } else {
-                        sound("hit.wav", volume);
+                    tracers.push_back({eye + dir * 0.4f - glm::vec3{0.0f, 0.06f, 0.0f},
+                                       eye + dir * hit_t, 0.08f});
+                    if (hit_target != nullptr) {
+                        const float volume = std::clamp(1.2f - hit_t / 40.0f, 0.2f, 1.0f);
+                        const bool killed =
+                            game::apply_damage(hit_target->health, weapon_config.damage);
+                        damage_numbers.push_back(
+                            {hit_target->position + glm::vec3{0.0f, kTargetHeight * 0.7f, 0.0f},
+                             weapon_config.damage, 1.1f});
+                        hitmarker = {0.18f, killed};
+                        if (killed) {
+                            hit_target->respawn_remaining = kTargetRespawnSeconds;
+                            ++kills;
+                            sound("kill.wav", volume);
+                        } else {
+                            sound("hit.wav", volume);
+                        }
                     }
                 }
             }
@@ -716,6 +767,12 @@ int main(int argc, char** argv) {
             tracer.ttl -= static_cast<float>(dt);
         }
         std::erase_if(tracers, [](const Tracer& tracer) { return tracer.ttl <= 0.0f; });
+        hitmarker.ttl = std::max(0.0f, hitmarker.ttl - static_cast<float>(dt));
+        for (DamageNumber& number : damage_numbers) {
+            number.ttl -= static_cast<float>(dt);
+            number.world.y += static_cast<float>(dt) * 0.6f;  // float upward
+        }
+        std::erase_if(damage_numbers, [](const DamageNumber& n) { return n.ttl <= 0.0f; });
         if (audio) {
             audio->update();
         }
@@ -725,11 +782,28 @@ int main(int argc, char** argv) {
             const glm::vec3 listener =
                 player.position + glm::vec3{0.0f, game::kMove.eye_height, 0.0f};
             for (const auto& fire : net->take_fire_events()) {
-                tracers.push_back({fire.from + glm::vec3{0.0f, -0.06f, 0.0f}, fire.to, 0.08f});
+                // One trigger pull = one event with N pellet rays: N tracers,
+                // a single bang.
+                bool any_hit = false;
+                for (const game::FireRay& ray : fire.rays) {
+                    tracers.push_back({fire.from + glm::vec3{0.0f, -0.06f, 0.0f}, ray.to, 0.08f});
+                    any_hit = any_hit || ray.hit_player != game::kNoPlayer;
+                }
                 const float distance = glm::length(fire.from - listener);
                 sound("fire.wav", std::clamp(1.1f - distance / 40.0f, 0.15f, 0.9f));
-                if (fire.shooter == net->my_id() && fire.hit_player != game::kNoPlayer) {
+                if (fire.shooter == net->my_id() && any_hit) {
                     sound("hit.wav", 0.8f);  // hit confirm
+                    hitmarker = {0.18f, false};
+                }
+            }
+            for (const auto& damage : net->take_damage_events()) {
+                if (damage.attacker == net->my_id() && damage.victim != net->my_id()) {
+                    const auto victim = net->players().find(damage.victim);
+                    if (victim != net->players().end()) {
+                        damage_numbers.push_back(
+                            {victim->second.position + glm::vec3{0.0f, 1.4f, 0.0f}, damage.amount,
+                             1.1f});
+                    }
                 }
             }
             for (const auto& death : net->take_death_events()) {
@@ -742,6 +816,7 @@ int main(int argc, char** argv) {
                     sound("death.wav", 0.9f);
                 } else if (death.killer == net->my_id()) {
                     sound("kill.wav", 0.8f);
+                    hitmarker = {0.35f, true};
                 }
             }
             for (const auto& respawn : net->take_respawn_events()) {
@@ -801,8 +876,12 @@ int main(int argc, char** argv) {
             camera = fly.camera;
         } else {
             const float alpha = static_cast<float>(step.alpha());
+            // Ease the eye between stances so crouching doesn't snap the view.
+            const float target_eye = game::eye_height_for(player);
+            smoothed_eye_height +=
+                (target_eye - smoothed_eye_height) * std::min(1.0f, static_cast<float>(dt) * 14.0f);
             glm::vec3 eye_pos = glm::mix(previous_player.position, player.position, alpha) +
-                                glm::vec3{0.0f, game::kMove.eye_height, 0.0f};
+                                glm::vec3{0.0f, smoothed_eye_height, 0.0f};
             if (online) {
                 eye_pos += prediction->smoothing_offset();
             }
@@ -1009,7 +1088,9 @@ int main(int argc, char** argv) {
         }
         ImGui::Checkbox("physics debug (F3)", &draw_physics);
         ImGui::Checkbox("fly mode (F1)", &fly_mode);
-        ImGui::TextDisabled("Esc: mouse capture | WASD+Space: move | LMB: fire | R: reload");
+        ImGui::TextDisabled(
+            "Esc: capture | WASD+Space | Shift: sprint | Ctrl: crouch | 1-4: weapon | LMB "
+            "fire | R reload");
         ImGui::End();
 
         // --- match UI (online) ---------------------------------------------
@@ -1097,17 +1178,64 @@ int main(int argc, char** argv) {
             ImDrawList* overlay = ImGui::GetForegroundDrawList();
             const ImVec2 center{ImGui::GetIO().DisplaySize.x * 0.5f,
                                 ImGui::GetIO().DisplaySize.y * 0.5f};
+
+            // Which weapon is actually raised: the server's answer when
+            // online, our own loadout when practicing.
+            const std::uint8_t hud_slot = online ? net->self_weapon_slot() : loadout.slot;
+            const game::WeaponConfig& hud_weapon = arsenal.at(hud_slot);
+
+            // Crosshair gap tracks the weapon's spread and opens up while
+            // moving, so the reticle communicates actual accuracy.
+            const float speed_frac =
+                std::clamp(std::hypot(player.velocity.x, player.velocity.z) /
+                               (game::kMove.max_speed * game::kMove.sprint_multiplier),
+                           0.0f, 1.0f);
+            const float gap = 4.0f + hud_weapon.spread_degrees * 1.6f + speed_frac * 5.0f;
             const ImU32 cross_color = IM_COL32(240, 240, 240, 220);
-            constexpr float kGap = 4.0f;
             constexpr float kArm = 9.0f;
-            overlay->AddLine({center.x - kGap - kArm, center.y}, {center.x - kGap, center.y},
+            overlay->AddLine({center.x - gap - kArm, center.y}, {center.x - gap, center.y},
                              cross_color, 2.0f);
-            overlay->AddLine({center.x + kGap, center.y}, {center.x + kGap + kArm, center.y},
+            overlay->AddLine({center.x + gap, center.y}, {center.x + gap + kArm, center.y},
                              cross_color, 2.0f);
-            overlay->AddLine({center.x, center.y - kGap - kArm}, {center.x, center.y - kGap},
+            overlay->AddLine({center.x, center.y - gap - kArm}, {center.x, center.y - gap},
                              cross_color, 2.0f);
-            overlay->AddLine({center.x, center.y + kGap}, {center.x, center.y + kGap + kArm},
+            overlay->AddLine({center.x, center.y + gap}, {center.x, center.y + gap + kArm},
                              cross_color, 2.0f);
+
+            // Hitmarker: a short X over the crosshair, red for a kill.
+            if (hitmarker.ttl > 0.0f) {
+                const float fade = std::clamp(hitmarker.ttl / 0.18f, 0.0f, 1.0f);
+                const ImU32 color = hitmarker.kill
+                                        ? IM_COL32(255, 70, 70, static_cast<int>(255 * fade))
+                                        : IM_COL32(255, 255, 255, static_cast<int>(230 * fade));
+                constexpr float kInner = 5.0f;
+                constexpr float kOuter = 12.0f;
+                for (const auto [sx, sy] : {std::pair{1.0f, 1.0f}, std::pair{-1.0f, 1.0f}}) {
+                    overlay->AddLine({center.x + sx * kInner, center.y + sy * kInner},
+                                     {center.x + sx * kOuter, center.y + sy * kOuter}, color, 2.0f);
+                    overlay->AddLine({center.x - sx * kInner, center.y - sy * kInner},
+                                     {center.x - sx * kOuter, center.y - sy * kOuter}, color, 2.0f);
+                }
+            }
+
+            // Floating damage numbers, projected from world space.
+            const glm::mat4 view_proj = camera.view_projection();
+            for (const DamageNumber& number : damage_numbers) {
+                const glm::vec4 clip = view_proj * glm::vec4(number.world, 1.0f);
+                if (clip.w <= 0.0f) {
+                    continue;  // behind the camera
+                }
+                const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+                const ImVec2 screen{(ndc.x * 0.5f + 0.5f) * ImGui::GetIO().DisplaySize.x,
+                                    (1.0f - (ndc.y * 0.5f + 0.5f)) * ImGui::GetIO().DisplaySize.y};
+                const float fade = std::clamp(number.ttl / 1.1f, 0.0f, 1.0f);
+                char text[16];
+                std::snprintf(text, sizeof(text), "%.0f", number.amount);
+                overlay->AddText(nullptr, 20.0f, {screen.x + 1.0f, screen.y + 1.0f},
+                                 IM_COL32(0, 0, 0, static_cast<int>(180 * fade)), text);
+                overlay->AddText(nullptr, 20.0f, screen,
+                                 IM_COL32(255, 220, 90, static_cast<int>(255 * fade)), text);
+            }
 
             const ImVec2 display = ImGui::GetIO().DisplaySize;
             ImGui::SetNextWindowPos({display.x * 0.5f, display.y - 20.0f}, ImGuiCond_Always,
@@ -1116,26 +1244,47 @@ int main(int argc, char** argv) {
                          ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                              ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBackground);
             ImGui::SetWindowFontScale(1.6f);
-            if (online) {
-                const auto self_score = net->scores().find(net->my_id());
-                const int net_kills =
-                    self_score != net->scores().end() ? self_score->second.kills : 0;
-                const int net_deaths =
-                    self_score != net->scores().end() ? self_score->second.deaths : 0;
-                if (net->self_reloading()) {
-                    ImGui::Text("HP %.0f    RELOADING    K %d / D %d", net->self_health(),
-                                net_kills, net_deaths);
-                } else {
-                    ImGui::Text("HP %.0f    %u / %d    K %d / D %d", net->self_health(),
-                                net->self_ammo(), weapon_config.magazine_size, net_kills,
-                                net_deaths);
-                }
-            } else if (weapon.reloading()) {
-                ImGui::Text("HP 100    RELOADING (%.1fs)    K %d / D %d",
-                            weapon.reload_remaining_seconds, kills, deaths);
+            const bool hud_reloading =
+                online ? net->self_reloading() : loadout.weapons[loadout.slot].reloading();
+            const int hud_ammo = online ? net->self_ammo() : loadout.weapons[loadout.slot].ammo;
+            const int hud_mag = online && net->self_magazine() > 0 ? net->self_magazine()
+                                                                   : hud_weapon.magazine_size;
+            const int hud_kills = online ? [&] {
+                const auto it = net->scores().find(net->my_id());
+                return it != net->scores().end() ? static_cast<int>(it->second.kills) : 0;
+            }()
+                                         : kills;
+            const int hud_deaths = online ? [&] {
+                const auto it = net->scores().find(net->my_id());
+                return it != net->scores().end() ? static_cast<int>(it->second.deaths) : 0;
+            }()
+                                          : deaths;
+            const float hud_health = online ? net->self_health() : 100.0f;
+
+            if (hud_reloading) {
+                ImGui::Text("HP %.0f    %s  RELOADING    K %d / D %d", hud_health,
+                            hud_weapon.name.c_str(), hud_kills, hud_deaths);
             } else {
-                ImGui::Text("HP 100    %d / %d    K %d / D %d", weapon.ammo,
-                            weapon_config.magazine_size, kills, deaths);
+                ImGui::Text("HP %.0f    %s  %d / %d    K %d / D %d", hud_health,
+                            hud_weapon.name.c_str(), hud_ammo, hud_mag, hud_kills, hud_deaths);
+            }
+            ImGui::SetWindowFontScale(1.0f);
+            // Weapon slots; the raised one is highlighted.
+            for (std::size_t i = 0; i < arsenal.size(); ++i) {
+                if (i > 0) {
+                    ImGui::SameLine();
+                }
+                const bool active = i == hud_slot;
+                ImGui::TextColored(
+                    active ? ImVec4{1.0f, 0.85f, 0.35f, 1.0f} : ImVec4{0.55f, 0.6f, 0.65f, 1.0f},
+                    "[%zu] %s", i + 1, arsenal.weapons[i].name.c_str());
+            }
+            if (player.crouching) {
+                ImGui::SameLine();
+                ImGui::TextColored({0.5f, 0.8f, 1.0f, 1.0f}, "  CROUCH");
+            } else if (player.sprinting) {
+                ImGui::SameLine();
+                ImGui::TextColored({1.0f, 0.7f, 0.4f, 1.0f}, "  SPRINT");
             }
             ImGui::End();
         }

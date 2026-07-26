@@ -1,6 +1,6 @@
 # Packet format
 
-Status: **implemented** (protocol version 3, `game/shared/protocol.*`).
+Status: **implemented** (protocol version 4, `game/shared/protocol.*`).
 Update this document in the same commit as any protocol change.
 
 ## Encoding rules
@@ -32,7 +32,7 @@ Channel R = ENet reliable ordered (ch 0), U = unreliable sequenced (ch 1).
 | 6    | InputCommand     | C→S  | U  | 60/s             | 64 B     | redundant window of 3 |
 | 7    | Snapshot         | S→C  | U  | 20/s             | 16 + 26·players B | full state |
 | 8    | Ping / 9 Pong    | both | U  | 4/s              | 12 B     | RTT + clock offset |
-| 10   | FireEvent        | S→C  | R  | on shot (M8)     | 32 B     | shooter, hit point, victim |
+| 10   | FireEvent        | S→C  | R  | on shot (M8)     | 16 + 13·pellets B | shooter, weapon slot, origin, one ray (endpoint + victim) per pellet: a shotgun draws 8 tracers but plays one bang |
 | 11   | HealthUpdate     | S→C  | R  | on change (M8)   | 8 B      | |
 | 12   | PlayerDied       | S→C  | R  | on death (M8)    | 8 B      | victim, killer |
 | 13   | PlayerRespawned  | S→C  | R  | on respawn (M8)  | 20 B     | |
@@ -66,9 +66,10 @@ Carries the newest command plus the previous 2 (loss redundancy):
 | client_tick          | u32  | sanity vs. server tick estimate |
 | count                | u8   | 1–3 |
 | per command:         |      | |
-| · buttons            | u8   | bitfield: fwd, back, left, right, jump, fire, reload, sprint |
+| · buttons            | u16  | bitfield: fwd, back, left, right, jump, fire, reload, sprint, crouch |
 | · yaw                | f32  | finite, wrapped to [-π, π) |
 | · pitch              | f32  | finite, clamped to ±89° |
+| · weapon_slot        | u8   | desired weapon, < 4; sent as state every tick so a lost packet cannot drop a switch |
 
 Rate limit: > 120 input packets/s sustained → warn, then kick.
 
@@ -83,7 +84,7 @@ Rate limit: > 120 input packets/s sustained → warn, then kick.
 | · player_id               | u8   | |
 | · position                | 3×f32| |
 | · yaw, pitch              | 2×f32| |
-| · state flags             | u8   | alive, crouched(later), firing (for remote FX) |
+| · state flags             | u8   | bit0 on_ground, bit1 alive, bit2 crouching |
 
 Full-state snapshots (no deltas) until profiling shows bandwidth pressure;
 at 8 players ≈ 226 B × 20/s ≈ 4.5 kB/s per client.

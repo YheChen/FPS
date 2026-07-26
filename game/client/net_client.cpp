@@ -121,7 +121,8 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
                 player.velocity = sp.velocity;
                 player.yaw = sp.yaw;
                 player.pitch = sp.pitch;
-                player.on_ground = (sp.flags & 1u) != 0;
+                player.on_ground = (sp.flags & kFlagOnGround) != 0;
+                player.crouching = (sp.flags & kFlagCrouching) != 0;
                 player.seen_in_snapshot = true;
                 if (sp.player_id == my_id_) {
                     pending_self_ack_ =
@@ -145,6 +146,7 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
                 if (m->victim == my_id_) {
                     self_health_ = m->health;
                 }
+                damage_events_.push_back(*m);
             }
             break;
         }
@@ -185,6 +187,9 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
             if (const auto m = read_weapon_status(reader)) {
                 self_ammo_ = m->ammo;
                 self_reloading_ = m->reloading;
+                self_slot_ = m->slot;
+                self_magazine_ = m->magazine;
+                self_switching_ = m->switching;
             }
             break;
         }
@@ -196,6 +201,10 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
 
 std::vector<FireEventMsg> NetClient::take_fire_events() {
     return std::exchange(fire_events_, {});
+}
+
+std::vector<PlayerDamagedMsg> NetClient::take_damage_events() {
+    return std::exchange(damage_events_, {});
 }
 
 std::vector<PlayerDiedMsg> NetClient::take_death_events() {

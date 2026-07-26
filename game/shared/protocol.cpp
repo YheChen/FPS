@@ -14,7 +14,8 @@ constexpr float kPi = std::numbers::pi_v<float>;
 void write_command_body(eng::ByteWriter& w, const InputCommand& c) {
     w.f32(c.yaw);
     w.f32(c.pitch);
-    w.u8(c.buttons);
+    w.u16(c.buttons);
+    w.u8(c.weapon_slot);
 }
 
 // Reads one command body; validates and normalizes angles.
@@ -22,16 +23,21 @@ std::optional<InputCommand> read_command_body(eng::ByteReader& r) {
     InputCommand c;
     const auto yaw = r.f32();
     const auto pitch = r.f32();
-    const auto buttons = r.u8();
-    if (!yaw || !pitch || !buttons) {
+    const auto buttons = r.u16();
+    const auto weapon_slot = r.u8();
+    if (!yaw || !pitch || !buttons || !weapon_slot) {
         return std::nullopt;
     }
     if (*yaw < -8.0f || *yaw > 8.0f || *pitch < -kMaxPitch - 0.01f || *pitch > kMaxPitch + 0.01f) {
         return std::nullopt;  // outside any legitimate range
     }
+    if (*weapon_slot >= kMaxWeapons) {
+        return std::nullopt;  // slot is an index into a fixed-size arsenal
+    }
     c.yaw = std::remainder(*yaw, 2.0f * kPi);
     c.pitch = std::clamp(*pitch, -kMaxPitch, kMaxPitch);
     c.buttons = *buttons;
+    c.weapon_slot = *weapon_slot;
     return c;
 }
 
@@ -103,13 +109,17 @@ void write(eng::ByteWriter& w, const Snapshot& m) {
 void write(eng::ByteWriter& w, const FireEventMsg& m) {
     w.u8(static_cast<std::uint8_t>(MessageType::FireEvent));
     w.u8(m.shooter);
+    w.u8(m.slot);
     w.f32(m.from.x);
     w.f32(m.from.y);
     w.f32(m.from.z);
-    w.f32(m.to.x);
-    w.f32(m.to.y);
-    w.f32(m.to.z);
-    w.u8(m.hit_player);
+    w.u8(static_cast<std::uint8_t>(m.rays.size()));
+    for (const FireRay& ray : m.rays) {
+        w.f32(ray.to.x);
+        w.f32(ray.to.y);
+        w.f32(ray.to.z);
+        w.u8(ray.hit_player);
+    }
 }
 
 void write(eng::ByteWriter& w, const PlayerDamagedMsg& m) {
@@ -117,6 +127,7 @@ void write(eng::ByteWriter& w, const PlayerDamagedMsg& m) {
     w.u8(m.victim);
     w.u8(m.attacker);
     w.f32(m.health);
+    w.f32(m.amount);
 }
 
 void write(eng::ByteWriter& w, const PlayerDiedMsg& m) {
@@ -150,6 +161,9 @@ void write(eng::ByteWriter& w, const WeaponStatusMsg& m) {
     w.u8(static_cast<std::uint8_t>(MessageType::WeaponStatus));
     w.u8(m.ammo);
     w.u8(m.reloading ? 1u : 0u);
+    w.u8(m.slot);
+    w.u8(m.magazine);
+    w.u8(m.switching ? 1u : 0u);
 }
 
 // --- decode -----------------------------------------------------------------
@@ -301,21 +315,31 @@ bool valid_player_or_none(std::uint8_t id) {
 std::optional<FireEventMsg> read_fire_event(eng::ByteReader& r) {
     FireEventMsg m;
     const auto shooter = r.u8();
+    const auto slot = r.u8();
     const auto fx = r.f32();
     const auto fy = r.f32();
     const auto fz = r.f32();
-    const auto tx = r.f32();
-    const auto ty = r.f32();
-    const auto tz = r.f32();
-    const auto hit = r.u8();
-    if (!shooter || *shooter >= kMaxPlayers || !fx || !fy || !fz || !tx || !ty || !tz || !hit ||
-        !valid_player_or_none(*hit) || !r.finished()) {
+    const auto count = r.u8();
+    if (!shooter || *shooter >= kMaxPlayers || !slot || *slot >= kMaxWeapons || !fx || !fy || !fz ||
+        !count || *count == 0 || *count > kMaxPellets) {
         return std::nullopt;
     }
     m.shooter = *shooter;
+    m.slot = *slot;
     m.from = {*fx, *fy, *fz};
-    m.to = {*tx, *ty, *tz};
-    m.hit_player = *hit;
+    for (std::uint8_t i = 0; i < *count; ++i) {
+        const auto tx = r.f32();
+        const auto ty = r.f32();
+        const auto tz = r.f32();
+        const auto hit = r.u8();
+        if (!tx || !ty || !tz || !hit || !valid_player_or_none(*hit)) {
+            return std::nullopt;
+        }
+        m.rays.push_back(FireRay{{*tx, *ty, *tz}, *hit});
+    }
+    if (!r.finished()) {
+        return std::nullopt;
+    }
     return m;
 }
 
@@ -323,11 +347,13 @@ std::optional<PlayerDamagedMsg> read_player_damaged(eng::ByteReader& r) {
     const auto victim = r.u8();
     const auto attacker = r.u8();
     const auto health = r.f32();
+    const auto amount = r.f32();
     if (!victim || *victim >= kMaxPlayers || !attacker || !valid_player_or_none(*attacker) ||
-        !health || *health < 0.0f || *health > 1000.0f || !r.finished()) {
+        !health || *health < 0.0f || *health > 1000.0f || !amount || *amount < 0.0f ||
+        *amount > 1000.0f || !r.finished()) {
         return std::nullopt;
     }
-    return PlayerDamagedMsg{*victim, *attacker, *health};
+    return PlayerDamagedMsg{*victim, *attacker, *health, *amount};
 }
 
 std::optional<PlayerDiedMsg> read_player_died(eng::ByteReader& r) {
@@ -373,10 +399,14 @@ std::optional<MatchStateMsg> read_match_state(eng::ByteReader& r) {
 std::optional<WeaponStatusMsg> read_weapon_status(eng::ByteReader& r) {
     const auto ammo = r.u8();
     const auto reloading = r.u8();
-    if (!ammo.has_value() || !reloading || *reloading > 1 || !r.finished()) {
+    const auto slot = r.u8();
+    const auto magazine = r.u8();
+    const auto switching = r.u8();
+    if (!ammo.has_value() || !reloading || *reloading > 1 || !slot || *slot >= kMaxWeapons ||
+        !magazine.has_value() || !switching || *switching > 1 || !r.finished()) {
         return std::nullopt;
     }
-    return WeaponStatusMsg{*ammo, *reloading == 1};
+    return WeaponStatusMsg{*ammo, *reloading == 1, *slot, *magazine, *switching == 1};
 }
 
 }  // namespace game

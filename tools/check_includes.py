@@ -33,11 +33,15 @@ SKIP_DIRS = ("third_party/",)
 
 
 def tracked_sources():
+    # --others --exclude-standard includes files that are new but not yet
+    # staged. Without it a brand-new file is invisible here and the problem
+    # is only found by CI, after it has been committed -- which is exactly
+    # how this check first missed one.
     out = subprocess.run(
-        ["git", "ls-files", "*.cpp", "*.h"],
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "*.cpp", "*.h"],
         capture_output=True, text=True, check=True,
     ).stdout.split()
-    return [p for p in out if not p.startswith(SKIP_DIRS)]
+    return sorted(set(p for p in out if not p.startswith(SKIP_DIRS)))
 
 
 def main():

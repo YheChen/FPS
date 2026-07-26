@@ -31,11 +31,20 @@ inline constexpr bool kGlIsWebGL =
 
 // GLSL version + precision preamble to prepend to shader sources. Desktop
 // GL 4.1 uses "#version 410 core"; WebGL 2 uses "#version 300 es" and
-// requires a default float precision. Shader bodies are otherwise written
-// to the common subset (in/out, layout locations, texture()).
+// requires a default precision for every type it does not define one for.
+// Shader bodies are otherwise written to the common subset (in/out, layout
+// locations, texture()).
+//
+// GLSL ES has no default precision for sampler types beyond the basic
+// ones, so a `sampler2DShadow` uniform fails to compile with "No precision
+// specified" unless it is declared here. Desktop GLSL ignores precision
+// statements, but they are only emitted on the WebGL path anyway.
 inline const char* glsl_preamble() {
     if constexpr (kGlIsWebGL) {
-        return "#version 300 es\nprecision highp float;\nprecision highp int;\n";
+        return "#version 300 es\n"
+               "precision highp float;\n"
+               "precision highp int;\n"
+               "precision highp sampler2DShadow;\n";
     } else {
         return "#version 410 core\n";
     }

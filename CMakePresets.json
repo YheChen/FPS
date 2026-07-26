@@ -33,7 +33,8 @@
             "binaryDir": "${sourceDir}/build/web",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
-                "FPS_BUILD_TESTS": "OFF"
+                "FPS_BUILD_TESTS": "OFF",
+                "CMAKE_TOOLCHAIN_FILE": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake"
             }
         }
     ],

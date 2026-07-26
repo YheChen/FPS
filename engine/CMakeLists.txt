@@ -39,6 +39,8 @@ add_library(engine STATIC
     platform/input.h
     rendering/camera.cpp
     rendering/camera.h
+    rendering/light.cpp
+    rendering/light.h
     rendering/mesh_data.cpp
     rendering/mesh_data.h
     scene/scene.cpp
@@ -87,6 +89,8 @@ add_library(engine_platform STATIC
     rendering/screenshot.h
     rendering/shader.cpp
     rendering/shader.h
+    rendering/shadow_map.cpp
+    rendering/shadow_map.h
     rendering/texture.cpp
     rendering/texture.h
 )

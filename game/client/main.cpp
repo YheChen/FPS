@@ -64,6 +64,37 @@
 
 namespace {
 
+#if defined(__EMSCRIPTEN__)
+// Telemetry for the automated browser check (tools/web_smoke.mjs, run by the
+// `web` CI job). Every web-only defect this project has shipped was invisible
+// to the compiler -- a GLSL ES precision error, a 0x0 startup canvas, a WebGL
+// uniform-indexing cliff that put one draw call at 1.5 s -- and all three
+// looked identical from outside: the page loads, and then nothing moves. So
+// the check watches frames go by, and a fingerprint of the pixels proves the
+// frames contain a scene rather than a clear colour.
+//
+// Web-only on purpose. Natively the equivalent evidence is --screenshot, and
+// there is no reason to carry a JS bridge into the desktop build.
+// clang-format off
+// The body is JavaScript, and clang-format reads it as C++: it turns the
+// object literal's `frames:` into a `frames :` label. Still valid JS, but it
+// reads like a typo, so this one block opts out.
+EM_JS(void, fps_publish_smoke, (int frames, double seconds, int distinct_colors, double mean_luma), {
+    Module.fpsSmoke = {
+        frames: frames,
+        seconds: seconds,
+        distinctColors: distinct_colors,
+        meanLuma: mean_luma,
+    };
+});
+// clang-format on
+
+// Which frame to fingerprint. Late enough that the first frame's warm-up is
+// over, early enough that a smoke run does not have to be long: even the
+// software rasteriser CI renders with clears this in a couple of seconds.
+constexpr int kSmokeSignatureFrame = 30;
+#endif
+
 // Shaders omit #version; Shader::create prepends the platform preamble
 // (desktop GLSL 410 core vs WebGL2 GLSL ES 300).
 // Skinning is shared by the lit and depth shaders, so the two passes cannot
@@ -596,7 +627,7 @@ constexpr const char* kSettingsFile = "fps_settings.cfg";
 
 Settings load_settings() {
     Settings s;
-    const auto text = eng::read_text_file(kSettingsFile);
+    const auto text = eng::read_text_file(kSettingsFile, /*required=*/false);
     if (!text) {
         return s;  // first run
     }
@@ -1083,6 +1114,12 @@ int main(int argc, char** argv) {
 
     std::array<float, 240> frame_ms_history{};
     std::size_t frame_ms_cursor = 0;
+
+#if defined(__EMSCRIPTEN__)
+    int web_frames = 0;
+    int web_distinct_colors = 0;
+    float web_mean_luma = 0.0f;
+#endif
 
     bool running = true;
     // The frame body is a lambda so the same code drives a native while-loop
@@ -2128,6 +2165,26 @@ int main(int argc, char** argv) {
         if (last_frame && args.screenshot) {
             eng::save_framebuffer_png(*args.screenshot, window->width_px(), window->height_px());
         }
+#else
+        // Same "before the swap" rule as the screenshot above, and the same
+        // reason not to do it every frame: the readback is synchronous and
+        // would itself become the thing being measured.
+        //
+        // "First frame at or after N with a non-degenerate framebuffer",
+        // not "frame N", because the canvas can still be 0-high that late --
+        // that is the startup race the clamp in PostFx::resize exists for,
+        // and fingerprinting into it would report a broken client that is
+        // in fact about to come up fine.
+        ++web_frames;
+        if (web_distinct_colors == 0 && web_frames >= kSmokeSignatureFrame &&
+            window->width_px() > 0 && window->height_px() > 0) {
+            if (const auto signature =
+                    eng::read_framebuffer_signature(window->width_px(), window->height_px())) {
+                web_distinct_colors = signature->distinct_colors;
+                web_mean_luma = signature->mean_luma;
+            }
+        }
+        fps_publish_smoke(web_frames, clock.elapsed(), web_distinct_colors, web_mean_luma);
 #endif
 
         window->swap();

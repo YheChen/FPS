@@ -22,7 +22,12 @@ bool asset_path_escapes_root(std::string_view normalized);
 std::optional<std::filesystem::path> find_assets_root(
     const std::filesystem::path& start = std::filesystem::current_path());
 
-// Reads an entire file as text. nullopt (with an error log) on failure.
-std::optional<std::string> read_text_file(const std::filesystem::path& path);
+// Reads an entire file as text. Returns nullopt on failure.
+//
+// `required` only controls the logging: an asset that should be there and is
+// not is an error worth seeing, but a settings file that does not exist yet
+// is just a first run, and logging that as an error trains people to ignore
+// errors (and fails the browser smoke check, which reads them).
+std::optional<std::string> read_text_file(const std::filesystem::path& path, bool required = true);
 
 }  // namespace eng

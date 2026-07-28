@@ -70,10 +70,14 @@ std::optional<std::filesystem::path> find_assets_root(const std::filesystem::pat
     return std::nullopt;
 }
 
-std::optional<std::string> read_text_file(const std::filesystem::path& path) {
+std::optional<std::string> read_text_file(const std::filesystem::path& path, bool required) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
-        log::error("Failed to open '{}'", path.string());
+        if (required) {
+            log::error("Failed to open '{}'", path.string());
+        } else {
+            log::debug("No '{}' (optional)", path.string());
+        }
         return std::nullopt;
     }
     std::ostringstream buffer;

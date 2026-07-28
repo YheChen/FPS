@@ -29,6 +29,7 @@ add_executable(engine_tests
     net/composite_transport_tests.cpp
     net/protocol_tests.cpp
     net/transport_tests.cpp
+    net/websocket_host_tests.cpp
     rendering/camera_tests.cpp
     rendering/light_tests.cpp
     rendering/mesh_data_tests.cpp

@@ -79,6 +79,66 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  # The Emscripten client, built AND run. Building it is the easy half and on
+  # its own it proves very little: every web-only defect this project has
+  # shipped compiled cleanly and broke in the browser -- a GLSL ES precision
+  # error, a 0x0 startup canvas, a WebGL uniform-indexing cliff, and a `web`
+  # preset with no toolchain file that quietly emitted a native binary. So the
+  # job loads the page in headless Chrome and checks that frames actually go
+  # by. See tools/web_smoke.mjs.
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned like every other dependency: an emsdk bump should be a commit,
+      # not a surprise on an unrelated PR.
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.4
+          actions-cache-folder: emsdk-cache
+
+      # After setup-emsdk, so this node wins on PATH. The smoke harness drives
+      # Chrome over a WebSocket and uses the global one, which is Node 22+;
+      # emsdk bundles a suitable node itself, but relying on that would make
+      # the harness hostage to an emsdk bump.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Warnings-as-errors matters more here than on the native jobs, not less:
+      # size_t is 32 bits on wasm32, so 64-bit truncations that are lossless
+      # everywhere else become real narrowing on this target. Turning this on
+      # found three of them in the WebSocket frame parser.
+      - name: Configure
+        run: emcmake cmake --preset web -DFPS_WARNINGS_AS_ERRORS=ON
+
+      - name: Build
+        run: cmake --build --preset web --parallel
+
+      # Chrome is preinstalled on the GitHub Ubuntu images; there is no GPU, so
+      # WebGL comes from SwiftShader (the harness passes the flags for it).
+      - name: Browser smoke test
+        run: node tools/web_smoke.mjs
+
+      # Same client, but booted against a 0-height canvas on purpose. A plain
+      # headless load lays the canvas out before the module starts and so never
+      # reproduces the startup race that broke the web client once already.
+      - name: Browser smoke test (zero-height canvas at startup)
+        run: node tools/web_smoke.mjs --zero-canvas
+
+      - name: Upload the built client
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-client
+          path: |
+            build/web/game/fps_client.html
+            build/web/game/fps_client.js
+            build/web/game/fps_client.wasm
+            build/web/game/fps_client.data
+          if-no-files-found: warn
+
   format-check:
     runs-on: ubuntu-latest
     steps:

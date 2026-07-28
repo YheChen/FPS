@@ -139,6 +139,41 @@ jobs:
             build/web/game/fps_client.data
           if-no-files-found: warn
 
+  # Proves the deploy instructions, which are the one build nobody runs by
+  # accident: a headless box that installs a toolchain and nothing else, then
+  # builds ONLY fps_server. docs/deploy.md claims no graphics packages are
+  # needed, and that claim is not obviously true -- SDL3 is fetched
+  # unconditionally in third_party/CMakeLists.txt, so its configure step runs
+  # even though the target is never built.
+  #
+  # In a container, not on ubuntu-latest: the runner image ships X11 and
+  # Wayland headers, so it would pass whether or not the claim holds. The
+  # apt line below is exactly the one in the docs -- if it changes here, it
+  # changes there.
+  deploy-build:
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    steps:
+      - name: Install the toolchain (and nothing else)
+        run: |
+          apt-get update
+          apt-get install -y git cmake ninja-build build-essential ca-certificates
+
+      - uses: actions/checkout@v4
+
+      - name: Versions must satisfy CMake >= 3.25 and C++23
+        run: cmake --version && g++ --version
+
+      - name: Configure and build fps_server only
+        run: |
+          cmake --preset release -DFPS_BUILD_TESTS=OFF
+          cmake --build --preset release --target fps_server --parallel
+
+      # A server that builds but cannot find assets/ or open a socket is not
+      # deployable, and both failures are silent until someone tries to play.
+      - name: It starts, loads the map, and serves
+        run: ./build/release/game/fps_server --ws-port 7778 --no-enet --bots 2 --run-seconds 5
+
   format-check:
     runs-on: ubuntu-latest
     steps:

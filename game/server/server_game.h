@@ -17,6 +17,7 @@
 #include "game/shared/lag_comp.h"
 #include "game/shared/player_movement.h"
 #include "game/shared/protocol.h"
+#include "game/shared/replay.h"
 #include "game/shared/weapon.h"
 
 // Authoritative game server: owns the physics world and ALL game state
@@ -45,6 +46,14 @@ public:
     void tick(eng::IServerTransport& net);
 
     std::uint32_t current_tick() const { return tick_; }
+
+    // Starts recording every input the simulation actually consumes. Must be
+    // called before the first tick; the file is written by write_replay().
+    void start_recording(std::filesystem::path path);
+    bool recording() const { return recorder_.recording(); }
+    // Writes the recording started by start_recording(). No-op (returning
+    // true) when not recording.
+    bool write_replay() const;
     std::size_t player_count() const;
 
 private:
@@ -101,6 +110,8 @@ private:
     std::string map_name_;
     Arsenal arsenal_;
     std::array<std::optional<Player>, kMaxPlayers> players_;
+    ReplayRecorder recorder_;
+    std::filesystem::path replay_path_;
     std::uint32_t tick_ = 0;
     std::size_t next_spawn_ = 0;
 

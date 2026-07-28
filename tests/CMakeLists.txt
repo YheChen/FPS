@@ -22,6 +22,7 @@ add_executable(engine_tests
     game/lag_comp_tests.cpp
     game/player_movement_tests.cpp
     game/prediction_tests.cpp
+    game/replay_tests.cpp
     game/weapon_tests.cpp
     net/byte_buffer_tests.cpp
     net/composite_transport_tests.cpp

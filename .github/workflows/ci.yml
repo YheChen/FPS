@@ -53,6 +53,32 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  # The WebRTC transport is off by default, so without this job it would only
+  # ever be built on a developer's machine. Ubuntu only for now: Windows
+  # runners have no system OpenSSL, which is the open question in M19b.
+  webrtc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev libasound2-dev libpulse-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev \
+            libwayland-dev libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev libdrm-dev libgbm-dev
+
+      - name: Configure (WebRTC enabled)
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DFPS_ENABLE_WEBRTC=ON -DFPS_WARNINGS_AS_ERRORS=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      # The loopback test runs a real DataChannel connection in-process, so it
+      # exercises ICE, DTLS and SCTP without a browser or a network.
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
   format-check:
     runs-on: ubuntu-latest
     steps:

@@ -36,6 +36,13 @@ add_executable(engine_tests
     rendering/postfx_tests.cpp
     scene/scene_tests.cpp
 )
+# The WebRTC tests drive libdatachannel directly as the client half, so they
+# only exist when the transport is built.
+if(FPS_ENABLE_WEBRTC)
+    target_sources(engine_tests PRIVATE net/webrtc_host_tests.cpp)
+    target_link_libraries(engine_tests PRIVATE LibDataChannel::LibDataChannelStatic)
+endif()
+
 target_link_libraries(engine_tests PRIVATE fps::engine fps::game_shared Catch2::Catch2WithMain)
 fps_set_warnings(engine_tests)
 fps_enable_sanitizers(engine_tests)

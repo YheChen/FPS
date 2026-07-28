@@ -15,6 +15,11 @@ endif()
 option(FPS_BUILD_TESTS "Build unit tests" ${FPS_IS_TOP_LEVEL})
 option(FPS_ENABLE_SANITIZERS "Enable Address + UB sanitizers (non-MSVC)" OFF)
 option(FPS_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
+# WebRTC is opt-in. libdatachannel pulls in five submodules and needs a TLS
+# backend, and Windows runners have no system OpenSSL -- so enabling it by
+# default would break the three-platform CI for a transport most builds do
+# not need. Browsers still work over the WebSocket transport without it.
+option(FPS_ENABLE_WEBRTC "Build the WebRTC DataChannel transport (needs a TLS backend)" OFF)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

@@ -130,3 +130,33 @@ FetchContent_Declare(
     SYSTEM
 )
 FetchContent_MakeAvailable(JoltPhysics)
+
+# --- libdatachannel (WebRTC DataChannel transport, optional) ----------------
+# Only fetched when FPS_ENABLE_WEBRTC is on: it is a much heavier dependency
+# than anything else here (five submodules plus a TLS backend), and the
+# WebSocket transport already serves browsers.
+if(FPS_ENABLE_WEBRTC)
+    # We do our own signalling over the existing WebSocket transport, and the
+    # game sends no audio or video, so both of those subsystems are off. That
+    # drops libsrtp and the media stack entirely.
+    set(NO_MEDIA ON CACHE BOOL "" FORCE)
+    set(NO_WEBSOCKET ON CACHE BOOL "" FORCE)
+    set(NO_EXAMPLES ON CACHE BOOL "" FORCE)
+    set(NO_TESTS ON CACHE BOOL "" FORCE)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    # One of libdatachannel's submodules (plog) still declares a CMake
+    # minimum below 3.5, which CMake 4 refuses outright. This relaxes the
+    # floor for the subtree; it is scoped to this block and restored after.
+    set(_fps_saved_policy_min "${CMAKE_POLICY_VERSION_MINIMUM}")
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+    FetchContent_Declare(
+        libdatachannel
+        GIT_REPOSITORY https://github.com/paullouisageneau/libdatachannel.git
+        GIT_TAG v0.22.4
+        GIT_SHALLOW TRUE
+        GIT_SUBMODULES_RECURSE TRUE
+        SYSTEM
+    )
+    FetchContent_MakeAvailable(libdatachannel)
+    set(CMAKE_POLICY_VERSION_MINIMUM "${_fps_saved_policy_min}" CACHE STRING "" FORCE)
+endif()

@@ -40,7 +40,35 @@ enum class MessageType : std::uint8_t {
     ScoreUpdate = 12,
     MatchState = 13,
     WeaponStatus = 14,
+    // WebRTC signalling (M19). These travel over the WebSocket connection,
+    // which for a WebRTC client exists only to negotiate: once the
+    // DataChannel opens, all game traffic moves to it.
+    RtcOffer = 15,      // client -> server, SDP
+    RtcAnswer = 16,     // server -> client, SDP
+    RtcCandidate = 17,  // both ways, ICE candidate + media id
 };
+
+// SDP blobs run to a couple of kilobytes; a candidate line is short.
+inline constexpr std::size_t kMaxSdpLength = 8192;
+inline constexpr std::size_t kMaxCandidateLength = 512;
+
+struct RtcOfferMsg {
+    std::string sdp;
+};
+struct RtcAnswerMsg {
+    std::string sdp;
+};
+struct RtcCandidateMsg {
+    std::string candidate;
+    std::string mid;
+};
+
+void write(eng::ByteWriter& writer, const RtcOfferMsg& message);
+void write(eng::ByteWriter& writer, const RtcAnswerMsg& message);
+void write(eng::ByteWriter& writer, const RtcCandidateMsg& message);
+std::optional<RtcOfferMsg> read_rtc_offer(eng::ByteReader& reader);
+std::optional<RtcAnswerMsg> read_rtc_answer(eng::ByteReader& reader);
+std::optional<RtcCandidateMsg> read_rtc_candidate(eng::ByteReader& reader);
 
 inline constexpr std::uint8_t kNoPlayer = 255;  // "no player" id (world/none)
 

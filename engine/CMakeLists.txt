@@ -75,6 +75,12 @@ target_compile_definitions(engine
     PUBLIC $<$<CONFIG:Debug>:ENG_ENABLE_ASSERTS>
 )
 
+if(EMSCRIPTEN)
+    # Browser-side WebRTC is hand-written JS behind a C boundary: no
+    # libdatachannel, so this is unconditional on the web.
+    target_sources(engine PRIVATE net/webrtc_client.cpp net/webrtc_client.h)
+endif()
+
 if(FPS_ENABLE_WEBRTC)
     target_sources(engine PRIVATE net/webrtc_host.cpp net/webrtc_host.h)
     target_link_libraries(engine PRIVATE LibDataChannel::LibDataChannelStatic)

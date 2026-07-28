@@ -17,6 +17,11 @@
 #include "engine/net/composite_transport.h"
 #include "engine/net/transport.h"
 #include "engine/net/websocket_host.h"
+#if defined(FPS_HAS_WEBRTC)
+#include <unordered_map>
+
+#include "engine/net/webrtc_host.h"
+#endif
 #include "engine/physics/character_controller.h"
 #include "engine/physics/physics_world.h"
 #include "game/server/server_game.h"
@@ -35,6 +40,7 @@ struct ServerArgs {
     std::optional<std::string> record_path;  // --record: write a replay
     std::optional<std::string> replay_path;  // --replay: re-simulate one and exit
     int bots = 0;                            // --bots N: fill N slots with AI
+    bool webrtc = false;                     // --webrtc: accept DataChannel clients
 };
 
 ServerArgs parse_args(int argc, char** argv) {
@@ -89,6 +95,8 @@ ServerArgs parse_args(int argc, char** argv) {
                     args.bots = std::clamp(count, 0, static_cast<int>(game::kMaxPlayers));
                 }
             }
+        } else if (arg == "--webrtc") {
+            args.webrtc = true;
         } else if (arg == "--verbose") {
             args.verbose = true;
         } else {
@@ -155,6 +163,91 @@ int run_replay(const std::filesystem::path& path,
     eng::log::info("Replay finished");
     return 0;
 }
+
+#if defined(FPS_HAS_WEBRTC)
+// Routes WebRTC signalling that arrives over the WebSocket transport.
+//
+// It sits in front of ServerGame rather than inside it: ServerGame has no
+// business knowing which transports exist, and a signalling message reaching
+// it would be counted as a malformed packet and eventually kick the client.
+//
+// A signalling socket is NOT a game session. The browser sends its
+// ClientHello over the DataChannel once it opens, so the WebSocket peer stays
+// forever "awaiting hello" and never becomes a player.
+class SignallingRouter {
+public:
+    explicit SignallingRouter(eng::WebRtcHost& host) : host_(host) {}
+
+    // Returns true when the event was signalling and ServerGame should not
+    // see it.
+    bool intercept(const eng::NetEvent& event, eng::IServerTransport& net) {
+        if (event.type == eng::NetEvent::Type::Disconnected) {
+            offer_peers_.erase(event.peer);
+            return false;  // ServerGame still wants to know
+        }
+        if (event.type != eng::NetEvent::Type::Message) {
+            return false;
+        }
+
+        eng::ByteReader reader{{event.data.data(), event.data.size()}};
+        const auto type = game::read_message_type(reader);
+        if (!type) {
+            return false;
+        }
+        if (*type == game::MessageType::RtcOffer) {
+            const auto offer = game::read_rtc_offer(reader);
+            if (!offer) {
+                eng::log::warn("Signalling peer {}: malformed offer", event.peer);
+                return true;
+            }
+            const auto rtc_peer = host_.accept_offer(offer->sdp);
+            if (!rtc_peer) {
+                return true;
+            }
+            offer_peers_[event.peer] = *rtc_peer;
+            rtc_to_signalling_[*rtc_peer] = event.peer;
+            eng::log::info("Signalling peer {} -> WebRTC peer {}", event.peer, *rtc_peer);
+            return true;
+        }
+        if (*type == game::MessageType::RtcCandidate) {
+            const auto candidate = game::read_rtc_candidate(reader);
+            const auto found = offer_peers_.find(event.peer);
+            if (candidate && found != offer_peers_.end()) {
+                host_.add_remote_candidate(found->second, candidate->candidate, candidate->mid);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    // Pushes the host's queued answers and candidates back to the browser
+    // over the socket it offered on. ICE stalls if these are not delivered.
+    void pump(eng::IServerTransport& net) {
+        signals_.clear();
+        host_.take_signals(signals_);
+        for (const eng::WebRtcHost::Signal& signal : signals_) {
+            const auto found = rtc_to_signalling_.find(signal.peer);
+            if (found == rtc_to_signalling_.end()) {
+                continue;
+            }
+            eng::ByteWriter writer;
+            if (signal.type == eng::WebRtcHost::Signal::Type::Answer) {
+                game::write(writer, game::RtcAnswerMsg{signal.data});
+            } else {
+                game::write(writer, game::RtcCandidateMsg{signal.data, signal.mid});
+            }
+            const std::vector<std::uint8_t> bytes{writer.data().begin(), writer.data().end()};
+            net.send(found->second, bytes, eng::NetChannel::Reliable, true);
+        }
+    }
+
+private:
+    eng::WebRtcHost& host_;
+    std::unordered_map<std::uint32_t, std::uint32_t> offer_peers_;        // socket -> rtc
+    std::unordered_map<std::uint32_t, std::uint32_t> rtc_to_signalling_;  // rtc -> socket
+    std::vector<eng::WebRtcHost::Signal> signals_;
+};
+#endif  // FPS_HAS_WEBRTC
 
 }  // namespace
 
@@ -239,7 +332,37 @@ int main(int argc, char** argv) {
         eng::log::error("No transport enabled (use --no-enet only with --ws-port)");
         return 1;
     }
+#if defined(FPS_HAS_WEBRTC)
+    // The WebRTC host is a CompositeTransport child like any other, so
+    // ServerGame cannot tell a DataChannel player from an ENet one.
+    eng::WebRtcHost* webrtc_host = nullptr;
+    if (args.webrtc) {
+        if (!args.ws_port) {
+            eng::log::error("--webrtc needs --ws-port: signalling rides the WebSocket connection");
+            return 1;
+        }
+        auto host = eng::WebRtcHost::create({.max_peers = game::kMaxPlayers, .ice_servers = {}});
+        if (!host) {
+            return 1;
+        }
+        auto owned = std::make_unique<eng::WebRtcHost>(std::move(*host));
+        webrtc_host = owned.get();
+        transports.push_back(std::move(owned));
+    }
+#else
+    if (args.webrtc) {
+        eng::log::error("--webrtc requires a build with -DFPS_ENABLE_WEBRTC=ON");
+        return 1;
+    }
+#endif
+
     eng::CompositeTransport net{std::move(transports)};
+#if defined(FPS_HAS_WEBRTC)
+    std::optional<SignallingRouter> signalling;
+    if (webrtc_host != nullptr) {
+        signalling.emplace(*webrtc_host);
+    }
+#endif
 
     game::ServerGame server{std::move(collision), std::move(spawns), kMapPath, std::move(arsenal)};
     if (args.record_path) {
@@ -263,8 +386,20 @@ int main(int argc, char** argv) {
         events.clear();
         net.poll(events);
         for (const eng::NetEvent& event : events) {
+#if defined(FPS_HAS_WEBRTC)
+            // Signalling never reaches ServerGame: it would be counted as a
+            // malformed packet and eventually kick the client.
+            if (signalling && signalling->intercept(event, net)) {
+                continue;
+            }
+#endif
             server.handle_event(event, net);
         }
+#if defined(FPS_HAS_WEBRTC)
+        if (signalling) {
+            signalling->pump(net);
+        }
+#endif
 
         step.advance(clock.tick());
         while (step.consume_tick()) {

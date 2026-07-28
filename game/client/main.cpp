@@ -228,6 +228,30 @@ struct ClientArgs {
     std::optional<std::string> replay_path;  // --replay: watch a recording
 };
 
+#if defined(__EMSCRIPTEN__)
+// A browser has no argv, so connection details come from the URL:
+//   fps_client.html?connect=rtc://host:port&name=bob
+// That doubles as a shareable join link for a deployed build, and it is the
+// only way to drive the client without clicking through the menu.
+EM_JS(int, fps_read_query_param, (const char* key, char* out, int max), {
+    var params = new URLSearchParams(window.location.search);
+    var value = params.get(UTF8ToString(key));
+    if (!value) {
+        return 0;
+    }
+    stringToUTF8(value, out, max);
+    return 1;
+});
+
+std::optional<std::string> query_param(const char* key) {
+    std::string buffer(256, '\0');
+    if (fps_read_query_param(key, buffer.data(), 256) == 0) {
+        return std::nullopt;
+    }
+    return std::string(buffer.c_str());
+}
+#endif
+
 ClientArgs parse_args(int argc, char** argv) {
     ClientArgs args;
     for (int i = 1; i < argc; ++i) {
@@ -301,6 +325,16 @@ ClientArgs parse_args(int argc, char** argv) {
             eng::log::warn("Unknown argument '{}'", arg);
         }
     }
+#if defined(__EMSCRIPTEN__)
+    // A browser has no argv, so a deployed or automated client passes its
+    // connection details in the URL instead. Also a shareable join link.
+    if (const auto connect = query_param("connect")) {
+        args.connect_host = *connect;
+    }
+    if (const auto name = query_param("name")) {
+        args.name = *name;
+    }
+#endif
     return args;
 }
 

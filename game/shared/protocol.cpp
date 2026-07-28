@@ -409,4 +409,49 @@ std::optional<WeaponStatusMsg> read_weapon_status(eng::ByteReader& r) {
     return WeaponStatusMsg{*ammo, *reloading == 1, *slot, *magazine, *switching == 1};
 }
 
+// --- WebRTC signalling ------------------------------------------------------
+// Same hostile-input discipline as everything else here: an oversized or
+// empty SDP is refused rather than handed to the WebRTC stack.
+
+void write(eng::ByteWriter& writer, const RtcOfferMsg& message) {
+    writer.u8(static_cast<std::uint8_t>(MessageType::RtcOffer));
+    writer.long_str(message.sdp);
+}
+
+void write(eng::ByteWriter& writer, const RtcAnswerMsg& message) {
+    writer.u8(static_cast<std::uint8_t>(MessageType::RtcAnswer));
+    writer.long_str(message.sdp);
+}
+
+void write(eng::ByteWriter& writer, const RtcCandidateMsg& message) {
+    writer.u8(static_cast<std::uint8_t>(MessageType::RtcCandidate));
+    writer.long_str(message.candidate);
+    writer.str(message.mid);
+}
+
+std::optional<RtcOfferMsg> read_rtc_offer(eng::ByteReader& reader) {
+    auto sdp = reader.long_str(kMaxSdpLength);
+    if (!sdp) {
+        return std::nullopt;
+    }
+    return RtcOfferMsg{std::move(*sdp)};
+}
+
+std::optional<RtcAnswerMsg> read_rtc_answer(eng::ByteReader& reader) {
+    auto sdp = reader.long_str(kMaxSdpLength);
+    if (!sdp) {
+        return std::nullopt;
+    }
+    return RtcAnswerMsg{std::move(*sdp)};
+}
+
+std::optional<RtcCandidateMsg> read_rtc_candidate(eng::ByteReader& reader) {
+    auto candidate = reader.long_str(kMaxCandidateLength);
+    auto mid = reader.str(64);
+    if (!candidate || !mid) {
+        return std::nullopt;
+    }
+    return RtcCandidateMsg{std::move(*candidate), std::move(*mid)};
+}
+
 }  // namespace game

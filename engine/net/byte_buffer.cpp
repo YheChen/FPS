@@ -1,5 +1,6 @@
 #include "engine/net/byte_buffer.h"
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 
@@ -92,6 +93,25 @@ std::optional<std::string> ByteReader::str(std::size_t max_length) {
         return std::nullopt;
     }
     return std::string(reinterpret_cast<const char*>(p), *length);
+}
+
+void ByteWriter::long_str(std::string_view value) {
+    const auto length = static_cast<std::uint16_t>(std::min<std::size_t>(value.size(), 0xFFFFu));
+    u16(length);
+    buffer_.insert(buffer_.end(), value.begin(), value.begin() + length);
+}
+
+std::optional<std::string> ByteReader::long_str(std::size_t max_length) {
+    const auto length = u16();
+    if (!length || *length == 0 || *length > max_length) {
+        failed_ = true;
+        return std::nullopt;
+    }
+    const std::uint8_t* bytes = nullptr;
+    if (!take(*length, &bytes)) {
+        return std::nullopt;
+    }
+    return std::string(reinterpret_cast<const char*>(bytes), *length);
 }
 
 }  // namespace eng

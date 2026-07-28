@@ -1,5 +1,9 @@
 #include "engine/net/client_transport.h"
 
+#if defined(__EMSCRIPTEN__)
+#include "engine/net/webrtc_client.h"
+#endif
+
 #include <utility>
 
 #include "engine/core/log.h"
@@ -132,6 +136,17 @@ private:
 
 std::unique_ptr<IClientTransport> make_client_transport(const std::string& host,
                                                         std::uint16_t port) {
+    // An "rtc://" address selects the WebRTC transport, signalling over the
+    // ws:// form of the same URL. Same spirit as the existing ws:// / wss://
+    // convention: the address says which transport to use, so no extra UI or
+    // build flag is needed to try one against a given server.
+    constexpr std::string_view kRtcScheme = "rtc://";
+    constexpr std::string_view kRtcsScheme = "rtcs://";
+    if (host.starts_with(kRtcScheme) || host.starts_with(kRtcsScheme)) {
+        const bool secure = host.starts_with(kRtcsScheme);
+        const std::string rest = host.substr(secure ? kRtcsScheme.size() : kRtcScheme.size());
+        return WebRtcClientTransport::create((secure ? "wss://" : "ws://") + rest);
+    }
     auto transport = std::make_unique<WebSocketClientTransport>(to_ws_url(host, port));
     if (transport->failed()) {
         return nullptr;

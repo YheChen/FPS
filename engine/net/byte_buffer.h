@@ -21,6 +21,9 @@ public:
     void f32(float value);
     // u8 length prefix + UTF-8 bytes. `value` must be <= 255 bytes.
     void str(std::string_view value);
+    // u16 length prefix, for payloads that outgrow a byte: SDP blobs run to
+    // a couple of kilobytes. Truncates at 65535.
+    void long_str(std::string_view value);
 
     std::span<const std::uint8_t> data() const { return buffer_; }
     std::size_t size() const { return buffer_.size(); }
@@ -40,6 +43,8 @@ public:
     std::optional<float> f32();
     // Rejects length 0 or length > max_length.
     std::optional<std::string> str(std::size_t max_length);
+    // u16-prefixed counterpart of ByteWriter::long_str.
+    std::optional<std::string> long_str(std::size_t max_length);
 
     bool ok() const { return !failed_; }
     std::size_t remaining() const { return data_.size() - position_; }

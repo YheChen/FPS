@@ -136,6 +136,7 @@ void ServerGame::handle_hello(std::uint32_t peer, eng::ByteReader& reader,
     player.controller = std::make_unique<eng::CharacterController>(world_, spawn);
     reset_loadout(player.loadout, arsenal_);
     players_[*slot] = std::move(player);
+    recorder_.add_player(*slot, hello->name, spawn);
 
     eng::log::info("Player {} '{}' joined (peer {})", *slot, hello->name, peer);
 
@@ -206,6 +207,19 @@ void ServerGame::handle_input(Player& player, eng::ByteReader& reader, eng::ISer
     }
 }
 
+void ServerGame::start_recording(std::filesystem::path path) {
+    replay_path_ = std::move(path);
+    recorder_.begin(map_name_, static_cast<std::uint16_t>(std::lround(1.0f / kTickSeconds)));
+    eng::log::info("Recording replay to '{}'", replay_path_.string());
+}
+
+bool ServerGame::write_replay() const {
+    if (!recorder_.recording()) {
+        return true;
+    }
+    return write_replay_file(replay_path_, recorder_.replay());
+}
+
 void ServerGame::drop_player(std::uint8_t player_id, eng::IServerTransport& net) {
     players_[player_id].reset();
     const auto left = encode(PlayerLeft{player_id});
@@ -244,6 +258,11 @@ void ServerGame::tick(eng::IServerTransport& net) {
             player.starved_ticks = 0;
         }
         player.last_command = command;
+        // Recorded here, at the point of consumption. Recording arriving
+        // packets instead would miss the starvation path above, where the
+        // server reuses the previous command -- and a replay that skipped
+        // those ticks would diverge.
+        recorder_.record(tick_, id, command);
         player.view_yaw = command.yaw;
         player.view_pitch = command.pitch;
 

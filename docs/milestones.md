@@ -666,3 +666,55 @@ rather than left in the API as a trap.
 as clearly distinct (proving skinning *and* clip blending, not a static bind
 pose); browser at 69 fps with the character rendering; 123 tests; GCC sweep
 (66 TUs); header check.
+
+---
+
+## Milestone 17 — Replay system ✅
+
+**Objective:** record a match and reproduce it exactly.
+
+**Deliverables:** `game/shared/replay.*` — a versioned binary format written
+with the same `ByteWriter`/`ByteReader` discipline as the wire protocol, a
+`ReplayRecorder`, and file IO. The server records with `--record <path>` and
+re-simulates with `--replay <path>`, which runs the recording headlessly and
+reports where everyone ended up.
+
+**A replay stores inputs only, never positions.** The simulation is already
+deterministic — `advance_player` is a pure function of state and command, and
+`game/shared/rng.h` is a pure hash — so replaying the inputs through the same
+code reproduces the match. Recording positions would be bigger, would drift
+away from the code that produced them, and would quietly stop being a check on
+determinism at all.
+
+That is the real value here: **a replay that diverges is a determinism bug**,
+and prediction, reconciliation and lag compensation all rest on the simulation
+being deterministic. The test suite uses a replay as exactly that regression
+test.
+
+**Recorded at the point of consumption, not arrival.** The server reuses the
+previous command when a player's input is starved by loss or jitter, so
+recording the network stream would miss those ticks and the replay would
+diverge. The hook sits in `tick()` where the command is actually applied.
+
+A replay file is treated as **as untrusted as a packet**: bad magic, an
+unknown version, out-of-range player ids or weapon slots, non-advancing ticks,
+truncation and trailing bytes are all rejected rather than guessed at.
+
+**Tests:** 132 total (+9). Encode/decode round trip; **every proper prefix of
+a valid file rejected** (a decoder that accepts one is reading past its
+buffer); trailing bytes, bad magic, bad version; out-of-range fields;
+non-advancing ticks; recorder grouping, mid-match joins and misuse; a file
+round trip. And the one that matters: record a 240-tick run of turning,
+strafing, sprinting, jumping and crouching, push it **through the real file
+format**, replay it, and assert the final position and velocity match
+**bit-for-bit** via `memcmp` — approximate equality would let real drift
+through.
+
+**Verified live:** recorded a networked match (293 frames, 6.2 KB), replayed
+it twice to identical final positions (14.5564, -0.0000, 14.6264), and
+confirmed a truncated file exits non-zero instead of replaying a partial
+match.
+
+**Not included:** watching a replay in the client. Playback re-simulates
+headlessly and prints results; hooking those states into the renderer is a
+separate piece of client work.

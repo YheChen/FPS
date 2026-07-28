@@ -1,5 +1,8 @@
+#include <array>
 #include <charconv>
 #include <chrono>
+#include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -13,8 +16,11 @@
 #include "engine/net/composite_transport.h"
 #include "engine/net/transport.h"
 #include "engine/net/websocket_host.h"
+#include "engine/physics/character_controller.h"
+#include "engine/physics/physics_world.h"
 #include "game/server/server_game.h"
 #include "game/shared/player_movement.h"
+#include "game/shared/replay.h"
 #include "game/shared/weapon.h"
 
 namespace {
@@ -25,6 +31,8 @@ struct ServerArgs {
     bool enet = true;                      // --no-enet to run WS-only
     std::optional<double> run_seconds;
     bool verbose = false;
+    std::optional<std::string> record_path;  // --record: write a replay
+    std::optional<std::string> replay_path;  // --replay: re-simulate one and exit
 };
 
 ServerArgs parse_args(int argc, char** argv) {
@@ -63,6 +71,14 @@ ServerArgs parse_args(int argc, char** argv) {
                     args.run_seconds = seconds;
                 }
             }
+        } else if (arg == "--record") {
+            if (i + 1 < argc) {
+                args.record_path = argv[++i];
+            }
+        } else if (arg == "--replay") {
+            if (i + 1 < argc) {
+                args.replay_path = argv[++i];
+            }
         } else if (arg == "--verbose") {
             args.verbose = true;
         } else {
@@ -70,6 +86,64 @@ ServerArgs parse_args(int argc, char** argv) {
         }
     }
     return args;
+}
+
+// Re-simulates a recording headlessly and reports where everyone ended up.
+//
+// This runs the SAME advance_player the live server runs, on inputs only --
+// no positions were recorded. So a replay that lands somewhere different is
+// not a replay bug, it is a determinism bug in the simulation, which is
+// exactly what makes this worth having as a tool.
+int run_replay(const std::filesystem::path& path,
+               const std::vector<std::pair<eng::MeshData, glm::mat4>>& collision) {
+    const auto replay = game::read_replay_file(path);
+    if (!replay) {
+        return 1;
+    }
+    eng::log::info("Replay '{}': map '{}', {} players, {} frames at {} Hz", path.string(),
+                   replay->map_path, replay->players.size(), replay->frames.size(),
+                   replay->tick_rate_hz);
+
+    eng::PhysicsWorld world;
+    for (const auto& [mesh, transform] : collision) {
+        world.add_static_mesh(mesh, transform);
+    }
+    world.optimize();
+
+    struct Simulated {
+        game::PlayerState state;
+        std::unique_ptr<eng::CharacterController> controller;
+    };
+    std::array<std::optional<Simulated>, game::kMaxPlayers> players;
+    for (const game::ReplayPlayer& recorded : replay->players) {
+        Simulated simulated;
+        simulated.state.position = recorded.spawn;
+        simulated.controller = std::make_unique<eng::CharacterController>(world, recorded.spawn);
+        players[recorded.id] = std::move(simulated);
+    }
+
+    for (const game::ReplayFrame& frame : replay->frames) {
+        for (const game::ReplayCommand& entry : frame.commands) {
+            auto& player = players[entry.player_id];
+            if (!player) {
+                continue;  // a command for a player the header never declared
+            }
+            game::advance_player(player->state, entry.command, game::kTickSeconds,
+                                 *player->controller, world);
+        }
+    }
+
+    for (const game::ReplayPlayer& recorded : replay->players) {
+        const auto& player = players[recorded.id];
+        if (!player) {
+            continue;
+        }
+        const glm::vec3& p = player->state.position;
+        eng::log::info("  player {} '{}': final pos ({:.4f}, {:.4f}, {:.4f}) on_ground {}",
+                       recorded.id, recorded.name, p.x, p.y, p.z, player->state.on_ground);
+    }
+    eng::log::info("Replay finished");
+    return 0;
 }
 
 }  // namespace
@@ -113,6 +187,10 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (args.replay_path) {
+        return run_replay(*args.replay_path, collision);
+    }
+
     // Slot order is the arsenal order: 1=rifle, 2=smg, 3=shotgun, 4=sniper.
     game::Arsenal arsenal;
     for (const char* weapon : {"rifle", "smg", "shotgun", "sniper"}) {
@@ -154,6 +232,9 @@ int main(int argc, char** argv) {
     eng::CompositeTransport net{std::move(transports)};
 
     game::ServerGame server{std::move(collision), std::move(spawns), kMapPath, std::move(arsenal)};
+    if (args.record_path) {
+        server.start_recording(*args.record_path);
+    }
 
     // --- fixed-tick headless loop ------------------------------------------
     eng::Clock clock;
@@ -190,6 +271,14 @@ int main(int argc, char** argv) {
             running = false;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    // Written on the way out rather than incrementally: a match is a few
+    // hundred KB of inputs, and a partial file would decode to a truncated
+    // match that looks legitimate.
+    if (!server.write_replay()) {
+        eng::log::error("Failed to write the replay");
+        return 1;
     }
 
     eng::log::info("FPS dedicated server shutting down cleanly");

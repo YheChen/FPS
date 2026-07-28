@@ -5,11 +5,30 @@
 # on localhost. The browser client connects to wss://fps.yanzhenchen.ca; the
 # C++ server never needs to know about TLS.
 #
-# Requires: DNS A/AAAA record for the domain pointing at this VM, and inbound
-# TCP 80 + 443 open (OCI security list + host firewall). See docs/deploy.md.
+# Requires: a DNS A/AAAA record for the domain pointing at this host, and
+# inbound TCP 443 -- plus 80 for the HTTP-01 challenge, unless you uncomment
+# the DNS-01 block below. See docs/deploy.md.
 #
 # Install: sudo cp deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
 
 fps.yanzhenchen.ca {
 	reverse_proxy localhost:7778
+
+	# --- DNS-01 certificates (docs/deploy.md, TLS path B) -----------------
+	# Uncomment when inbound port 80 is blocked, which is common on a
+	# residential connection. Caddy then proves domain control by writing a
+	# DNS record instead of answering an HTTP challenge, so only 443 ever has
+	# to be open.
+	#
+	# Needs a Caddy built with the Cloudflare DNS module -- the packaged
+	# binary does NOT include it:
+	#     xcaddy build --with github.com/caddy-dns/cloudflare
+	#
+	# CF_API_TOKEN comes from a systemd drop-in rather than from this file, so
+	# the token is not sitting world-readable in /etc/caddy. Scope it to
+	# Zone > DNS > Edit on this zone only.
+	#
+	# tls {
+	# 	dns cloudflare {env.CF_API_TOKEN}
+	# }
 }

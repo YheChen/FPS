@@ -141,15 +141,18 @@ jobs:
 
   # Proves the deploy instructions, which are the one build nobody runs by
   # accident: a headless box that installs a toolchain and nothing else, then
-  # builds ONLY fps_server. docs/deploy.md claims no graphics packages are
-  # needed, and that claim is not obviously true -- SDL3 is fetched
-  # unconditionally in third_party/CMakeLists.txt, so its configure step runs
-  # even though the target is never built.
+  # builds ONLY fps_server.
   #
-  # In a container, not on ubuntu-latest: the runner image ships X11 and
-  # Wayland headers, so it would pass whether or not the claim holds. The
-  # apt line below is exactly the one in the docs -- if it changes here, it
-  # changes there.
+  # The first run of this job failed, which is the reason it exists. SDL3's
+  # CMake does not merely go unused on a headless host -- it hard-errors
+  # ("could not find X11 or Wayland development libraries") during configure,
+  # whether or not the target is ever built. So docs/deploy.md had been telling
+  # people to run a command that could not work. FPS_BUILD_CLIENT=OFF now skips
+  # SDL3/ImGui/glad/miniaudio entirely.
+  #
+  # In a container, not on ubuntu-latest: the runner image ships those headers,
+  # so it would pass whether or not the claim holds. The apt line below is
+  # exactly the one in the docs -- if it changes here, it changes there.
   deploy-build:
     runs-on: ubuntu-latest
     container: ubuntu:24.04
@@ -166,8 +169,21 @@ jobs:
 
       - name: Configure and build fps_server only
         run: |
-          cmake --preset release -DFPS_BUILD_TESTS=OFF
+          cmake --preset release -DFPS_BUILD_CLIENT=OFF -DFPS_BUILD_TESTS=OFF
           cmake --build --preset release --target fps_server --parallel
+
+      # If SDL/ImGui/miniaudio ever creep back into a server build, this is
+      # where it shows up -- a slow, fragile deploy that needs graphics
+      # packages, rather than an outright failure.
+      - name: No client dependencies were fetched
+        run: |
+          for dep in sdl3 imgui miniaudio; do
+            if [ -d "build/release/_deps/${dep}-src" ]; then
+              echo "FAIL: ${dep} was fetched for a server-only build"
+              exit 1
+            fi
+          done
+          echo "fetched: $(ls build/release/_deps | grep -- -src$ | tr '\n' ' ')"
 
       # A server that builds but cannot find assets/ or open a socket is not
       # deployable, and both failures are silent until someone tries to play.

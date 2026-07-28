@@ -84,6 +84,13 @@ endif()
 fps_set_warnings(engine)
 fps_enable_sanitizers(engine)
 
+# Client-only. A dedicated-server build (FPS_BUILD_CLIENT=OFF) never defines
+# this target, and none of its dependencies are even fetched -- see the note in
+# third_party/CMakeLists.txt.
+if(NOT FPS_BUILD_CLIENT)
+    return()
+endif()
+
 add_library(engine_platform STATIC
     audio/audio_engine.cpp
     audio/audio_engine.h

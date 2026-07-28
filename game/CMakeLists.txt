@@ -24,6 +24,9 @@ target_link_libraries(game_shared PUBLIC fps::engine)
 fps_set_warnings(game_shared)
 fps_enable_sanitizers(game_shared)
 
+# The graphical client. Skipped for a dedicated-server build, which does not
+# have engine_platform at all (see engine/CMakeLists.txt).
+if(FPS_BUILD_CLIENT)
 add_executable(fps_client
     client/main.cpp
     client/net_client.cpp
@@ -61,6 +64,8 @@ if(EMSCRIPTEN)
     # Emit fps_client.html (+ .js, .wasm, .data).
     set_target_properties(fps_client PROPERTIES SUFFIX ".html")
 endif()
+
+endif()  # FPS_BUILD_CLIENT
 
 # The dedicated server is native-only (no browser build).
 if(NOT EMSCRIPTEN)

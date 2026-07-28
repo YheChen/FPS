@@ -61,6 +61,7 @@ CI builds this and runs it in a browser on every PR; see
 | `FPS_ENABLE_SANITIZERS`   | OFF     | ASan + UBSan on all project targets     |
 | `FPS_WARNINGS_AS_ERRORS`  | OFF     | `-Werror` / `/WX` (always ON in CI)     |
 | `FPS_ENABLE_WEBRTC`       | OFF     | Native WebRTC DataChannel transport     |
+| `FPS_BUILD_CLIENT`        | ON      | Client + SDL/GL/audio deps (OFF = server only) |
 
 ## Running
 

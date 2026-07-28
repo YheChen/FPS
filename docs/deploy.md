@@ -67,18 +67,22 @@ path (§3 A) and need port 80 reachable.
 sudo apt update && sudo apt install -y git cmake ninja-build build-essential ca-certificates
 sudo git clone https://github.com/YheChen/FPS.git /opt/fps
 cd /opt/fps
-cmake --preset release -DFPS_BUILD_TESTS=OFF
+cmake --preset release -DFPS_BUILD_CLIENT=OFF -DFPS_BUILD_TESTS=OFF
 cmake --build --preset release --target fps_server --parallel
 ```
 
-No graphics packages: the server is headless and links `engine` +
-`game_shared` only, never SDL/GL/audio. SDL3 is still *fetched* (it is
-declared unconditionally in `third_party/CMakeLists.txt`), so its configure
-step runs — but it configures fine without X11 or Wayland headers and the
-target is never built. **The `deploy-build` CI job pins this down**: it runs in
-a bare `ubuntu:24.04` container, installs exactly the `apt` line above, builds
-only `fps_server`, and starts it. If that job is green, these instructions
-work on a fresh machine.
+**`FPS_BUILD_CLIENT=OFF` is not optional on a headless host.** Without it the
+*configure* step fails — not the build. SDL3's CMake hard-errors with "could
+not find X11 or Wayland development libraries" whether or not anything links
+it, so simply not building `fps_client` is not enough. The flag skips SDL3,
+ImGui, glad and miniaudio entirely: they are never fetched, so the server build
+is also markedly faster and needs no graphics packages at all.
+
+(This guide previously said no graphics packages were needed and gave a command
+without the flag. That command could not have worked. The `deploy-build` CI job
+exists now so the claim is checked rather than asserted: a bare `ubuntu:24.04`
+container, exactly the `apt` line above, `fps_server` only, then start it — and
+it asserts SDL/ImGui/miniaudio were not fetched.)
 
 Sanity check it before wiring anything up:
 

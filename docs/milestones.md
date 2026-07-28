@@ -718,3 +718,43 @@ match.
 **Not included:** watching a replay in the client. Playback re-simulates
 headlessly and prints results; hooking those states into the renderer is a
 separate piece of client work.
+
+---
+
+## Milestone 17b — Replay viewer ✅
+
+**Objective:** watch a replay, not just verify one. M17 could re-simulate a
+recording headlessly and print final states; this renders it.
+
+**Deliverables:** a `Mode::Replay` in the client behind `--replay <path>`. It
+loads the recording, rebuilds each recorded player at their spawn, and steps
+the playback one frame per simulation tick through the **same
+`advance_player`** the server runs. Nothing about positions is read from the
+file, so what is on screen is genuinely re-simulated — the viewer is the
+determinism check, watched rather than asserted.
+
+Players render as the M16 skinned characters, animated by their re-simulated
+velocity. Controls: play/pause, single-step while paused, restart, a 0.1–4×
+speed slider, and a camera selector — free-fly or a chase cam on any recorded
+player. The default is chasing the first player, because watching someone is
+what a replay is for and framing an empty arena well is guesswork.
+
+Fractional speeds use a frame-debt accumulator rather than stepping in bursts,
+so 0.5× runs smoothly instead of stuttering every other tick.
+
+**Three things that leaked into replay mode and had to be fixed:**
+
+1. **The practice mannequin appeared in the middle of recorded matches.** Its
+   condition was `!online`, which is true in `Mode::Replay` too. Now gated on
+   `Mode::Offline` explicitly. A good reminder that `!online` is not the same
+   as "offline" once a third mode exists.
+2. **The local-player HUD** (health, ammo, K/D) rendered over the replay,
+   describing a player that does not exist.
+3. **The physics-debug capsule** drew at the default spawn for the same
+   nonexistent player.
+
+**Verified:** recorded a networked match, watched it back — the chase cam
+follows the recorded player through the arena, the panel tracks frame and
+tick, and draw calls confirm exactly one character. A missing replay file
+exits non-zero rather than opening an empty viewer. Offline and online modes
+were re-checked for regressions, and the WASM build still compiles.

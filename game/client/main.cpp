@@ -58,6 +58,7 @@
 #include "game/shared/interpolation.h"
 #include "game/shared/player_movement.h"
 #include "game/shared/prediction.h"
+#include "game/shared/replay.h"
 #include "game/shared/rng.h"
 #include "game/shared/weapon.h"
 
@@ -221,9 +222,10 @@ struct ClientArgs {
                                 // block on swap (macOS throttles occluded windows)
     eng::NetSimConfig net_sim;  // --fake-latency/--fake-jitter/--fake-loss
     // Automated-verification hooks (harmless in normal play):
-    bool auto_fire = false;                 // hold the trigger every tick
-    std::optional<float> fixed_yaw;         // lock the view yaw (radians)
-    std::optional<std::string> screenshot;  // PNG written on the final frame
+    bool auto_fire = false;                  // hold the trigger every tick
+    std::optional<float> fixed_yaw;          // lock the view yaw (radians)
+    std::optional<std::string> screenshot;   // PNG written on the final frame
+    std::optional<std::string> replay_path;  // --replay: watch a recording
 };
 
 ClientArgs parse_args(int argc, char** argv) {
@@ -265,6 +267,10 @@ ClientArgs parse_args(int argc, char** argv) {
         } else if (arg == "--screenshot") {
             if (const auto value = next_value()) {
                 args.screenshot = std::string(*value);
+            }
+        } else if (arg == "--replay") {
+            if (const auto value = next_value()) {
+                args.replay_path = std::string(*value);
             }
         } else if (arg == "--auto-fire") {
             args.auto_fire = true;
@@ -324,6 +330,73 @@ struct DrawItem {
     int joint_offset = -1;
     int joint_count = 0;
 };
+
+// One replayed player: the same PlayerState and controller the server uses,
+// stepped by the recorded inputs. Positions were never recorded, so what is
+// on screen is genuinely re-simulated rather than played back.
+struct ReplayActor {
+    bool active = false;
+    std::string name;
+    game::PlayerState state;
+    // Facing is not part of PlayerState (the server keeps it on the command),
+    // so it is carried alongside for rendering.
+    float yaw = 0.0f;
+    float pitch = 0.0f;
+    std::unique_ptr<eng::CharacterController> controller;
+};
+
+// Playback cursor over a loaded replay.
+struct ReplayPlayback {
+    game::Replay replay;
+    std::array<ReplayActor, game::kMaxPlayers> actors;
+    std::size_t next_frame = 0;
+    bool paused = false;
+    float speed = 1.0f;
+    // Fractional frames carried between ticks so speeds below 1x work
+    // without stuttering.
+    float frame_debt = 0.0f;
+    int follow = -1;  // player id to chase, -1 = free camera
+
+    bool finished() const { return next_frame >= replay.frames.size(); }
+    std::uint32_t current_tick() const {
+        return next_frame == 0 ? 0u : replay.frames[next_frame - 1].tick;
+    }
+};
+
+// Rebuilds every actor at its recorded spawn and rewinds to the first frame.
+void reset_playback(ReplayPlayback& playback, eng::PhysicsWorld& world) {
+    for (ReplayActor& actor : playback.actors) {
+        actor = ReplayActor{};
+    }
+    for (const game::ReplayPlayer& recorded : playback.replay.players) {
+        ReplayActor& actor = playback.actors[recorded.id];
+        actor.active = true;
+        actor.name = recorded.name;
+        actor.state = game::PlayerState{};
+        actor.state.position = recorded.spawn;
+        actor.controller = std::make_unique<eng::CharacterController>(world, recorded.spawn);
+    }
+    playback.next_frame = 0;
+    playback.frame_debt = 0.0f;
+}
+
+// Applies one recorded frame through the SAME advance_player the server runs.
+void step_playback(ReplayPlayback& playback, eng::PhysicsWorld& world) {
+    if (playback.finished()) {
+        return;
+    }
+    const game::ReplayFrame& frame = playback.replay.frames[playback.next_frame++];
+    for (const game::ReplayCommand& entry : frame.commands) {
+        ReplayActor& actor = playback.actors[entry.player_id];
+        if (!actor.active) {
+            continue;  // a command for a player the header never declared
+        }
+        actor.yaw = entry.command.yaw;
+        actor.pitch = entry.command.pitch;
+        game::advance_player(actor.state, entry.command, game::kTickSeconds, *actor.controller,
+                             world);
+    }
+}
 
 // Animation state for one figure. Cosmetic, like particles: driven by the
 // render clock and never fed back into the simulation.
@@ -574,6 +647,7 @@ enum class Mode : std::uint8_t {
     Menu,     // main menu over an orbiting arena view
     Offline,  // practice range (targets)
     Online,   // connected to a server
+    Replay,   // watching a recorded match, no local player
 };
 
 game::InputCommand make_command(const eng::InputState& input, float yaw, float pitch,
@@ -885,8 +959,13 @@ int main(int argc, char** argv) {
         audio->set_master_volume(settings.volume);
     }
 
+    // Declared up here because the replay branch below aims it at the first
+    // recorded spawn.
+    game::FlyCamera fly;
     std::optional<game::NetClient> net;
     std::optional<game::Prediction> prediction;
+    std::optional<ReplayPlayback> playback;
+    std::unordered_map<std::uint8_t, CharacterAnimation> replay_animations;
     Mode mode = Mode::Menu;
     std::string menu_error;
     char menu_name[17]{};
@@ -922,6 +1001,40 @@ int main(int argc, char** argv) {
                            args.net_sim.latency_ms, args.net_sim.jitter_ms,
                            args.net_sim.loss_percent);
         }
+    } else if (args.replay_path) {
+        auto loaded = game::read_replay_file(*args.replay_path);
+        if (!loaded) {
+            return 1;
+        }
+        playback.emplace();
+        playback->replay = std::move(*loaded);
+        reset_playback(*playback, world);
+        mode = Mode::Replay;
+        // Park the free camera looking at the first recorded spawn. The
+        // default fly position is arbitrary, and a replay that opens facing a
+        // wall reads as broken.
+        if (!playback->replay.players.empty()) {
+            // Default to chasing the first recorded player. Watching someone
+            // is what a replay is for; the free camera is one click away and
+            // framing an empty arena well is guesswork.
+            playback->follow = playback->replay.players[0].id;
+
+            const glm::vec3 target = playback->replay.players[0].spawn;
+            // Behind the spawn relative to the arena centre and raised, so
+            // the opening shot looks inward across the map rather than over
+            // a wall.
+            const glm::vec3 outward =
+                glm::length(target) > 0.1f ? glm::normalize(target) : glm::vec3{0.0f, 0.0f, 1.0f};
+            fly.camera.position = target + outward * 4.0f + glm::vec3{0.0f, 6.0f, 0.0f};
+            // Aimed at the middle of the map rather than at the spawn itself,
+            // so the opening shot frames the arena the player will move into.
+            const glm::vec3 to_target =
+                glm::normalize(glm::vec3{0.0f, 1.0f, 0.0f} - fly.camera.position);
+            fly.camera.yaw = std::atan2(to_target.x, -to_target.z);
+            fly.camera.pitch = std::asin(to_target.y);
+        }
+        eng::log::info("Replay: '{}', {} players, {} frames", args.replay_path.value(),
+                       playback->replay.players.size(), playback->replay.frames.size());
     } else if (args.run_seconds) {
         mode = Mode::Offline;  // automated runs go straight to the range
     }
@@ -949,7 +1062,6 @@ int main(int argc, char** argv) {
     std::uint32_t input_sequence = 0;
 
     float smoothed_eye_height = game::kMove.eye_height;
-    game::FlyCamera fly;
     fly.camera.position = spawn + glm::vec3{0.0f, 8.0f, 12.0f};
     fly.camera.pitch = -0.5f;
     bool fly_mode = false;
@@ -1041,6 +1153,21 @@ int main(int argc, char** argv) {
             sim_time += game::kTickSeconds;
             ++client_tick;
             previous_player = player;
+
+            if (mode == Mode::Replay) {
+                // One recorded frame per simulation tick at 1x. The debt
+                // accumulator lets fractional speeds run smoothly instead of
+                // stepping in bursts.
+                if (!playback->paused) {
+                    playback->frame_debt += playback->speed;
+                    while (playback->frame_debt >= 1.0f && !playback->finished()) {
+                        playback->frame_debt -= 1.0f;
+                        step_playback(*playback, world);
+                    }
+                }
+                continue;  // no local player to simulate
+            }
+
             if (fly_mode || mode == Mode::Menu) {
                 continue;
             }
@@ -1337,7 +1464,20 @@ int main(int argc, char** argv) {
             const glm::vec3 to_center = glm::normalize(-camera.position);
             camera.yaw = std::atan2(to_center.x, -to_center.z);
             camera.pitch = std::asin(to_center.y);
-        } else if (fly_mode) {
+        } else if (mode == Mode::Replay && playback->follow >= 0 &&
+                   playback->actors[static_cast<std::size_t>(playback->follow)].active) {
+            // Chase cam: behind and above the followed player, looking along
+            // their facing. Not a first-person view -- the point of watching a
+            // replay is usually to see what the player's own view could not.
+            const ReplayActor& actor = playback->actors[static_cast<std::size_t>(playback->follow)];
+            const glm::vec3 forward{std::sin(actor.yaw), 0.0f, -std::cos(actor.yaw)};
+            const glm::vec3 head = actor.state.position + glm::vec3{0.0f, 1.7f, 0.0f};
+            camera.position = head - forward * 5.5f + glm::vec3{0.0f, 1.3f, 0.0f};
+            camera.yaw = actor.yaw;
+            camera.pitch = -0.18f;
+        } else if (fly_mode || mode == Mode::Replay) {
+            // A replay has no local player, so the free camera is the default
+            // rather than a debug toggle.
             fly.update(input, static_cast<float>(dt), window->relative_mouse());
             camera = fly.camera;
         } else {
@@ -1376,7 +1516,7 @@ int main(int argc, char** argv) {
         // Offline: an animated mannequin, so there is something skinned to
         // look at without a server. It cycles idle -> run -> idle so both the
         // blend and the cycle rate are visible standing still.
-        if (!online) {
+        if (mode == Mode::Offline) {
             const float phase = std::fmod(static_cast<float>(clock.elapsed()), 8.0f);
             const glm::vec3 fake_velocity =
                 phase < 4.0f ? glm::vec3{0.0f, 0.0f, -5.5f} : glm::vec3{0.0f};
@@ -1386,6 +1526,31 @@ int main(int argc, char** argv) {
             draw_items.push_back({glm::translate(glm::mat4{1.0f}, dummy_position),
                                   DrawKind::Character, -1, glm::vec3{0.85f, 0.86f, 0.92f}, offset,
                                   static_cast<int>(character_skeleton->joint_count())});
+        }
+
+        // Replayed players: re-simulated, so drawn straight from their
+        // current state with no interpolation needed.
+        if (mode == Mode::Replay) {
+            for (std::uint8_t id = 0; id < game::kMaxPlayers; ++id) {
+                const ReplayActor& actor = playback->actors[id];
+                if (!actor.active) {
+                    continue;
+                }
+                glm::mat4 model = glm::translate(glm::mat4{1.0f}, actor.state.position);
+                model = glm::rotate(model, actor.yaw, glm::vec3{0.0f, 1.0f, 0.0f});
+
+                CharacterAnimation& animation = replay_animations[id];
+                update_character_animation(animation, actor.state.velocity, actor.state.on_ground,
+                                           game::kMove.max_speed, static_cast<float>(dt));
+                const int offset = append_character_pose(animation, joint_pool);
+                draw_items.push_back({model,
+                                      DrawKind::Character,
+                                      -1,
+                                      {0.3f + 0.2f * static_cast<float>(id % 4), 0.4f,
+                                       0.9f - 0.2f * static_cast<float>(id % 4)},
+                                      offset,
+                                      static_cast<int>(character_skeleton->joint_count())});
+            }
         }
 
         // Remote players (online): interpolated ~100 ms in the past.
@@ -1567,7 +1732,9 @@ int main(int argc, char** argv) {
             debug_draw->line(tracer.from, tracer.to, {1.0f, 0.9f, 0.4f});
         }
 
-        if (draw_physics) {
+        // The local player does not exist in a replay, so its capsule and aim
+        // ray would just be debug clutter sitting at the default spawn.
+        if (draw_physics && mode != Mode::Replay) {
             draw_capsule(
                 *debug_draw, player.position, controller.config().radius,
                 controller.config().height,
@@ -1695,6 +1862,50 @@ int main(int argc, char** argv) {
         ImGui::Checkbox("physics debug (F3)", &draw_physics);
         ImGui::Checkbox("fly mode (F1)", &fly_mode);
 
+        if (mode == Mode::Replay) {
+            ImGui::Separator();
+            const std::size_t total = playback->replay.frames.size();
+            ImGui::Text("replay: frame %zu / %zu (tick %u)", playback->next_frame, total,
+                        playback->current_tick());
+            if (ImGui::Button(playback->paused ? "play" : "pause")) {
+                playback->paused = !playback->paused;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("restart")) {
+                reset_playback(*playback, world);
+                replay_animations.clear();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("step") && playback->paused) {
+                step_playback(*playback, world);
+            }
+            ImGui::SliderFloat("speed", &playback->speed, 0.1f, 4.0f);
+
+            // Follow list. -1 is the free camera.
+            if (ImGui::BeginCombo("camera",
+                                  playback->follow < 0
+                                      ? "free"
+                                      : playback->actors[static_cast<std::size_t>(playback->follow)]
+                                            .name.c_str())) {
+                if (ImGui::Selectable("free", playback->follow < 0)) {
+                    playback->follow = -1;
+                }
+                for (std::uint8_t id = 0; id < game::kMaxPlayers; ++id) {
+                    if (!playback->actors[id].active) {
+                        continue;
+                    }
+                    const bool selected = playback->follow == static_cast<int>(id);
+                    if (ImGui::Selectable(playback->actors[id].name.c_str(), selected)) {
+                        playback->follow = static_cast<int>(id);
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            if (playback->finished()) {
+                ImGui::TextColored({1.0f, 0.8f, 0.3f, 1.0f}, "end of replay");
+            }
+        }
+
         if (ImGui::CollapsingHeader("post-processing")) {
             ImGui::Text("scene target: %s", postfx->hdr() ? "RGBA16F" : "RGBA8 (no HDR)");
             ImGui::Checkbox("bloom", &postfx_settings.bloom);
@@ -1791,7 +2002,9 @@ int main(int argc, char** argv) {
         }
 
         // --- HUD ---------------------------------------------------------
-        if (!fly_mode && mode != Mode::Menu) {
+        // Nothing here applies to a replay: there is no local player whose
+        // health, ammo or score any of it could describe.
+        if (!fly_mode && mode != Mode::Menu && mode != Mode::Replay) {
             ImDrawList* overlay = ImGui::GetForegroundDrawList();
             const ImVec2 center{ImGui::GetIO().DisplaySize.x * 0.5f,
                                 ImGui::GetIO().DisplaySize.y * 0.5f};

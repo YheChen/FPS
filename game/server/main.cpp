@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <chrono>
@@ -33,6 +34,7 @@ struct ServerArgs {
     bool verbose = false;
     std::optional<std::string> record_path;  // --record: write a replay
     std::optional<std::string> replay_path;  // --replay: re-simulate one and exit
+    int bots = 0;                            // --bots N: fill N slots with AI
 };
 
 ServerArgs parse_args(int argc, char** argv) {
@@ -78,6 +80,14 @@ ServerArgs parse_args(int argc, char** argv) {
         } else if (arg == "--replay") {
             if (i + 1 < argc) {
                 args.replay_path = argv[++i];
+            }
+        } else if (arg == "--bots") {
+            if (const auto value = next_value()) {
+                int count = 0;
+                if (std::from_chars(value->data(), value->data() + value->size(), count).ec ==
+                    std::errc{}) {
+                    args.bots = std::clamp(count, 0, static_cast<int>(game::kMaxPlayers));
+                }
             }
         } else if (arg == "--verbose") {
             args.verbose = true;
@@ -234,6 +244,11 @@ int main(int argc, char** argv) {
     game::ServerGame server{std::move(collision), std::move(spawns), kMapPath, std::move(arsenal)};
     if (args.record_path) {
         server.start_recording(*args.record_path);
+    }
+    for (int i = 0; i < args.bots; ++i) {
+        if (!server.add_bot("bot" + std::to_string(i + 1))) {
+            break;
+        }
     }
 
     // --- fixed-tick headless loop ------------------------------------------

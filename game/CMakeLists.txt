@@ -1,6 +1,8 @@
 # Simulation code shared verbatim by client (prediction) and server
 # (authority). Headless-safe: links engine core only, never SDL/GL.
 add_library(game_shared STATIC
+    shared/bot.cpp
+    shared/bot.h
     shared/health.h
     shared/hitscan.h
     shared/input_command.h

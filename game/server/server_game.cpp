@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <utility>
 
 #include "engine/core/log.h"
@@ -156,7 +157,7 @@ void ServerGame::handle_hello(std::uint32_t peer, eng::ByteReader& reader,
     }
     const auto joined = encode(PlayerJoined{*slot, hello->name});
     for (std::uint8_t i = 0; i < kMaxPlayers; ++i) {
-        if (players_[i] && i != *slot) {
+        if (players_[i] && i != *slot && !players_[i]->is_bot) {
             net.send(players_[i]->peer, joined, eng::NetChannel::Reliable, true);
         }
     }
@@ -207,6 +208,80 @@ void ServerGame::handle_input(Player& player, eng::ByteReader& reader, eng::ISer
     }
 }
 
+bool ServerGame::add_bot(std::string name) {
+    std::optional<std::uint8_t> slot;
+    for (std::uint8_t i = 0; i < kMaxPlayers; ++i) {
+        if (!players_[i]) {
+            slot = i;
+            break;
+        }
+    }
+    if (!slot) {
+        eng::log::warn("Cannot add bot '{}': server full", name);
+        return false;
+    }
+
+    Player player;
+    player.peer = 0;  // never used: send() is skipped for bots
+    player.is_bot = true;
+    player.name = std::move(name);
+    const glm::vec3 spawn = spawns_[next_spawn_++ % spawns_.size()];
+    player.state.position = spawn;
+    player.controller = std::make_unique<eng::CharacterController>(world_, spawn);
+    reset_loadout(player.loadout, arsenal_);
+    players_[*slot] = std::move(player);
+    recorder_.add_player(*slot, players_[*slot]->name, spawn);
+
+    eng::log::info("Bot {} '{}' added", *slot, players_[*slot]->name);
+    return true;
+}
+
+// Gathers what a bot can perceive: the nearest living enemy, whether it has
+// line of sight, and how much room is ahead. Kept here rather than in
+// decide() so the decision layer stays pure and testable.
+BotSenses ServerGame::sense_for_bot(std::uint8_t bot_id) const {
+    const Player& bot = *players_[bot_id];
+    BotSenses senses;
+    senses.position = bot.state.position;
+    senses.yaw = bot.view_yaw;
+    senses.on_ground = bot.state.on_ground;
+
+    const glm::vec3 eye = bot.state.position + glm::vec3{0.0f, 1.6f, 0.0f};
+
+    float nearest = std::numeric_limits<float>::max();
+    for (std::uint8_t id = 0; id < kMaxPlayers; ++id) {
+        if (id == bot_id || !players_[id] || !players_[id]->alive) {
+            continue;
+        }
+        const glm::vec3 target = players_[id]->state.position;
+        const float distance = glm::length(target - bot.state.position);
+        if (distance >= nearest) {
+            continue;
+        }
+        nearest = distance;
+        senses.has_target = true;
+        senses.target_position = target;
+
+        // Line of sight: a wall between us closer than the target blocks it.
+        const glm::vec3 aim = target + glm::vec3{0.0f, 1.1f, 0.0f};
+        const glm::vec3 to_aim = aim - eye;
+        const float length = glm::length(to_aim);
+        senses.target_visible = true;
+        if (length > 0.01f) {
+            const auto wall = world_.raycast(eye, to_aim / length, length);
+            senses.target_visible = !wall.has_value();
+        }
+    }
+
+    const glm::vec3 forward = view_direction(bot.view_yaw, 0.0f);
+    // Cast from knee height: the floor is not an obstacle, but a crate is.
+    const glm::vec3 probe = bot.state.position + glm::vec3{0.0f, 0.6f, 0.0f};
+    if (const auto hit = world_.raycast(probe, forward, 8.0f)) {
+        senses.forward_clearance = hit->distance;
+    }
+    return senses;
+}
+
 void ServerGame::start_recording(std::filesystem::path path) {
     replay_path_ = std::move(path);
     recorder_.begin(map_name_, static_cast<std::uint16_t>(std::lround(1.0f / kTickSeconds)));
@@ -224,7 +299,7 @@ void ServerGame::drop_player(std::uint8_t player_id, eng::IServerTransport& net)
     players_[player_id].reset();
     const auto left = encode(PlayerLeft{player_id});
     for (const auto& player : players_) {
-        if (player) {
+        if (player && !player->is_bot) {
             net.send(player->peer, left, eng::NetChannel::Reliable, true);
         }
     }
@@ -240,22 +315,34 @@ void ServerGame::tick(eng::IServerTransport& net) {
         }
         Player& player = *players_[id];
 
-        // Consume exactly one input per tick, in order. When starved (loss
-        // or jitter), reuse the last command briefly, then fast-forward.
-        // Inputs are consumed even while dead so sequence acks keep flowing.
-        const auto next = player.pending.find(player.last_processed_input + 1);
+        // A bot's command is synthesized; a human's is consumed from the
+        // network queue. That is the ONLY difference -- everything below runs
+        // identically for both, so bots exercise the real movement, combat,
+        // scoring and recording code rather than a parallel imitation of it.
         InputCommand command = player.last_command;
-        if (next != player.pending.end()) {
-            command = next->second;
-            player.pending.erase(next);
-            player.last_processed_input = command.sequence;
-            player.starved_ticks = 0;
-        } else if (!player.pending.empty() && ++player.starved_ticks >= kStarvationJumpTicks) {
-            const auto first = player.pending.begin();
-            command = first->second;
-            player.last_processed_input = first->first;
-            player.pending.erase(first);
-            player.starved_ticks = 0;
+        if (player.is_bot) {
+            const BotSenses senses = sense_for_bot(id);
+            command = decide(player.bot_state, senses, bot_config_, kTickSeconds,
+                             hash_combine(tick_, id));
+            command.sequence = ++player.last_processed_input;
+        } else {
+            // Consume exactly one input per tick, in order. When starved
+            // (loss or jitter), reuse the last command briefly, then
+            // fast-forward. Inputs are consumed even while dead so sequence
+            // acks keep flowing.
+            const auto next = player.pending.find(player.last_processed_input + 1);
+            if (next != player.pending.end()) {
+                command = next->second;
+                player.pending.erase(next);
+                player.last_processed_input = command.sequence;
+                player.starved_ticks = 0;
+            } else if (!player.pending.empty() && ++player.starved_ticks >= kStarvationJumpTicks) {
+                const auto first = player.pending.begin();
+                command = first->second;
+                player.last_processed_input = first->first;
+                player.pending.erase(first);
+                player.starved_ticks = 0;
+            }
         }
         player.last_command = command;
         // Recorded here, at the point of consumption. Recording arriving
@@ -334,8 +421,8 @@ void ServerGame::send_snapshots(eng::IServerTransport& net) {
     }
 
     for (const auto& slot : players_) {
-        if (!slot) {
-            continue;
+        if (!slot || slot->is_bot) {
+            continue;  // nothing to send a snapshot to
         }
         Snapshot snapshot;
         snapshot.server_tick = tick_;
@@ -350,13 +437,16 @@ void ServerGame::send_snapshots(eng::IServerTransport& net) {
 void ServerGame::broadcast_reliable(const std::vector<std::uint8_t>& data,
                                     eng::IServerTransport& net) {
     for (const auto& player : players_) {
-        if (player) {
+        if (player && !player->is_bot) {
             net.send(player->peer, data, eng::NetChannel::Reliable, true);
         }
     }
 }
 
 void ServerGame::send_weapon_status(const Player& player, eng::IServerTransport& net) {
+    if (player.is_bot) {
+        return;
+    }
     const WeaponState& weapon = player.loadout.weapons[player.loadout.slot];
     const WeaponConfig& config = arsenal_.at(player.loadout.slot);
     net.send(

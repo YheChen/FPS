@@ -182,6 +182,18 @@ constexpr std::uint8_t kOpClose = 0x8;
 constexpr std::uint8_t kOpPing = 0x9;
 constexpr std::uint8_t kOpPong = 0xA;
 
+// Caps on what a peer may declare. The length field in a WebSocket header is
+// 64 bits wide and entirely peer-controlled, so it is bounded before it is
+// used as an allocation size, as an index, or in any arithmetic that could
+// wrap -- and bounding it is also what makes the narrowing cast to size_t
+// below sound on wasm32, where size_t is 32 bits.
+//
+// The largest legitimate message is a full snapshot, which is a couple of
+// hundred bytes; 64 KiB per frame and 256 KiB reassembled leave enormous room
+// while still refusing to allocate on demand for a hostile peer.
+constexpr std::uint64_t kMaxFramePayload = 64u * 1024u;
+constexpr std::size_t kMaxMessageLength = 256u * 1024u;
+
 // Appends a server->client frame (never masked) with the given opcode.
 void append_frame(std::vector<std::uint8_t>& out, std::uint8_t opcode,
                   std::span<const std::uint8_t> payload) {
@@ -404,19 +416,30 @@ void WebSocketHost::poll(std::vector<NetEvent>& out) {
                 closed = true;
                 break;
             }
+            // Checked before `len` is used for anything at all. Without this,
+            // a declared length near 2^64 both wraps `data_off + len` (so the
+            // incomplete-frame check below passes on a short buffer) and asks
+            // for a 16-exabyte allocation.
+            if (len > kMaxFramePayload) {
+                log::warn("WebSocket peer {}: frame declares {} bytes (limit {}), closing", id, len,
+                          kMaxFramePayload);
+                closed = true;
+                break;
+            }
+            const auto payload_len = static_cast<std::size_t>(len);
             const std::size_t mask_off = header;
             const std::size_t data_off = header + 4;
-            if (conn.in.size() < data_off + len) {
+            if (conn.in.size() < data_off + payload_len) {
                 break;  // frame incomplete; wait for more bytes
             }
             std::array<std::uint8_t, 4> mask = {conn.in[mask_off], conn.in[mask_off + 1],
                                                 conn.in[mask_off + 2], conn.in[mask_off + 3]};
-            std::vector<std::uint8_t> payload(len);
-            for (std::uint64_t i = 0; i < len; ++i) {
+            std::vector<std::uint8_t> payload(payload_len);
+            for (std::size_t i = 0; i < payload_len; ++i) {
                 payload[i] = static_cast<std::uint8_t>(conn.in[data_off + i] ^ mask[i % 4]);
             }
             conn.in.erase(conn.in.begin(),
-                          conn.in.begin() + static_cast<std::ptrdiff_t>(data_off + len));
+                          conn.in.begin() + static_cast<std::ptrdiff_t>(data_off + payload_len));
 
             if (opcode == kOpClose) {
                 impl_->queue_close(conn);
@@ -431,6 +454,16 @@ void WebSocketHost::poll(std::vector<NetEvent>& out) {
                 continue;
             }
             // Data frame (binary/text or continuation). Reassemble.
+            //
+            // Bounding the total matters separately from bounding one frame: a
+            // peer that never sets FIN can otherwise grow this buffer with
+            // legally-sized continuations until the process dies.
+            if (conn.message.size() + payload.size() > kMaxMessageLength) {
+                log::warn("WebSocket peer {}: reassembled message exceeds {} bytes, closing", id,
+                          kMaxMessageLength);
+                closed = true;
+                break;
+            }
             if (opcode == kOpBinary || opcode == kOpText) {
                 conn.message = std::move(payload);
                 conn.message_opcode = opcode;

@@ -45,10 +45,13 @@ python3 -m http.server -d build/web/game 8099    # serve
 ```
 
 Outputs `fps_client.{html,js,wasm,data}` — the `.data` bundles `assets/`
-into the virtual filesystem. Currently the browser build plays the offline
-practice range; online multiplayer over WebSockets is the next slice
-(browser tabs cannot open the ENet/UDP transport). Deploying it publicly is
-covered in [deploy.md](deploy.md).
+into the virtual filesystem. A browser tab cannot open the ENet/UDP transport,
+so the web client joins over WebSockets: point it at a `ws://` or `wss://` URL
+(the menu defaults to `ws://localhost:7778`) and run the server with
+`--ws-port`. Deploying it publicly is covered in [deploy.md](deploy.md).
+
+CI builds this and runs it in a browser on every PR; see
+[the browser smoke test](#the-browser-smoke-test).
 
 ## Options
 
@@ -57,6 +60,7 @@ covered in [deploy.md](deploy.md).
 | `FPS_BUILD_TESTS`         | ON      | Build the Catch2 unit test target       |
 | `FPS_ENABLE_SANITIZERS`   | OFF     | ASan + UBSan on all project targets     |
 | `FPS_WARNINGS_AS_ERRORS`  | OFF     | `-Werror` / `/WX` (always ON in CI)     |
+| `FPS_ENABLE_WEBRTC`       | OFF     | Native WebRTC DataChannel transport     |
 
 ## Running
 
@@ -101,11 +105,50 @@ AppleClang stays quiet about — `-Wsign-conversion` on `int` → `size_t`,
 *diagnostics*, not exit status: without `-Werror` a warning still exits 0,
 and warnings are exactly what CI promotes to errors.
 
-Neither replaces the Emscripten build, which is still not in CI:
+Neither covers the browser. CI does (see below), but if a change touches
+rendering or the platform layer it is worth running locally first, because the
+turnaround is minutes rather than a CI round trip:
 
 ```sh
-source ~/emsdk/emsdk_env.sh && cmake --build --preset web --parallel
+source ~/emsdk/emsdk_env.sh
+emcmake cmake --preset web -DFPS_WARNINGS_AS_ERRORS=ON
+cmake --build --preset web --parallel
+node tools/web_smoke.mjs                  # loads it in headless Chrome
+node tools/web_smoke.mjs --zero-canvas     # ...and again, canvas starved
 ```
+
+## The browser smoke test
+
+`tools/web_smoke.mjs` builds nothing; it loads an already-built
+`build/web/game/fps_client.html` in headless Chrome and checks that the client
+is really running. It needs Node 22+ (for the built-in `WebSocket` it uses to
+drive the DevTools protocol) and a system Chrome or Chromium. No `npm install`.
+
+It exists because **a green Emscripten build predicts almost nothing.** Every
+web-only defect this project has shipped compiled cleanly and broke at runtime:
+
+| Defect | What the compiler saw | What the browser did |
+|---|---|---|
+| `sampler2DShadow` with no precision qualifier | fine (desktop GLSL has defaults) | every shader using it failed to compile |
+| 0×0 canvas at startup | fine | `PostFx::create` failed, client exited before drawing |
+| dynamically indexed uniform array in the skinning shader | fine | ~1000× slower; one draw call at 1.5 s |
+| `web` preset with no toolchain file | fine | built a **native** binary; "web build is clean" was vacuous |
+
+So it checks, in order: the artifacts are a real wasm module (not a native
+binary); the client reaches its frame loop; the framebuffer contains more than
+one colour; and the frame rate is not pathological. Each of those thresholds is
+deliberately loose — they separate "working" from "catastrophically broken",
+which is the only honest distinction a software rasteriser on a shared runner
+can make. Do not tighten them into a performance benchmark; that just buys
+flakiness.
+
+`--zero-canvas` holds the canvas at zero height until the client has been seen
+running, then restores it. A plain headless load lays the canvas out before the
+module boots, so it never reproduces the startup race — the 0×0 bug passes the
+ordinary run and only fails this one.
+
+Useful flags: `--verbose` echoes the page console and Chrome's own log,
+`--keep-open` leaves the browser up, `--dir` points at another build tree.
 
 ## CI
 
@@ -113,7 +156,14 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on every push and PR:
 
 1. Debug build + tests on Ubuntu, macOS, and Windows, warnings-as-errors.
 2. Ubuntu build + tests under ASan/UBSan.
-3. clang-format check + the standard-header check.
+3. Ubuntu build + tests with `FPS_ENABLE_WEBRTC=ON`.
+4. Emscripten build (warnings-as-errors) + the browser smoke test, both modes.
+5. clang-format check + the standard-header check.
+
+Warnings-as-errors on the web build earns its keep separately from the native
+jobs: `size_t` is 32 bits on wasm32, so a `uint64_t` → `size_t` conversion that
+is lossless on every other target is real truncation there. Enabling it found
+three such conversions in the WebSocket frame parser.
 
 **Check the run on `main` after merging, not just the PR run.** A PR can be
 green and still leave `main` red if the merge combines with another change

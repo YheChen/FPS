@@ -85,3 +85,54 @@ is described.
   and `PlayerLeft` broadcast.
 - **Malformed packets:** deserialization returns an error; packet dropped and
   counted; repeated garbage → kick.
+
+## WebRTC DataChannel transport (M19a)
+
+Browsers cannot open UDP sockets, so the browser client reaches the server
+over WebSockets — which is TCP, and therefore head-of-line blocks. One lost
+packet stalls every snapshot queued behind it, which is exactly the failure a
+60 Hz shooter cannot absorb. A DataChannel configured **unordered with no
+retransmits** is the UDP semantics a browser will actually give us.
+
+`eng::WebRtcHost` implements `IServerTransport`, so it drops into
+`CompositeTransport` beside ENet and WebSocket with no changes to
+`ServerGame`. Two DataChannels per peer mirror the ENet channel split:
+
+| Channel | Semantics | Carries |
+|---|---|---|
+| `reliable` | reliable, ordered | handshake, events |
+| `sequenced` | **unordered, `maxRetransmits: 0`** | inputs, snapshots |
+
+Leaving `sequenced` ordered would reproduce the exact blocking this transport
+exists to remove.
+
+### Signalling is not built in
+
+`WebRtcHost` produces and consumes SDP and ICE candidates as opaque strings
+(`accept_offer`, `add_remote_candidate`, `take_signals`). The caller carries
+them over whatever channel it likes — the existing WebSocket transport, in the
+game's case. That keeps a second listening socket out of this class and makes
+the transport testable in-process.
+
+### Threading
+
+libdatachannel fires callbacks on its own threads. Everything they touch is
+behind one mutex and drained on the main thread in `poll()`, so nothing
+outside this file ever sees another thread.
+
+**The trap:** destroying an `rtc::PeerConnection` joins its callback threads,
+and those callbacks take that same mutex. Reaping a closed peer while holding
+the lock deadlocks — `poll()` waits for the thread, the thread waits for the
+mutex. Doomed peers are moved out under the lock and destroyed after it is
+released. This hung the test suite indefinitely before it was found.
+
+### Opt-in, and why
+
+`FPS_ENABLE_WEBRTC` defaults **OFF**. libdatachannel pulls five submodules and
+needs a TLS backend, and Windows runners have no system OpenSSL — enabling it
+by default would break the three-platform CI for a transport most builds do
+not need. A dedicated Ubuntu CI job builds and tests the enabled path, so it
+is not left to a developer's machine.
+
+Binary messages only. A browser's `dataChannel.send(ArrayBuffer)` is binary;
+a text message means something that is not our client is talking to us.

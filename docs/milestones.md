@@ -813,3 +813,53 @@ shows players walking on where the live match had them die. Fixing it means
 factoring the combat half of `ServerGame::tick` into something replayable.
 The determinism guarantee is unaffected: it is a claim about movement, and
 the tests check exactly that.
+
+---
+
+## Milestone 19a — WebRTC DataChannel transport (native) ✅
+
+**Objective:** the server half of a real UDP-semantics transport for browsers,
+landable and provable on its own.
+
+**Deliverables:** `eng::WebRtcHost` implementing `IServerTransport`, so it
+drops into `CompositeTransport` beside ENet and WebSocket with **no changes to
+`ServerGame`** — that seam, built back in M10a, is why this is purely
+additive. Two DataChannels per peer mirror the ENet split, with `sequenced`
+unordered and `maxRetransmits: 0`. Signalling is deliberately external:
+`WebRtcHost` emits and accepts SDP/ICE as opaque strings for the caller to
+carry. Details in [networking.md](networking.md).
+
+**Verified without a browser.** libdatachannel can be both offerer and
+answerer in one process, so the test suite opens a **real** DataChannel
+connection — ICE, DTLS, SCTP, both channels, both directions — with no
+browser, no signalling server and no network. That is what makes M19a
+landable separately from the browser client.
+
+**Two bugs found by that test, both real:**
+
+1. **A deadlock that hung the suite indefinitely.** `poll()` reaped closed
+   peers while holding the mutex; destroying an `rtc::PeerConnection` joins
+   its callback threads, and those callbacks take the same mutex. Doomed
+   peers are now moved out under the lock and destroyed after releasing it.
+2. **The test sent text, not binary.** The host accepts binary only, which is
+   what a browser's `dataChannel.send(ArrayBuffer)` produces — so the
+   production code was right and the test was wrong. Fixed the test.
+
+**Opt-in:** `FPS_ENABLE_WEBRTC` defaults OFF, because libdatachannel pulls
+five submodules and a TLS backend and Windows runners have no system OpenSSL.
+With it off, nothing changes — libdatachannel is not even fetched, and the
+existing 146 tests pass untouched. A dedicated Ubuntu CI job builds and runs
+the enabled path so it is not left to one developer's machine.
+
+**Tests:** 150 with WebRTC on (+4). A full connection carrying traffic both
+ways with channel identity preserved (crossing them would misroute every
+packet); a full host refusing further offers; a malformed offer rejected
+**without leaking a half-built peer**, so a client cannot exhaust the host by
+spamming garbage; and operations on an unknown peer being ignored rather than
+throwing.
+
+**Still to do (M19b):** the browser client. Emscripten ships no WebRTC
+DataChannel binding, so it is hand-written JS glue around `RTCPeerConnection`
+wired into `eng::IClientTransport`, plus carrying signalling over the existing
+WebSocket connection. The Windows OpenSSL question also stays open — likely
+answered by `-DUSE_MBEDTLS=ON`.

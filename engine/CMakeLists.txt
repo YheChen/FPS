@@ -75,6 +75,12 @@ target_compile_definitions(engine
     PUBLIC $<$<CONFIG:Debug>:ENG_ENABLE_ASSERTS>
 )
 
+if(FPS_ENABLE_WEBRTC)
+    target_sources(engine PRIVATE net/webrtc_host.cpp net/webrtc_host.h)
+    target_link_libraries(engine PRIVATE LibDataChannel::LibDataChannelStatic)
+    target_compile_definitions(engine PUBLIC FPS_HAS_WEBRTC)
+endif()
+
 fps_set_warnings(engine)
 fps_enable_sanitizers(engine)
 

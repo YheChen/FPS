@@ -2,6 +2,13 @@
 # (pinned tags) or vendored (glad). Warnings are never enabled for these.
 include(FetchContent)
 
+# --- client-only: SDL3, glad, ImGui, miniaudio -----------------------------
+# Skipped entirely when FPS_BUILD_CLIENT=OFF (a dedicated-server build). SDL3
+# in particular is not merely unused there: its CMake hard-errors on a host
+# with no X11/Wayland development libraries, so fetching it would break a
+# headless build that never links it.
+if(FPS_BUILD_CLIENT)
+
 # --- SDL3 (window, GL context, input) -------------------------------------
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC ON CACHE BOOL "" FORCE)
@@ -20,6 +27,8 @@ FetchContent_MakeAvailable(SDL3)
 add_library(glad STATIC glad/src/gl.c)
 target_include_directories(glad SYSTEM PUBLIC glad/include)
 
+endif()  # FPS_BUILD_CLIENT (SDL3 + glad)
+
 # --- GLM (math) ------------------------------------------------------------
 FetchContent_Declare(
     glm
@@ -30,6 +39,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glm)
 
+if(FPS_BUILD_CLIENT)
 # --- Dear ImGui (debug UI; no CMakeLists upstream, we define the target) ---
 FetchContent_Declare(
     imgui
@@ -52,6 +62,7 @@ target_include_directories(imgui SYSTEM PUBLIC
     ${imgui_SOURCE_DIR}/backends
 )
 target_link_libraries(imgui PUBLIC SDL3::SDL3)
+endif()  # FPS_BUILD_CLIENT (ImGui)
 
 # --- cgltf (glTF 2.0 parser, header-only) ----------------------------------
 FetchContent_Declare(
@@ -89,6 +100,7 @@ if(WIN32)
 endif()
 
 # --- miniaudio (audio playback, header-only) --------------------------------
+if(FPS_BUILD_CLIENT)
 FetchContent_Declare(
     miniaudio
     GIT_REPOSITORY https://github.com/mackron/miniaudio.git
@@ -101,6 +113,7 @@ target_include_directories(miniaudio SYSTEM INTERFACE ${miniaudio_SOURCE_DIR})
 if(UNIX AND NOT APPLE)
     target_link_libraries(miniaudio INTERFACE ${CMAKE_DL_LIBS} pthread m)
 endif()
+endif()  # FPS_BUILD_CLIENT (miniaudio)
 
 # --- Jolt Physics -----------------------------------------------------------
 set(TARGET_UNIT_TESTS OFF CACHE BOOL "" FORCE)

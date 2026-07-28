@@ -19,12 +19,34 @@ ExecStart=/opt/fps/build/release/game/fps_server --ws-port 7778
 Restart=on-failure
 RestartSec=2
 
-# Hardening: the server needs only its own directory and the network.
+# Hardening. This process parses hostile input from the open internet -- and
+# on a home server it does so from inside the LAN -- so it gets only its own
+# directory and a TCP/UDP socket, and nothing else.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
 ReadOnlyPaths=/opt/fps
+# No unix sockets, no netlink, no anything exotic.
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# A backstop for allocation bugs: the frame parser's caps make a hostile peer
+# unable to ask for much, but a leak should kill the unit rather than the box.
+# Raise it if a legitimately larger map ever needs more.
+MemoryMax=512M
+# --record writes into WorkingDirectory, which ReadOnlyPaths forbids. Uncomment
+# if you run with --record.
+#ReadWritePaths=/opt/fps/replays
 
 [Install]
 WantedBy=multi-user.target

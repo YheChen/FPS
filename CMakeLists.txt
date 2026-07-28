@@ -20,6 +20,17 @@ option(FPS_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 # default would break the three-platform CI for a transport most builds do
 # not need. Browsers still work over the WebSocket transport without it.
 option(FPS_ENABLE_WEBRTC "Build the WebRTC DataChannel transport (needs a TLS backend)" OFF)
+# A dedicated server needs none of the client's window/GL/audio stack, and on a
+# headless host it cannot even CONFIGURE it: SDL3's CMake hard-errors when no
+# X11 or Wayland development libraries are present, whether or not the target
+# is ever built. Turning this off skips SDL3, ImGui, glad and miniaudio
+# entirely -- no fetch, no configure, no graphics packages needed. This is what
+# docs/deploy.md builds with.
+option(FPS_BUILD_CLIENT "Build the graphical client (needs SDL/GL/audio)" ON)
+if(EMSCRIPTEN AND NOT FPS_BUILD_CLIENT)
+    # The browser target IS the client; there is no server to build here.
+    message(FATAL_ERROR "FPS_BUILD_CLIENT=OFF makes no sense for an Emscripten build")
+endif()
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

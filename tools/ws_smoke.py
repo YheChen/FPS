@@ -1,34 +1,73 @@
 #!/usr/bin/env python3
 """Round-trip smoke test for the WebSocket server transport.
 
-Speaks just enough of RFC 6455 (stdlib only: socket, hashlib, base64, os) to
-open a ws:// connection, send a ClientHello matching the game's wire format
-(protocol v3), and verify the server replies with a ServerWelcome. Proves the
-handshake, frame masking, and binary protocol path end-to-end without a
-browser.
+Speaks just enough of RFC 6455 (stdlib only) to open a ws:// or wss://
+connection, send a ClientHello on the game's wire format, and verify the
+server replies with a ServerWelcome. Proves the handshake, frame masking, and
+binary protocol path end-to-end without a browser -- and, over TLS, proves the
+reverse proxy and certificate too.
 
-Usage: python3 tools/ws_smoke.py [host] [port]   (default 127.0.0.1 7778)
+The protocol version is read from game/shared/protocol.h so it cannot go stale.
+
+Usage: python3 tools/ws_smoke.py [host] [port] [--tls|--no-tls]
+       (defaults: 127.0.0.1 7778; TLS is implied by port 443)
+
+Point it at a deployed server to check the whole chain including the TLS
+proxy:  python3 tools/ws_smoke.py fps.example.com 443
 Exits 0 on success, 1 on failure.
 """
 
 import base64
 import hashlib
 import os
+import re
 import socket
+import ssl
 import struct
 import sys
+from pathlib import Path
 
-PROTOCOL_VERSION = 3
 MSG_CLIENT_HELLO = 1
 MSG_SERVER_WELCOME = 2
 MSG_SERVER_REJECT = 3
 
+REJECT_REASONS = {1: "version mismatch", 2: "server full", 3: "bad name"}
+
+
+def protocol_version():
+    """Reads kProtocolVersion out of the header rather than duplicating it.
+
+    A hardcoded copy goes stale silently and then the tool reports a version
+    mismatch that looks like a server fault -- which is exactly what happened
+    when the protocol went to 4 and this still said 3. The header is always
+    two directories up from tools/; --protocol N overrides for a copy of this
+    script living outside the repo.
+    """
+    for i, arg in enumerate(sys.argv):
+        if arg == "--protocol" and i + 1 < len(sys.argv):
+            return int(sys.argv[i + 1])
+    header = Path(__file__).resolve().parent.parent / "game" / "shared" / "protocol.h"
+    try:
+        text = header.read_text()
+    except OSError as exc:
+        raise SystemExit(
+            f"cannot read {header} to learn the protocol version ({exc}).\n"
+            "Pass --protocol N if you are running this outside the repo."
+        ) from exc
+    match = re.search(r"kProtocolVersion\s*=\s*(\d+)", text)
+    if not match:
+        raise SystemExit(f"no kProtocolVersion found in {header}")
+    return int(match.group(1))
+
 
 def handshake(sock, host, port):
+    # Default ports are omitted from Host per RFC 9110; some proxies route
+    # on an exact Host match and reject "example.com:443".
+    host_header = host if port in (80, 443) else f"{host}:{port}"
     key = base64.b64encode(os.urandom(16)).decode()
     request = (
         f"GET / HTTP/1.1\r\n"
-        f"Host: {host}:{port}\r\n"
+        f"Host: {host_header}\r\n"
         f"Upgrade: websocket\r\n"
         f"Connection: Upgrade\r\n"
         f"Sec-WebSocket-Key: {key}\r\n"
@@ -96,26 +135,64 @@ def recv_binary(sock, timeout=5.0):
     return opcode, payload
 
 
-def build_client_hello(name):
+def build_client_hello(name, version):
     out = bytearray()
     out.append(MSG_CLIENT_HELLO)
-    out += struct.pack("<H", PROTOCOL_VERSION)
+    out += struct.pack("<H", version)
     encoded = name.encode()
     out.append(len(encoded))
     out += encoded
     return bytes(out)
 
 
+def connect(host, port, use_tls):
+    """Opens the transport, wrapping it in TLS for a wss:// endpoint.
+
+    A deployed server sits behind a TLS proxy, so verifying a deployment means
+    speaking wss:// -- checking plain ws:// on localhost proves the game
+    protocol works but says nothing about the half that usually breaks
+    (certificate, proxy, port forward).
+    """
+    sock = socket.create_connection((host, port), timeout=5.0)
+    if not use_tls:
+        return sock
+    context = ssl.create_default_context()
+    # server_hostname drives both SNI -- which the proxy needs to pick a
+    # certificate -- and hostname verification.
+    try:
+        return context.wrap_socket(sock, server_hostname=host)
+    except ssl.SSLCertVerificationError as exc:
+        raise RuntimeError(
+            f"TLS certificate for {host} did not verify: {exc.verify_message or exc}.\n"
+            "  Caddy may still be provisioning, or the certificate covers a "
+            "different name than the one you connected to."
+        ) from exc
+    except (ssl.SSLError, socket.timeout, TimeoutError) as exc:
+        raise RuntimeError(
+            f"TLS handshake with {host}:{port} failed: {exc}.\n"
+            f"  Is anything terminating TLS on {port}? A plain ws:// server "
+            "there will hang exactly like this -- drop --tls to test it directly."
+        ) from exc
+
+
 def main():
-    host = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
-    port = int(sys.argv[2]) if len(sys.argv) > 2 else 7778
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    flags = {a for a in sys.argv[1:] if a.startswith("--")}
 
-    with socket.create_connection((host, port), timeout=5.0) as sock:
+    host = args[0] if args else "127.0.0.1"
+    port = int(args[1]) if len(args) > 1 else 7778
+    # 443 means wss:// in practice; --tls/--no-tls override for odd ports.
+    use_tls = ("--tls" in flags) or (port == 443 and "--no-tls" not in flags)
+
+    version = protocol_version()
+
+    with connect(host, port, use_tls) as sock:
+        scheme = "wss" if use_tls else "ws"
         handshake(sock, host, port)
-        print(f"handshake ok -> {host}:{port}")
+        print(f"handshake ok -> {scheme}://{host}:{port}")
 
-        send_binary(sock, build_client_hello("smoketest"))
-        print("sent ClientHello")
+        send_binary(sock, build_client_hello("smoketest", version))
+        print(f"sent ClientHello (protocol v{version})")
 
         # The first game message back should be ServerWelcome.
         for _ in range(10):
@@ -140,7 +217,9 @@ def main():
                 print("PASS")
                 return 0
             if msg_type == MSG_SERVER_REJECT:
-                raise RuntimeError(f"server rejected: reason={payload[1]}")
+                reason = payload[1]
+                name = REJECT_REASONS.get(reason, f"unknown ({reason})")
+                raise RuntimeError(f"server rejected the connection: {name}")
             # Skip anything else (e.g. later broadcasts) and keep looking.
         raise RuntimeError("no ServerWelcome received")
 

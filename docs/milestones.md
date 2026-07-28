@@ -332,11 +332,17 @@ practice and full authoritative online play (prediction, reconciliation at
 
 ### M10c — Deploy ✅ (config + guide)
 
-Static WASM client on Vercel; Caddy on the VM terminating `wss://` TLS in
-front of the plain `ws://` server; systemd unit. Config and a step-by-step
-guide are in [deploy.md](deploy.md) and `deploy/`; the deployed client bakes
-its server URL via `-DFPS_WEB_SERVER_URL`. Running the VM/Vercel steps is
-manual (needs the operator's host + domain).
+Static WASM client on Vercel; Caddy on the server host terminating `wss://`
+TLS in front of the plain `ws://` server; hardened systemd unit. Config and a
+step-by-step guide are in [deploy.md](deploy.md) and `deploy/`; the deployed
+client bakes its server URL via `-DFPS_WEB_SERVER_URL`. The guide targets a
+self-hosted box (a ThinkPad T14) and covers the three ways to get a
+certificate onto a residential connection; a cloud VM is the fallback.
+
+Actually running it is still manual — it needs the operator's host, router and
+domain. The `deploy-build` CI job does verify the build half: a bare
+`ubuntu:24.04` container, the exact `apt` line from the guide, `fps_server`
+only, then start it and check it serves.
 
 ---
 

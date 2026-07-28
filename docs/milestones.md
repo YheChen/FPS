@@ -758,3 +758,58 @@ follows the recorded player through the arena, the panel tracks frame and
 tick, and draw calls confirm exactly one character. A missing replay file
 exits non-zero rather than opening an empty viewer. Offline and online modes
 were re-checked for regressions, and the WASM build still compiles.
+
+---
+
+## Milestone 18 — Bots ✅
+
+**Objective:** AI opponents, so the arena is playable alone and load-testable
+without eight machines.
+
+**The whole design is one sentence:** a bot is a player whose `InputCommand`s
+are synthesized instead of received. It takes a normal player slot, so
+movement, hit detection, lag compensation, scoring, snapshots and replay
+recording need **no special cases** for it. In `ServerGame::tick` the only
+branch is where the command comes from; everything after it is the same code
+a human's input runs through. A parallel "bot movement" path would stop being
+a test of the real simulation and would drift from it.
+
+**Deliverables:** `game/shared/bot.h` — `BotConfig`, `BotSenses`, `BotState`
+and `decide()`, a **pure function** of those inputs plus a seed. It never
+touches the physics world, so the entire decision layer is testable without a
+map or a server; gathering the senses (nearest living enemy, line of sight,
+forward clearance) is `ServerGame::sense_for_bot`'s job. Behaviour: turn
+toward the target at a bounded rate, hold a working range, circle-strafe,
+occasionally jump, wander when idle, back off walls, and fire only when the
+target is visible *and* the aim has actually caught up.
+
+Bots use `game/shared/rng.h` — the gameplay RNG, unlike particles. That is
+deliberate: their decisions feed `advance_player`, so they are part of the
+simulation and must be reproducible. **A recorded bot match replays exactly**,
+verified on a 4-bot 720-frame recording.
+
+**Watch out:** a bot has no connection, and its peer id of 0 is a perfectly
+plausible real peer. Every send site has to skip bots explicitly, or a bot's
+snapshots and weapon updates get delivered to whichever human holds peer 0.
+
+**Tests:** 146 total (+14). `yaw_towards` cross-checked against the real
+`view_direction` rather than trusting the algebra; `shortest_angle_delta`
+never taking the long way round and never escaping (-pi, pi] across a
+41x41 grid of inputs; bounded turn rate; holding fire until on target; not
+shooting through cover; ignoring targets past sight range; all three range
+bands; strafing both ways over 2000 ticks (a bot that always strafes one way
+means the RNG is not being consumed); wall avoidance overriding an
+engagement; idle wandering that changes heading; determinism across two
+independent bot states; commands always finite with a legal weapon slot over
+500 varied situations; and coincident positions not producing NaN aim.
+
+**Verified live:** `--bots 4` produced a match where bots found each other,
+closed, and traded kills, at a steady 60 ticks/s.
+
+**Known limitation (pre-existing, now more visible):** replay playback —
+both `--replay` and the M17b viewer — re-simulates **movement only**. Damage,
+deaths and respawns are not reproduced, so a replay of a match with kills
+shows players walking on where the live match had them die. Fixing it means
+factoring the combat half of `ServerGame::tick` into something replayable.
+The determinism guarantee is unaffected: it is a claim about movement, and
+the tests check exactly that.

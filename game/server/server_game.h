@@ -12,6 +12,7 @@
 #include "engine/net/transport.h"
 #include "engine/physics/character_controller.h"
 #include "engine/physics/physics_world.h"
+#include "game/shared/bot.h"
 #include "game/shared/health.h"
 #include "game/shared/input_command.h"
 #include "game/shared/lag_comp.h"
@@ -49,6 +50,12 @@ public:
 
     // Starts recording every input the simulation actually consumes. Must be
     // called before the first tick; the file is written by write_replay().
+    // Adds a bot in a normal player slot. Returns false when the server is
+    // full. Bots are ordinary players whose commands are synthesized, so
+    // snapshots, hit detection, scoring and replay recording need no special
+    // cases for them.
+    bool add_bot(std::string name);
+
     void start_recording(std::filesystem::path path);
     bool recording() const { return recorder_.recording(); }
     // Writes the recording started by start_recording(). No-op (returning
@@ -60,6 +67,10 @@ private:
     struct Player {
         std::uint32_t peer = 0;
         std::string name;
+        // A bot has no peer: nothing is ever sent to it, and its commands
+        // come from decide() instead of the network.
+        bool is_bot = false;
+        BotState bot_state;
         PlayerState state;
         std::unique_ptr<eng::CharacterController> controller;
         float view_yaw = 0.0f;
@@ -90,6 +101,9 @@ private:
 
     void handle_hello(std::uint32_t peer, eng::ByteReader& reader, eng::IServerTransport& net);
     void handle_input(Player& player, eng::ByteReader& reader, eng::IServerTransport& net);
+    // Gathers what a bot can perceive. Lives here, not in decide(), so the
+    // decision layer stays a pure function with no world access.
+    BotSenses sense_for_bot(std::uint8_t bot_id) const;
     void drop_player(std::uint8_t player_id, eng::IServerTransport& net);
     std::optional<std::uint8_t> find_player_by_peer(std::uint32_t peer) const;
     void send_snapshots(eng::IServerTransport& net);
@@ -110,6 +124,7 @@ private:
     std::string map_name_;
     Arsenal arsenal_;
     std::array<std::optional<Player>, kMaxPlayers> players_;
+    BotConfig bot_config_;
     ReplayRecorder recorder_;
     std::filesystem::path replay_path_;
     std::uint32_t tick_ = 0;

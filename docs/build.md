@@ -136,11 +136,25 @@ web-only defect this project has shipped compiled cleanly and broke at runtime:
 
 So it checks, in order: the artifacts are a real wasm module (not a native
 binary); the client reaches its frame loop; the framebuffer contains more than
-one colour; and the frame rate is not pathological. Each of those thresholds is
-deliberately loose — they separate "working" from "catastrophically broken",
-which is the only honest distinction a software rasteriser on a shared runner
-can make. Do not tighten them into a performance benchmark; that just buys
-flakiness.
+one colour; and the frame rate is not pathological.
+
+Those thresholds are deliberately loose, and calibrated against the **slowest**
+environment rather than a developer machine. Measured healthy values, both on
+SwiftShader:
+
+| | frame rate | distinct colours |
+|---|---|---|
+| M4 Mac, local | ~40 fps | ~375 |
+| GitHub `ubuntu-latest` | 5.5–7 fps | ~300 |
+| *floor* | **1 fps** | **32** |
+
+A shared runner is 6–7× slower than a laptop and varies run to run, so a floor
+set from local numbers would fail on a noisy neighbour rather than on a
+regression. For reference, the uniform-array cliff ran at 0.67 fps on a
+developer machine — and anything more severe than about 10× never reaches the
+fingerprint at all, so the startup check catches it before the frame-rate one
+does. **Do not tighten these into a performance benchmark**; it buys flakiness,
+not sensitivity.
 
 `--zero-canvas` holds the canvas at zero height until the client has been seen
 running, then restores it. A plain headless load lays the canvas out before the

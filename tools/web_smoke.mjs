@@ -44,17 +44,32 @@ import { join, extname, resolve, normalize, sep } from 'node:path';
 // can make honestly. A 20% rendering regression will not trip them, and
 // pretending otherwise would just make the job flaky.
 
-// A frame of the arena quantised to 5 bits per channel measures around 350
-// populated buckets; a flat clear colour measures 1. The floor sits an order of
-// magnitude below the observed value, because the palette legitimately shifts
-// with resolution and driver.
-const MIN_DISTINCT_COLORS = 64;
-// Reference points, both under SwiftShader: a healthy client runs at ~40 fps,
-// and the uniform-array cliff ran at 0.67. A CI runner is slower than a
-// developer machine, so the floor is set to catch the second case only.
-const MIN_FPS = 3;
+// A frame of the arena quantised to 5 bits per channel measures 300-380
+// populated buckets (M4 Mac 375, GitHub runner 297); a flat clear colour
+// measures 1. The gap either side of the floor is enormous in both directions,
+// so it sits an order of magnitude below the lowest observed value rather than
+// hugging it -- the palette shifts legitimately with resolution and driver.
+const MIN_DISTINCT_COLORS = 32;
+
+// Measured healthy frame rates, both under SwiftShader:
+//
+//   M4 Mac, local          ~40 fps
+//   GitHub ubuntu-latest   5.5-7 fps
+//
+// and the historical uniform-array cliff, on a developer machine, 0.67 fps.
+//
+// The floor is set from the SLOWEST healthy environment, not the fastest: a
+// shared CI runner is 6-7x slower than a laptop and varies run to run, so a
+// floor calibrated locally would fail on a noisy neighbour rather than on a
+// regression. At 1 fps this catches roughly a 5x slowdown or worse on the
+// runner, and anything more severe than ~10x never reaches the fingerprint at
+// all, so the startup check fires first. It is a backstop for the middle band,
+// not a benchmark -- raising it buys flakiness, not sensitivity.
+const MIN_FPS = 1;
 const STARTUP_TIMEOUT_MS = 90_000;  // generous: a cold runner compiling wasm
-const MEASURE_MS = 5_000;
+// Long enough that even a barely-passing client contributes a usable number of
+// frames to the average rather than three.
+const MEASURE_MS = 8_000;
 
 const args = process.argv.slice(2);
 const flag = (name, fallback = null) => {

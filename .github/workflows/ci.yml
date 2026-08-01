@@ -44,8 +44,16 @@ jobs:
             libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev \
             libwayland-dev libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev libdrm-dev libgbm-dev
 
+      # WEBRTC=ON matters here: without it the transport that does the most
+      # threading in the whole project -- and the only code that hands buffers
+      # to a third-party library's callback threads -- was the one part never
+      # covered by ASan. A use-after-free on shutdown lived there for two
+      # milestones, surfacing as a segfault in about one CI run in ten.
       - name: Configure (ASan + UBSan)
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DFPS_ENABLE_SANITIZERS=ON -DFPS_WARNINGS_AS_ERRORS=ON
+        run: |
+          sudo apt-get install -y libssl-dev
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DFPS_ENABLE_SANITIZERS=ON \
+                -DFPS_ENABLE_WEBRTC=ON -DFPS_WARNINGS_AS_ERRORS=ON
 
       - name: Build
         run: cmake --build build --parallel
@@ -78,6 +86,17 @@ jobs:
       # exercises ICE, DTLS and SCTP without a browser or a network.
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      # The shutdown race this guards against needed a callback to be in
+      # flight at the moment of teardown, so a single pass proves little: it
+      # reproduced in roughly one run in ten. Repeating the WebRTC tests turns
+      # "probably fixed" into evidence, and costs a few seconds.
+      # "DataChannel" uniquely names the loopback test -- the only one that
+      # sets up and tears down a live connection, and so the only one that can
+      # hit the race. Catch2 tags do not become ctest labels, hence matching
+      # on the name.
+      - name: Repeat the loopback test (shutdown races are rare per-run)
+        run: ctest --test-dir build -R DataChannel --repeat until-fail:20 --output-on-failure
 
   # The Emscripten client, built AND run. Building it is the easy half and on
   # its own it proves very little: every web-only defect this project has

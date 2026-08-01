@@ -60,7 +60,8 @@ rtc::binary binary_of(std::string_view text) {
 
 // The client half: a plain libdatachannel peer standing in for the browser.
 struct FakeClient {
-    rtc::PeerConnection connection;
+    // Everything the callbacks below touch. Declared BEFORE `connection`, and
+    // that order is load-bearing -- see the destructor.
     std::shared_ptr<rtc::DataChannel> reliable;
     std::shared_ptr<rtc::DataChannel> sequenced;
 
@@ -69,6 +70,20 @@ struct FakeClient {
     std::string offer;
     std::atomic<bool> offer_ready{false};
     std::vector<std::pair<std::string, std::string>> candidates;  // (candidate, mid)
+
+    // Declared LAST so it is destroyed FIRST.
+    //
+    // Destroying an rtc::PeerConnection is the only operation that waits for
+    // libdatachannel's callback threads -- resetCallbacks() unregisters, but a
+    // callback already dispatched keeps running. Since members die in reverse
+    // declaration order, putting the connection last means those threads are
+    // joined while `mutex`, `received` and `candidates` are still alive.
+    //
+    // With the connection declared first (its original position) the opposite
+    // happened, and a message in flight at teardown wrote into destroyed
+    // members: a segfault in roughly one run in ten, always after the last
+    // assertion had already passed.
+    rtc::PeerConnection connection;
 
     FakeClient() {
         connection.onLocalDescription([this](rtc::Description description) {
@@ -102,13 +117,13 @@ struct FakeClient {
         sequenced->onMessage(on_message, [](rtc::string) {});
     }
 
-    // The callbacks above capture `this` and touch `mutex`, `received` and
-    // `candidates` -- all of which are declared AFTER `connection` and so are
-    // destroyed BEFORE it. Destroying the PeerConnection is when
-    // libdatachannel joins its callback threads, so without unregistering
-    // first, a message still in flight writes into destroyed members. Same
-    // defect as the one WebRtcHost::Impl guards against, on the other side of
-    // the connection.
+    // Unregister first, then let ~connection (which runs before every other
+    // member, per the declaration order above) join the callback threads.
+    //
+    // Both halves are needed. resetCallbacks() alone is not enough -- it does
+    // not wait for a callback that has already been dispatched, which is why
+    // adding it without also moving the connection only made the crash rarer
+    // (first repeat -> fifth) instead of fixing it.
     ~FakeClient() {
         reliable->resetCallbacks();
         sequenced->resetCallbacks();

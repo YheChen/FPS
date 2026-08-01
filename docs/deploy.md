@@ -55,11 +55,18 @@ status page.)
 this check is inconvenient to run, start there and come back to it only if you
 want your own domain.
 
-**Distro:** the build needs **CMake ≥ 3.25** and a **C++23** compiler. Any
-current Fedora is comfortably past both, as are Ubuntu 24.04 (CMake 3.28,
-GCC 13) and Debian 13. Ubuntu 22.04 is **not** — CMake 3.22 and GCC 11 are
-both too old, and you would be building toolchains before the game. Check with
-`cmake --version && g++ --version`.
+**Distro:** the build needs **CMake ≥ 3.25** and a **C++23** compiler. Current
+Fedora ships CMake **4.3** and GCC **16.1** (both verified in CI); Ubuntu 24.04
+has CMake 3.28 and GCC 13, and Debian 13 is fine too. Ubuntu 22.04 is **not** —
+CMake 3.22 and GCC 11 are both too old, and you would be building toolchains
+before the game. Check with `cmake --version && g++ --version`.
+
+CMake 4 is worth a note because it *removed* compatibility with projects
+declaring `cmake_minimum_required` below 3.5, which some transitive
+dependencies still do. The server build is unaffected. If you ever enable
+`FPS_ENABLE_WEBRTC` on this machine, `third_party/CMakeLists.txt` already
+scopes a `CMAKE_POLICY_VERSION_MINIMUM` around the one dependency that needs
+it.
 
 Commands below are given for **Fedora** (`dnf`, `firewalld`, SELinux) with the
 Debian/Ubuntu equivalent alongside. The `deploy-build` CI job builds the server

@@ -125,6 +125,48 @@ struct WebRtcHost::Impl {
         event.peer = peer_id;
         pending_events.push_back(std::move(event));
     }
+
+    // Peers MUST die before the state their callbacks touch.
+    //
+    // Members are destroyed in reverse declaration order, so without this
+    // `mutex`, `pending_events` and `pending_signals` are already gone by the
+    // time `peers` is destroyed -- and destroying a PeerConnection is exactly
+    // when libdatachannel joins its callback threads, so a message or state
+    // change still in flight lands in queue_event() and locks a destroyed
+    // mutex. That is an intermittent segfault on shutdown: it needs a callback
+    // to be mid-flight at the moment of teardown, so it reproduced in roughly
+    // one CI run in ten and never locally.
+    //
+    // Reordering the members would also work and is easy to undo by accident.
+    // This is explicit about the requirement.
+    ~Impl() {
+        // Same move-out-then-destroy discipline as poll(), and for the same
+        // reason: destroying a peer joins threads whose callbacks want this
+        // mutex, so it must not be held while that happens.
+        std::unordered_map<std::uint32_t, Peer> doomed;
+        {
+            const std::lock_guard lock{mutex};
+            doomed.swap(peers);
+        }
+        for (auto& [id, peer] : doomed) {
+            // Unregister before destroying, so a callback that has already
+            // been dispatched cannot re-enter this half-destroyed Impl.
+            if (peer.reliable) {
+                peer.reliable->resetCallbacks();
+            }
+            if (peer.sequenced) {
+                peer.sequenced->resetCallbacks();
+            }
+            if (peer.connection) {
+                peer.connection->resetCallbacks();
+            }
+        }
+        doomed.clear();
+    }
+
+    Impl() = default;
+    Impl(const Impl&) = delete;
+    Impl& operator=(const Impl&) = delete;
 };
 
 WebRtcHost::WebRtcHost() : impl_(std::make_unique<Impl>()) {}

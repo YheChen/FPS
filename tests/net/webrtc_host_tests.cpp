@@ -102,6 +102,22 @@ struct FakeClient {
         sequenced->onMessage(on_message, [](rtc::string) {});
     }
 
+    // The callbacks above capture `this` and touch `mutex`, `received` and
+    // `candidates` -- all of which are declared AFTER `connection` and so are
+    // destroyed BEFORE it. Destroying the PeerConnection is when
+    // libdatachannel joins its callback threads, so without unregistering
+    // first, a message still in flight writes into destroyed members. Same
+    // defect as the one WebRtcHost::Impl guards against, on the other side of
+    // the connection.
+    ~FakeClient() {
+        reliable->resetCallbacks();
+        sequenced->resetCallbacks();
+        connection.resetCallbacks();
+    }
+
+    FakeClient(const FakeClient&) = delete;
+    FakeClient& operator=(const FakeClient&) = delete;
+
     bool open() const { return reliable->isOpen() && sequenced->isOpen(); }
 
     std::size_t received_count() {

@@ -30,7 +30,7 @@ jobs:
         run: cmake --build build --config Debug --parallel
 
       - name: Test
-        run: ctest --test-dir build --build-config Debug --output-on-failure
+        run: ctest --test-dir build --build-config Debug --output-on-failure --timeout 120
 
   sanitizers:
     runs-on: ubuntu-latest
@@ -58,8 +58,13 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
+      # --timeout because a deadlock is a real failure mode here, not a
+      # hypothetical: this teardown path produced one in M19a, and produced
+      # another under ASan's timing while this fix was being written. Without
+      # it ctest waits forever and the job holds a runner for six hours before
+      # anyone learns anything. The slowest test is ~2 s, so 120 s is headroom.
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure --timeout 120
 
   # The WebRTC transport is off by default, so without this job it would only
   # ever be built on a developer's machine. Ubuntu only for now: Windows
@@ -85,7 +90,7 @@ jobs:
       # The loopback test runs a real DataChannel connection in-process, so it
       # exercises ICE, DTLS and SCTP without a browser or a network.
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure --timeout 120
 
       # The shutdown race this guards against needed a callback to be in
       # flight at the moment of teardown, so a single pass proves little: it
@@ -96,7 +101,7 @@ jobs:
       # hit the race. Catch2 tags do not become ctest labels, hence matching
       # on the name.
       - name: Repeat the loopback test (shutdown races are rare per-run)
-        run: ctest --test-dir build -R DataChannel --repeat until-fail:20 --output-on-failure
+        run: ctest --test-dir build -R DataChannel --repeat until-fail:20 --output-on-failure --timeout 120
 
   # The Emscripten client, built AND run. Building it is the easy half and on
   # its own it proves very little: every web-only defect this project has

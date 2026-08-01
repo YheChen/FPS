@@ -9,8 +9,34 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/reporters/catch_reporter_event_listener.hpp>
+#include <catch2/reporters/catch_reporter_registrars.hpp>
 
 #include <rtc/rtc.hpp>
+
+namespace {
+
+// libdatachannel dispatches callbacks from a GLOBAL thread pool that outlives
+// any individual PeerConnection -- which is why rtc::Cleanup() returns a
+// future rather than being a destructor somewhere. Nothing was calling it, so
+// the pool was still holding queued work when the process began static
+// destruction, and a task then ran against torn-down globals.
+//
+// That is the crash this file spent three attempts chasing: a SEGV on a
+// callback thread AFTER Catch2 had printed "All tests passed", because ctest
+// runs each test as its own process and the fault was at exit, not in the
+// test. Draining the pool while main() is still on the stack removes the
+// window entirely, rather than narrowing it the way ordering fixes did
+// (failure moved from repeat 1 to 5 to 8 without ever going away).
+struct WebRtcCleanupListener : Catch::EventListenerBase {
+    using Catch::EventListenerBase::EventListenerBase;
+
+    void testRunEnded(const Catch::TestRunStats&) override { rtc::Cleanup().wait(); }
+};
+
+}  // namespace
+
+CATCH_REGISTER_LISTENER(WebRtcCleanupListener)
 
 // A real DataChannel connection, offerer and answerer in one process.
 //

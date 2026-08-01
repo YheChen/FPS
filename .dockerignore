@@ -1,0 +1,27 @@
+# The build context is the repository root (deploy/Dockerfile builds from ..),
+# and build/ is gigabytes of fetched dependencies and object files. Sending it
+# to the daemon would dominate the build time and invalidate the cache on every
+# local rebuild.
+build/
+out/
+dist/
+
+.git/
+.github/
+
+# Nothing in the server image needs these.
+docs/
+web/
+.vscode/
+.idea/
+.cache/
+
+# Local state
+fps_settings.cfg
+handover.json
+deploy/.env
+compile_commands.json
+CMakeUserPresets.json
+
+.DS_Store
+Thumbs.db

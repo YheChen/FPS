@@ -7,6 +7,10 @@ dist/
 fps_settings.cfg
 handover.json
 
+# Deployment secrets: the domain is harmless, CF_API_TOKEN is not.
+# deploy/.env.example is the committed template.
+deploy/.env
+
 # IDE / editor
 .vscode/
 .idea/

@@ -3,13 +3,16 @@
 Two pieces (see [ADR 0005](decisions/0005-web-client.md)):
 
 - **Client** → static WebAssembly on **Vercel**.
-- **Server** → the native `fps_server` on a **ThinkPad T14 at home**, with
-  **Caddy** terminating TLS so the browser can reach it over `wss://`.
+- **Server** → `fps_server` on a **ThinkPad T14 at home** (Fedora), behind
+  **Caddy** terminating TLS so the browser can reach it over `wss://`. Both run
+  as a Docker Compose stack; a native systemd install is documented as the
+  alternative.
 
 ```
 browser ──https──▶ Vercel (static .wasm/.js/.data)
    │
-   └──wss://fps.yanzhenchen.ca──▶ Caddy (TLS) ──ws://localhost:7778──▶ fps_server
+   └──wss://fps.yanzhenchen.ca──▶ Caddy (TLS) ──ws://server:7778──▶ fps_server
+                                  └───────── docker compose ─────────┘
 ```
 
 Why split it this way rather than serve both from the T14: Vercel gives the
@@ -45,14 +48,29 @@ status page.)
 
 | Result | What it means | Which path below |
 |---|---|---|
-| Same | You have a real public IP; port forwarding will work | §3 **A** or **B** |
-| Different | You are behind **CGNAT** — no port forwarding can ever work | §3 **C** (tunnel) |
+| Same | You have a real public IP; port forwarding will work | §3 **A**, **B**, or **D** |
+| Different | You are behind **CGNAT** — no port forwarding can ever work | §3 **C** or **D** |
 
-**Distro:** the build needs **CMake ≥ 3.25** and a **C++23** compiler.
-Ubuntu 24.04 (CMake 3.28, GCC 13) and Debian 13 are fine. Ubuntu 22.04 is
-**not** — its CMake 3.22 and GCC 11 are both too old, and you would be
-building toolchains before you build the game. Check with
-`cmake --version && g++ --version`.
+**D (Tailscale Funnel) works either way and needs nothing forwarded**, so if
+this check is inconvenient to run, start there and come back to it only if you
+want your own domain.
+
+**Distro:** the build needs **CMake ≥ 3.25** and a **C++23** compiler. Current
+Fedora ships CMake **4.3** and GCC **16.1** (both verified in CI); Ubuntu 24.04
+has CMake 3.28 and GCC 13, and Debian 13 is fine too. Ubuntu 22.04 is **not** —
+CMake 3.22 and GCC 11 are both too old, and you would be building toolchains
+before the game. Check with `cmake --version && g++ --version`.
+
+CMake 4 is worth a note because it *removed* compatibility with projects
+declaring `cmake_minimum_required` below 3.5, which some transitive
+dependencies still do. The server build is unaffected. If you ever enable
+`FPS_ENABLE_WEBRTC` on this machine, `third_party/CMakeLists.txt` already
+scopes a `CMAKE_POLICY_VERSION_MINIMUM` around the one dependency that needs
+it.
+
+Commands below are given for **Fedora** (`dnf`, `firewalld`, SELinux) with the
+Debian/Ubuntu equivalent alongside. The `deploy-build` CI job builds the server
+in both a `fedora` and an `ubuntu:24.04` container, so neither set is guesswork.
 
 **DNS:** if the nameservers say `cloudflare.com`, you can use the DNS-01
 certificate path (§3 B) and Cloudflare's API for dynamic DNS (§4), and you
@@ -61,10 +79,61 @@ path (§3 A) and need port 80 reachable.
 
 ---
 
-## 1. Build the server on the T14
+## 1. Run the server — Docker (recommended)
+
+The whole stack, server plus TLS proxy, is two files in `deploy/`. This is the
+path to prefer: reproducible, survives reboot, and the image carries a health
+check that speaks the real game protocol rather than just pinging a port.
 
 ```sh
+git clone https://github.com/YheChen/FPS.git ~/fps
+cd ~/fps
+cp deploy/.env.example deploy/.env
+$EDITOR deploy/.env                      # FPS_DOMAIN at minimum
+
+sudo systemctl enable --now docker       # so the stack comes back after reboot
+docker compose -f deploy/compose.yaml --env-file deploy/.env up -d --build
+```
+
+Check it:
+
+```sh
+docker compose -f deploy/compose.yaml ps          # server should be "healthy"
+docker compose -f deploy/compose.yaml logs -f server
+```
+
+The server container is `read_only`, drops all capabilities, sets
+`no-new-privileges`, and is capped at 512 MB. It is **not** published to the
+host — only Caddy reaches it, over the compose network — so there is no plain
+`ws://` listener on your LAN.
+
+Two Fedora-specific notes. Bind mounts in `compose.yaml` carry `:z` because
+SELinux is enforcing; without it the container gets a permission denial whose
+message does not mention SELinux. And the certificate lives in a **named
+volume**, so `docker compose down` does not throw it away and re-hit Let's
+Encrypt rate limits on the next start.
+
+Then skip to §3 for TLS — Caddy is already running, it just needs a reachable
+domain.
+
+<details>
+<summary><b>Alternative: build and run natively (no Docker)</b></summary>
+
+Everything from here to §3 is the non-Docker path. It is fine, and it is what
+the `deploy-build` CI job exercises, but you have Docker and the compose stack
+is less to get wrong.
+
+### Build
+
+```sh
+# Fedora
+sudo dnf install -y git cmake ninja-build gcc-c++ make ca-certificates
+
+# Debian / Ubuntu
 sudo apt update && sudo apt install -y git cmake ninja-build build-essential ca-certificates
+```
+
+```sh
 sudo git clone https://github.com/YheChen/FPS.git /opt/fps
 cd /opt/fps
 cmake --preset release -DFPS_BUILD_CLIENT=OFF -DFPS_BUILD_TESTS=OFF
@@ -80,9 +149,9 @@ is also markedly faster and needs no graphics packages at all.
 
 (This guide previously said no graphics packages were needed and gave a command
 without the flag. That command could not have worked. The `deploy-build` CI job
-exists now so the claim is checked rather than asserted: a bare `ubuntu:24.04`
-container, exactly the `apt` line above, `fps_server` only, then start it — and
-it asserts SDL/ImGui/miniaudio were not fetched.)
+exists now so the claim is checked rather than asserted: bare `fedora` and
+`ubuntu:24.04` containers, exactly the install lines above, `fps_server` only,
+then start it — and it asserts SDL/ImGui/miniaudio were never fetched.)
 
 Sanity check it before wiring anything up:
 
@@ -93,7 +162,7 @@ Sanity check it before wiring anything up:
 You should see the map load, a tick rate near 60/s, and two bots in the player
 count.
 
-## 2. Run it as a service
+### Run it as a systemd service
 
 ```sh
 sudo useradd --system --home /opt/fps --shell /usr/sbin/nologin fps
@@ -109,10 +178,13 @@ for native ones. **For a home server, prefer browser-only**: add `--no-enet`
 to `ExecStart` and you have one fewer port to forward and one fewer listener
 exposed.
 
-### Keep the laptop awake
+</details>
 
-A closed lid suspends the machine on almost every desktop install, which takes
-the server with it:
+## 2. Keep the laptop awake
+
+This applies either way, Docker or not. A closed lid suspends the machine on a
+desktop install — Fedora Workstation included — and that takes the server with
+it:
 
 ```sh
 sudo tee /etc/systemd/logind.conf.d/99-fps.conf <<'EOF'
@@ -124,27 +196,66 @@ sudo systemctl restart systemd-logind
 sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
 ```
 
-Leave it plugged in. A T14 running a headless server draws very little, but a
-battery held at 100% ages faster — if the BIOS or `tlp` offers a charge
-threshold, cap it around 80%.
+Fedora Workstation also has GNOME's own idle-suspend, which is separate from
+logind and will still put the machine to sleep:
+
+```sh
+gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing'
+```
+
+Leave it plugged in. Charge thresholds are worth having so a permanently
+plugged-in battery is not held at 100% — check what is currently set:
+
+```sh
+cat /sys/class/power_supply/BAT0/charge_control_{start,end}_threshold
+```
+
+20/80 is a good pair for a machine that mostly lives on AC.
 
 ---
 
 ## 3. TLS — pick one path
 
+On the Docker path, Caddy is already running in the compose stack; A and B are
+about how it gets a certificate, and the changes go in
+`deploy/Caddyfile.docker` and `deploy/.env`. On the native path, install Caddy
+as shown. **D needs neither** — it replaces Caddy entirely.
+
+| Path | Needs inbound | Works behind CGNAT | Your own domain |
+|---|---|---|---|
+| **A** HTTP-01 | 80 + 443 | no | yes |
+| **B** DNS-01 via Cloudflare | 443 | no | yes |
+| **C** Cloudflare Tunnel | nothing | **yes** | yes |
+| **D** Tailscale Funnel | nothing | **yes** | no — a `ts.net` name |
+
+**Start with D if you just want it working.** Tailscale is already installed
+on this machine, the certificate is automatic, nothing is forwarded, and it
+does not care whether you are behind CGNAT. The cost is the hostname: players
+get `https://<machine>.<tailnet>.ts.net` rather than `fps.yanzhenchen.ca`. For
+a deathmatch you share a link to, that is usually a fine trade — and moving to
+A/B/C later is a config change, not a rebuild, as long as you rebuild the web
+client with the new `FPS_WEB_SERVER_URL`.
+
 ### A. HTTP-01 (public IP, port 80 reachable)
 
-The simple case. Stock Caddy from the Debian/Ubuntu repo:
+The simple case — stock Caddy from the distro:
 
 ```sh
+# Fedora: caddy is in the official repositories
+sudo dnf install -y caddy
+
+# Debian / Ubuntu: Caddy's own repo
 sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
   | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
   | sudo tee /etc/apt/sources.list.d/caddy-stable.list
 sudo apt update && sudo apt install -y caddy
+```
 
+```sh
 sudo cp /opt/fps/deploy/Caddyfile /etc/caddy/Caddyfile   # edit the domain first
+sudo systemctl enable --now caddy
 sudo systemctl reload caddy
 ```
 
@@ -160,12 +271,17 @@ port 80, so **only 443 ever needs to be open**. Stock Caddy cannot do this;
 the Cloudflare DNS module is not compiled in. Build one that has it:
 
 ```sh
-sudo apt install -y golang-go
+sudo dnf install -y golang          # Debian/Ubuntu: sudo apt install -y golang-go
 go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
 ~/go/bin/xcaddy build --with github.com/caddy-dns/cloudflare
 sudo install -m 0755 ./caddy /usr/bin/caddy      # replaces the packaged binary
+sudo restorecon -v /usr/bin/caddy                # Fedora: relabel for SELinux
 caddy list-modules | grep dns.providers.cloudflare
 ```
+
+The `restorecon` matters on Fedora: overwriting a packaged binary can leave it
+with the wrong SELinux label, and the failure mode is a permission denial that
+looks nothing like a labelling problem.
 
 Create a Cloudflare API token (dashboard → My Profile → API Tokens) with
 **Zone → DNS → Edit** on `yanzhenchen.ca` only. Keep it out of the Caddyfile:
@@ -193,8 +309,9 @@ its edge, so **nothing needs forwarding and Caddy is not needed at all** —
 Cloudflare terminates TLS.
 
 ```sh
-# cloudflared, from Cloudflare's apt repo (see their docs for the current key)
-sudo apt install -y cloudflared
+# cloudflared: Cloudflare publishes an RPM repo for Fedora and a deb repo for
+# Debian/Ubuntu -- see their docs for the current signing key.
+sudo dnf install -y cloudflared
 cloudflared tunnel login
 cloudflared tunnel create fps
 cloudflared tunnel route dns fps fps.yanzhenchen.ca
@@ -222,11 +339,43 @@ their edge, so expect a little more latency than a direct connection — and
 that free-plan tunnels are not a supported path for high-volume game traffic,
 though 0.45 Mbit/s is nowhere near any threshold that matters.
 
+### D. Tailscale Funnel (nothing inbound, no Caddy, no domain)
+
+Tailscale is already on this machine. Funnel publishes one local port to the
+public internet over Tailscale's edge, with a certificate it manages, on a
+`ts.net` hostname. Nothing is forwarded and CGNAT is irrelevant.
+
+Funnel has to be allowed in the tailnet policy first (admin console → Access
+Controls → `nodeAttrs` with `funnel`, and HTTPS certificates enabled). Then, on
+the T14:
+
+```sh
+tailscale serve --bg --https=443 http://127.0.0.1:7778   # only if the port is on the host
+tailscale funnel --bg 443
+tailscale funnel status                                   # prints the public URL
+```
+
+On the **Docker** path the server is deliberately not published to the host, so
+Funnel has nothing to point at. Either publish it to loopback only — add
+`ports: ["127.0.0.1:7778:7778"]` to the `server` service — or point Funnel at
+Caddy instead and let it keep terminating TLS. Publishing to `127.0.0.1` is the
+simpler of the two, and it stays off the LAN.
+
+Then verify before you trust it, because Funnel is an HTTPS proxy and the
+question that matters is whether it carries the WebSocket upgrade:
+
+```sh
+python3 tools/ws_smoke.py <machine>.<tailnet>.ts.net 443
+```
+
+A `ServerWelcome` back means the whole chain works. Build the web client with
+that hostname as `FPS_WEB_SERVER_URL` (§5) and you are done — no §4 at all.
+
 ---
 
 ## 4. Router, firewall, and dynamic DNS
 
-**Port forward** on the router to the T14's LAN address — give it a DHCP
+**Port forward** (paths A and B only) on the router to the T14's LAN address — give it a DHCP
 reservation first, or the forward breaks the next time it renews:
 
 | Port | Needed for |
@@ -235,9 +384,18 @@ reservation first, or the forward breaks the next time it renews:
 | TCP 80 | ACME HTTP-01 only (path A) |
 | UDP 7777 | native ENet players only — skip it if you run `--no-enet` |
 
-**Host firewall**, if `ufw` is active:
+**Host firewall.** Fedora runs `firewalld` and blocks inbound by default, so
+this step is not optional there:
 
 ```sh
+# Fedora
+sudo firewall-cmd --permanent --add-service=https
+sudo firewall-cmd --permanent --add-service=http     # path A only
+sudo firewall-cmd --permanent --add-port=7777/udp    # native players only
+sudo firewall-cmd --reload
+sudo firewall-cmd --list-all                         # confirm
+
+# Debian / Ubuntu, if ufw is active
 sudo ufw allow 443/tcp
 sudo ufw allow 80/tcp      # path A only
 sudo ufw allow 7777/udp    # native players only
@@ -254,6 +412,23 @@ the tunnel handles it.
 ```sh
 curl -I https://fps.yanzhenchen.ca     # valid cert, a Caddy or Cloudflare response
 ```
+
+### If something is denied for no visible reason (Fedora)
+
+SELinux is enforcing by default, and its denials rarely name themselves — a
+service simply fails to bind, read, or connect. Before assuming a config error:
+
+```sh
+sudo ausearch -m AVC -ts recent          # anything denied in the last few minutes
+```
+
+Nothing here should need a policy change: the service runs from `/opt` as an
+ordinary unconfined systemd unit, and Caddy from `dnf` ships with policy for
+binding 80/443. The two things that do bite are a custom `caddy` binary with
+the wrong label (`restorecon`, above) and a non-standard port — if you move the
+game server off 7778, `semanage port -a` may be needed before Caddy can proxy
+to it. **Do not `setenforce 0` to make a problem go away** on a host you are
+deliberately exposing to the internet; read the denial instead.
 
 ---
 

@@ -1,0 +1,30 @@
+# Caddyfile for the Docker Compose deployment (deploy/compose.yaml).
+#
+# Differs from the bare-metal deploy/Caddyfile in two ways: the domain comes
+# from the environment rather than being edited in place, and the upstream is
+# the compose service name instead of localhost.
+
+{$FPS_DOMAIN} {
+	reverse_proxy server:7778
+
+	# --- DNS-01 certificates (docs/deploy.md, TLS path B) -----------------
+	# Uncomment when inbound port 80 is blocked, which is common on a
+	# residential connection. Caddy then proves domain control by writing a
+	# DNS record instead of answering an HTTP challenge, so only 443 has to
+	# be open -- and you can stop publishing 80 in compose.yaml.
+	#
+	# The stock caddy:2-alpine image does NOT contain the Cloudflare DNS
+	# module. Build one that does and point compose.yaml at it:
+	#
+	#     FROM caddy:2-builder AS builder
+	#     RUN xcaddy build --with github.com/caddy-dns/cloudflare
+	#     FROM caddy:2-alpine
+	#     COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+	#
+	# CF_API_TOKEN is passed through by compose from deploy/.env; scope it to
+	# Zone > DNS > Edit on this zone only.
+	#
+	# tls {
+	# 	dns cloudflare {env.CF_API_TOKEN}
+	# }
+}

@@ -1,0 +1,79 @@
+# Dedicated server + TLS reverse proxy. See docs/deploy.md.
+#
+#     cp deploy/.env.example deploy/.env    # then edit it
+#     docker compose -f deploy/compose.yaml --env-file deploy/.env up -d --build
+#
+# Survives reboot via `restart: unless-stopped` plus an enabled docker service:
+#     sudo systemctl enable --now docker
+
+services:
+  server:
+    build:
+      # The build context is the repository root; this file lives in deploy/.
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: fps-server:local
+    container_name: fps-server
+    restart: unless-stopped
+    command:
+      - "--ws-port"
+      - "7778"
+      - "--no-enet"
+      - "--bots"
+      - "${FPS_BOTS:-0}"
+    # Not published to the host: only Caddy needs to reach it, over the
+    # compose network. Publishing 7778 would put the plain ws:// server on the
+    # LAN alongside the TLS one, which is the opposite of the point.
+    expose:
+      - "7778"
+    networks: [fps]
+    # The game server holds no state; a read-only root filesystem costs
+    # nothing and removes a class of surprise.
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: fps-caddy
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_healthy
+    ports:
+      - "443:443"
+      # Port 80 is only needed for the ACME HTTP-01 challenge. Comment it out
+      # on the DNS-01 path; leaving it published on a residential connection
+      # is a listener you are not using.
+      - "80:80"
+    environment:
+      # Consumed by the Caddyfile. CF_API_TOKEN is only read on the DNS-01
+      # path and is otherwise unset.
+      FPS_DOMAIN: "${FPS_DOMAIN:?set FPS_DOMAIN in deploy/.env}"
+      CF_API_TOKEN: "${CF_API_TOKEN:-}"
+    volumes:
+      # :z relabels for SELinux, which is enforcing on Fedora. Without it the
+      # container gets permission denied on a bind mount and the cause is not
+      # obvious from the error.
+      - ./Caddyfile.docker:/etc/caddy/Caddyfile:ro,z
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [fps]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+networks:
+  fps:
+    driver: bridge
+
+volumes:
+  # Named, so the certificate survives `down` and you do not re-hit Let's
+  # Encrypt rate limits on every restart.
+  caddy_data:
+  caddy_config:

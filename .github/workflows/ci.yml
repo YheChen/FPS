@@ -151,16 +151,28 @@ jobs:
   # SDL3/ImGui/glad/miniaudio entirely.
   #
   # In a container, not on ubuntu-latest: the runner image ships those headers,
-  # so it would pass whether or not the claim holds. The apt line below is
-  # exactly the one in the docs -- if it changes here, it changes there.
+  # so it would pass whether or not the claim holds. The install lines below are
+  # exactly the ones in the docs -- if they change here, they change there.
+  #
+  # Both distros, because the guide gives both and the actual deployment target
+  # is Fedora. An instruction nobody executes is a guess.
   deploy-build:
     runs-on: ubuntu-latest
-    container: ubuntu:24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: fedora
+            image: fedora:latest
+            install: dnf install -y git cmake ninja-build gcc-c++ make ca-certificates
+          - distro: ubuntu
+            image: ubuntu:24.04
+            install: apt-get update && apt-get install -y git cmake ninja-build build-essential ca-certificates
+    name: deploy-build (${{ matrix.distro }})
+    container: ${{ matrix.image }}
     steps:
       - name: Install the toolchain (and nothing else)
-        run: |
-          apt-get update
-          apt-get install -y git cmake ninja-build build-essential ca-certificates
+        run: ${{ matrix.install }}
 
       - uses: actions/checkout@v4
 
@@ -189,6 +201,56 @@ jobs:
       # deployable, and both failures are silent until someone tries to play.
       - name: It starts, loads the map, and serves
         run: ./build/release/game/fps_server --ws-port 7778 --no-enet --bots 2 --run-seconds 5
+
+  # The container image and compose stack from deploy/. Built and RUN, because
+  # an image that builds but whose health check never passes is worse than no
+  # image -- compose would sit there restarting it.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the server image
+        run: docker build -f deploy/Dockerfile -t fps-server:ci .
+
+      # The image's own HEALTHCHECK speaks the real game protocol (WebSocket
+      # upgrade + ClientHello/ServerWelcome), so waiting for "healthy" proves
+      # the server loaded its assets and is serving, not merely that a process
+      # is alive.
+      - name: Wait for the container to report healthy
+        run: |
+          docker run -d --name fps-ci -p 7778:7778 fps-server:ci \
+            --ws-port 7778 --no-enet --bots 2
+          for i in $(seq 1 30); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' fps-ci 2>/dev/null || echo missing)
+            echo "  health: $status"
+            case "$status" in
+              healthy) exit 0 ;;
+              unhealthy) docker logs fps-ci; exit 1 ;;
+            esac
+            sleep 5
+          done
+          echo "never became healthy"
+          docker logs fps-ci
+          exit 1
+
+      # Proves the port mapping too: the health check runs inside the
+      # container, so on its own it says nothing about reachability.
+      - name: Reachable from outside the container
+        run: python3 tools/ws_smoke.py 127.0.0.1 7778
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f fps-ci || true
+
+      # Catches a compose file that references a missing service, a bad
+      # interpolation, or a volume typo -- none of which the Dockerfile build
+      # would surface.
+      - name: Compose config is valid
+        run: |
+          cp deploy/.env.example deploy/.env
+          docker compose -f deploy/compose.yaml --env-file deploy/.env config >/dev/null
+          echo "compose config OK"
 
   format-check:
     runs-on: ubuntu-latest

@@ -9,8 +9,34 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/reporters/catch_reporter_event_listener.hpp>
+#include <catch2/reporters/catch_reporter_registrars.hpp>
 
 #include <rtc/rtc.hpp>
+
+namespace {
+
+// libdatachannel dispatches callbacks from a GLOBAL thread pool that outlives
+// any individual PeerConnection -- which is why rtc::Cleanup() returns a
+// future rather than being a destructor somewhere. Nothing was calling it, so
+// the pool was still holding queued work when the process began static
+// destruction, and a task then ran against torn-down globals.
+//
+// That is the crash this file spent three attempts chasing: a SEGV on a
+// callback thread AFTER Catch2 had printed "All tests passed", because ctest
+// runs each test as its own process and the fault was at exit, not in the
+// test. Draining the pool while main() is still on the stack removes the
+// window entirely, rather than narrowing it the way ordering fixes did
+// (failure moved from repeat 1 to 5 to 8 without ever going away).
+struct WebRtcCleanupListener : Catch::EventListenerBase {
+    using Catch::EventListenerBase::EventListenerBase;
+
+    void testRunEnded(const Catch::TestRunStats&) override { rtc::Cleanup().wait(); }
+};
+
+}  // namespace
+
+CATCH_REGISTER_LISTENER(WebRtcCleanupListener)
 
 // A real DataChannel connection, offerer and answerer in one process.
 //
@@ -60,7 +86,8 @@ rtc::binary binary_of(std::string_view text) {
 
 // The client half: a plain libdatachannel peer standing in for the browser.
 struct FakeClient {
-    rtc::PeerConnection connection;
+    // Everything the callbacks below touch. Declared BEFORE `connection`, and
+    // that order is load-bearing -- see the destructor.
     std::shared_ptr<rtc::DataChannel> reliable;
     std::shared_ptr<rtc::DataChannel> sequenced;
 
@@ -69,6 +96,20 @@ struct FakeClient {
     std::string offer;
     std::atomic<bool> offer_ready{false};
     std::vector<std::pair<std::string, std::string>> candidates;  // (candidate, mid)
+
+    // Declared LAST so it is destroyed FIRST.
+    //
+    // Destroying an rtc::PeerConnection is the only operation that waits for
+    // libdatachannel's callback threads -- resetCallbacks() unregisters, but a
+    // callback already dispatched keeps running. Since members die in reverse
+    // declaration order, putting the connection last means those threads are
+    // joined while `mutex`, `received` and `candidates` are still alive.
+    //
+    // With the connection declared first (its original position) the opposite
+    // happened, and a message in flight at teardown wrote into destroyed
+    // members: a segfault in roughly one run in ten, always after the last
+    // assertion had already passed.
+    rtc::PeerConnection connection;
 
     FakeClient() {
         connection.onLocalDescription([this](rtc::Description description) {
@@ -101,6 +142,22 @@ struct FakeClient {
         reliable->onMessage(on_message, [](rtc::string) {});
         sequenced->onMessage(on_message, [](rtc::string) {});
     }
+
+    // Unregister first, then let ~connection (which runs before every other
+    // member, per the declaration order above) join the callback threads.
+    //
+    // Both halves are needed. resetCallbacks() alone is not enough -- it does
+    // not wait for a callback that has already been dispatched, which is why
+    // adding it without also moving the connection only made the crash rarer
+    // (first repeat -> fifth) instead of fixing it.
+    ~FakeClient() {
+        reliable->resetCallbacks();
+        sequenced->resetCallbacks();
+        connection.resetCallbacks();
+    }
+
+    FakeClient(const FakeClient&) = delete;
+    FakeClient& operator=(const FakeClient&) = delete;
 
     bool open() const { return reliable->isOpen() && sequenced->isOpen(); }
 

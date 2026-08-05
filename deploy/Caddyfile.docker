@@ -13,18 +13,23 @@
 	# DNS record instead of answering an HTTP challenge, so only 443 has to
 	# be open -- and you can stop publishing 80 in compose.yaml.
 	#
-	# The stock caddy:2-alpine image does NOT contain the Cloudflare DNS
-	# module. Build one that does and point compose.yaml at it:
+	# yanzhenchen.ca is on Porkbun, so this is Porkbun's API, not
+	# Cloudflare's. The stock caddy:2-alpine image has NEITHER module. Build
+	# one and point compose.yaml at it:
 	#
 	#     FROM caddy:2-builder AS builder
-	#     RUN xcaddy build --with github.com/caddy-dns/cloudflare
+	#     RUN xcaddy build --with github.com/caddy-dns/porkbun
 	#     FROM caddy:2-alpine
 	#     COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 	#
-	# CF_API_TOKEN is passed through by compose from deploy/.env; scope it to
-	# Zone > DNS > Edit on this zone only.
+	# Porkbun issues a key/secret PAIR, and API access must be enabled per
+	# domain in their panel (Domain Management > Details > API Access).
+	# compose passes both through from deploy/.env.
 	#
 	# tls {
-	# 	dns cloudflare {env.CF_API_TOKEN}
+	# 	dns porkbun {
+	# 		api_key {env.PORKBUN_API_KEY}
+	# 		api_secret_key {env.PORKBUN_API_SECRET_KEY}
+	# 	}
 	# }
 }

@@ -429,11 +429,46 @@ sudo ufw allow 80/tcp      # path A only
 sudo ufw allow 7777/udp    # native players only
 ```
 
-**DNS.** Add an `A` record `fps.yanzhenchen.ca` → your public IP, in the
-Porkbun panel. Residential IPs rotate, so automate it: reuse the API key/secret
-from §3 B with `ddclient` (which supports Porkbun) or a cron one-liner against
-`api.porkbun.com/api/json/v3/dns/editByNameType`. Paths C and D need none of
-this — the tunnel keeps its own routing.
+**DNS.** Paths C and D need none of this — the tunnel keeps its own routing.
+For A and B, set the record up at Porkbun as follows.
+
+*Credentials* (Account → [API Access](https://porkbun.com/account/api)). Porkbun
+issues a **pair**: an API key `pk1_…` and a secret `sk1_…`, and the secret is
+shown exactly once.
+
+Then the step that is easy to miss and hard to diagnose: **API access is
+per-domain and off by default.** Domain Management → `yanzhenchen.ca` →
+Details → toggle **API ACCESS** on. Without it the keys are perfectly valid and
+every write to this zone is refused, which presents as a wrong-key error.
+
+Check both at once — this endpoint also reports your public IP, so it doubles
+as the value the `A` record needs:
+
+```sh
+curl -sX POST https://api.porkbun.com/api/json/v3/ping \
+  -H 'Content-Type: application/json' \
+  -d '{"apikey":"pk1_...","secretapikey":"sk1_..."}'
+```
+
+`{"status":"SUCCESS","yourIp":"..."}` means keys and toggle are both good. Run
+it **from the server**, or `yourIp` is whatever network you happened to be on.
+
+*The record.* Domain Management → `yanzhenchen.ca` → DNS → add:
+
+| Type | Host | Answer | TTL |
+|---|---|---|---|
+| `A` | `fps` | the `yourIp` from above | `600` |
+
+Host `fps` produces `fps.yanzhenchen.ca`. TTL 600 rather than the default,
+because a residential IP rotates and a stale record should expire quickly.
+Confirm with `dig +short fps.yanzhenchen.ca`.
+
+*Keeping it current.* Residential IPs change, so automate the update: reuse the
+same key/secret with `ddclient` (it has a Porkbun provider) or a cron one-liner
+against `api.porkbun.com/api/json/v3/dns/editByNameType`.
+
+Keep the pair in `deploy/.env` (gitignored) or the systemd drop-in from §3 B —
+never in the Caddyfile, which is world-readable in `/etc/caddy`.
 
 **Verify:**
 

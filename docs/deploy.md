@@ -463,9 +463,47 @@ Host `fps` produces `fps.yanzhenchen.ca`. TTL 600 rather than the default,
 because a residential IP rotates and a stale record should expire quickly.
 Confirm with `dig +short fps.yanzhenchen.ca`.
 
-*Keeping it current.* Residential IPs change, so automate the update: reuse the
-same key/secret with `ddclient` (it has a Porkbun provider) or a cron one-liner
-against `api.porkbun.com/api/json/v3/dns/editByNameType`.
+*Keeping it current.* Residential IPs change, and faster than you would
+guess — ours moved twice in one evening, once between writing the address down
+and creating the record. Automate it from the start rather than after the
+second confusing outage:
+
+```sh
+sudo install -d -m 0755 /etc/fps
+sudo install -m 0600 /dev/null /etc/fps/porkbun.env
+```
+
+Put the credentials and target in `/etc/fps/porkbun.env`:
+
+```sh
+PORKBUN_API_KEY=pk1_...
+PORKBUN_API_SECRET_KEY=sk1_...
+PORKBUN_DOMAIN=yanzhenchen.ca
+PORKBUN_SUBDOMAIN=fps
+PORKBUN_TTL=600
+```
+
+Check it before scheduling anything — `--dry-run` reads but never writes:
+
+```sh
+python3 tools/porkbun_ddns.py --env-file /etc/fps/porkbun.env --dry-run
+```
+
+Then install the timer (edit `ExecStart` in the unit if the repo is not at
+`/opt/fps`):
+
+```sh
+sudo cp deploy/porkbun-ddns.* /etc/systemd/system/
+sudo systemctl enable --now porkbun-ddns.timer
+```
+
+```sh
+systemctl list-timers porkbun-ddns.timer && journalctl -u porkbun-ddns -n 20
+```
+
+It runs every five minutes, learns the address from Porkbun's own `/ping`
+endpoint, and **only writes when the record actually differs** — so a stable
+IP costs one read per run and changes nothing.
 
 Keep the pair in `deploy/.env` (gitignored) or the systemd drop-in from §3 B —
 never in the Caddyfile, which is world-readable in `/etc/caddy`.

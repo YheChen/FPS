@@ -1,0 +1,28 @@
+# Runs porkbun-ddns.service on a schedule. See docs/deploy.md.
+#
+#     sudo cp deploy/porkbun-ddns.* /etc/systemd/system/
+#     sudo systemctl enable --now porkbun-ddns.timer
+#     systemctl list-timers porkbun-ddns.timer
+
+[Unit]
+Description=Refresh the Porkbun A record periodically
+Documentation=https://github.com/YheChen/FPS/blob/main/docs/deploy.md
+
+[Timer]
+# Soon after boot, because a reboot is one of the moments an ISP hands out a
+# different address.
+OnBootSec=1min
+
+# Five minutes is not aggressive: the script reads the record first and only
+# writes when it actually differs, so a stable IP costs one API call per run
+# and changes nothing. The record's TTL is 600, so this bounds the stale
+# window at roughly the TTL rather than the lease.
+OnUnitActiveSec=5min
+
+# If the machine was asleep or off through a scheduled run, catch up rather
+# than waiting for the next slot -- that gap is exactly when the address is
+# most likely to have moved.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

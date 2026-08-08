@@ -1,0 +1,45 @@
+# Points the A record at this host's current public IP. See docs/deploy.md.
+#
+# Paired with porkbun-ddns.timer -- this unit is oneshot and does nothing on
+# its own. Install both:
+#     sudo cp deploy/porkbun-ddns.* /etc/systemd/system/
+#     sudo systemctl enable --now porkbun-ddns.timer
+#
+# Adjust ExecStart if the repo is not at /opt/fps (the Docker instructions
+# clone to ~/fps).
+
+[Unit]
+Description=Update the Porkbun A record with this host's public IP
+Documentation=https://github.com/YheChen/FPS/blob/main/docs/deploy.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# Credentials live here, not in the unit -- units are world-readable.
+#     sudo install -d -m 0755 /etc/fps
+#     sudo install -m 0600 /dev/null /etc/fps/porkbun.env
+# then put PORKBUN_API_KEY / PORKBUN_API_SECRET_KEY / PORKBUN_DOMAIN /
+# PORKBUN_SUBDOMAIN in it.
+EnvironmentFile=/etc/fps/porkbun.env
+
+ExecStart=/usr/bin/python3 /opt/fps/tools/porkbun_ddns.py
+
+# It makes one HTTPS call and maybe a second. Nothing else is warranted.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM

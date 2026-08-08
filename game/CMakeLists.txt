@@ -63,6 +63,16 @@ if(EMSCRIPTEN)
     endif()
     # Emit fps_client.html (+ .js, .wasm, .data).
     set_target_properties(fps_client PROPERTIES SUFFIX ".html")
+
+    # The favicon is a real HTTP request, so it cannot ride in the --preload-file
+    # bundle (that is a virtual filesystem inside the wasm module, invisible to
+    # the browser's tab chrome). It has to sit next to the .html as a plain file.
+    add_custom_command(TARGET fps_client POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_SOURCE_DIR}/web/favicon.ico"
+                "$<TARGET_FILE_DIR:fps_client>/favicon.ico"
+        COMMENT "Copying favicon.ico next to the client"
+        VERBATIM)
 endif()
 
 endif()  # FPS_BUILD_CLIENT

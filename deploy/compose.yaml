@@ -52,10 +52,11 @@ services:
       # is a listener you are not using.
       - "80:80"
     environment:
-      # Consumed by the Caddyfile. CF_API_TOKEN is only read on the DNS-01
-      # path and is otherwise unset.
+      # Consumed by the Caddyfile. The Porkbun pair is only read on the
+      # DNS-01 path and is otherwise unset.
       FPS_DOMAIN: "${FPS_DOMAIN:?set FPS_DOMAIN in deploy/.env}"
-      CF_API_TOKEN: "${CF_API_TOKEN:-}"
+      PORKBUN_API_KEY: "${PORKBUN_API_KEY:-}"
+      PORKBUN_API_SECRET_KEY: "${PORKBUN_API_SECRET_KEY:-}"
     volumes:
       # :z relabels for SELinux, which is enforcing on Fedora. Without it the
       # container gets permission denied on a bind mount and the cause is not

@@ -20,15 +20,19 @@ fps.yanzhenchen.ca {
 	# DNS record instead of answering an HTTP challenge, so only 443 ever has
 	# to be open.
 	#
-	# Needs a Caddy built with the Cloudflare DNS module -- the packaged
-	# binary does NOT include it:
-	#     xcaddy build --with github.com/caddy-dns/cloudflare
+	# yanzhenchen.ca is on Porkbun, so this is Porkbun's API -- not
+	# Cloudflare's. The packaged Caddy binary contains NEITHER; build one:
+	#     xcaddy build --with github.com/caddy-dns/porkbun
 	#
-	# CF_API_TOKEN comes from a systemd drop-in rather than from this file, so
-	# the token is not sitting world-readable in /etc/caddy. Scope it to
-	# Zone > DNS > Edit on this zone only.
+	# Porkbun issues a key/secret PAIR, and API access must be enabled per
+	# domain in their panel (Domain Management > Details > API Access).
+	# Both values come from a systemd drop-in rather than from this file, so
+	# they are not world-readable in /etc/caddy.
 	#
 	# tls {
-	# 	dns cloudflare {env.CF_API_TOKEN}
+	# 	dns porkbun {
+	# 		api_key {env.PORKBUN_API_KEY}
+	# 		api_secret_key {env.PORKBUN_API_SECRET_KEY}
+	# 	}
 	# }
 }

@@ -72,10 +72,15 @@ Commands below are given for **Fedora** (`dnf`, `firewalld`, SELinux) with the
 Debian/Ubuntu equivalent alongside. The `deploy-build` CI job builds the server
 in both a `fedora` and an `ubuntu:24.04` container, so neither set is guesswork.
 
-**DNS:** if the nameservers say `cloudflare.com`, you can use the DNS-01
-certificate path (§3 B) and Cloudflare's API for dynamic DNS (§4), and you
-never need inbound port 80. If they say something else, you are on the HTTP-01
-path (§3 A) and need port 80 reachable.
+**DNS:** `yanzhenchen.ca` answers with `*.ns.porkbun.com`, so the zone lives
+at **Porkbun**. That decides two things: the DNS-01 path (§3 B) uses Porkbun's
+API module, not Cloudflare's, and dynamic DNS (§4) uses Porkbun's API too.
+Porkbun's API has to be enabled per domain in their panel before either works.
+
+Whoever serves your zone, the same rule holds: the DNS-01 module must match
+them, and there is no module that works for "whatever provider". Check with
+`dig +short NS <domain>` rather than assuming from where you bought it —
+registrar and DNS host are often different.
 
 ---
 
@@ -224,7 +229,7 @@ as shown. **D needs neither** — it replaces Caddy entirely.
 | Path | Needs inbound | Works behind CGNAT | Your own domain |
 |---|---|---|---|
 | **A** HTTP-01 | 80 + 443 | no | yes |
-| **B** DNS-01 via Cloudflare | 443 | no | yes |
+| **B** DNS-01 via Porkbun | 443 | no | yes |
 | **C** Cloudflare Tunnel | nothing | **yes** | yes |
 | **D** Tailscale Funnel | nothing | **yes** | no — a `ts.net` name |
 
@@ -264,40 +269,56 @@ Forward **TCP 80 and 443** on the router to the T14 (§4).
 Many residential ISPs block inbound 80. If Caddy's log shows the ACME
 challenge timing out, that is what happened — switch to **B**.
 
-### B. DNS-01 via Cloudflare (port 80 blocked, or you just prefer it)
+### B. DNS-01 via Porkbun (port 80 blocked, or you just prefer it)
 
 Caddy proves domain control by writing a DNS record instead of answering on
-port 80, so **only 443 ever needs to be open**. Stock Caddy cannot do this;
-the Cloudflare DNS module is not compiled in. Build one that has it:
+port 80, so **only 443 ever needs to be open**.
+
+The provider has to match wherever the zone actually lives. `yanzhenchen.ca`
+is on **Porkbun** (`dig +short NS yanzhenchen.ca` → `*.ns.porkbun.com`), so
+that is the module to build. Stock Caddy has no DNS modules compiled in at
+all:
 
 ```sh
 sudo dnf install -y golang          # Debian/Ubuntu: sudo apt install -y golang-go
 go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
-~/go/bin/xcaddy build --with github.com/caddy-dns/cloudflare
+~/go/bin/xcaddy build --with github.com/caddy-dns/porkbun
 sudo install -m 0755 ./caddy /usr/bin/caddy      # replaces the packaged binary
 sudo restorecon -v /usr/bin/caddy                # Fedora: relabel for SELinux
-caddy list-modules | grep dns.providers.cloudflare
+caddy list-modules | grep dns.providers.porkbun
 ```
+
+Take a recent version of the module: Porkbun moved their API hostname, and
+builds before `v0.20` stopped working when the old endpoint was retired.
 
 The `restorecon` matters on Fedora: overwriting a packaged binary can leave it
 with the wrong SELinux label, and the failure mode is a permission denial that
 looks nothing like a labelling problem.
 
-Create a Cloudflare API token (dashboard → My Profile → API Tokens) with
-**Zone → DNS → Edit** on `yanzhenchen.ca` only. Keep it out of the Caddyfile:
+Porkbun issues a **pair** of credentials, not a single token — and API access
+must be switched on **per domain** in their panel (Domain Management →
+Details → API Access). Miss that toggle and the keys are valid while the zone
+still refuses updates, which reads exactly like a wrong key. Get them from
+Account → API Access, then keep them out of the Caddyfile:
 
 ```sh
 sudo mkdir -p /etc/systemd/system/caddy.service.d
-sudo tee /etc/systemd/system/caddy.service.d/10-cloudflare.conf <<'EOF'
+sudo tee /etc/systemd/system/caddy.service.d/10-porkbun.conf <<'EOF'
 [Service]
-Environment=CF_API_TOKEN=paste-the-token-here
+Environment=PORKBUN_API_KEY=pk1_...
+Environment=PORKBUN_API_SECRET_KEY=sk1_...
 EOF
-sudo chmod 600 /etc/systemd/system/caddy.service.d/10-cloudflare.conf
+sudo chmod 600 /etc/systemd/system/caddy.service.d/10-porkbun.conf
 sudo systemctl daemon-reload
 ```
 
 Then use the DNS-01 stanza in [`deploy/Caddyfile`](../deploy/Caddyfile) —
 uncomment the `tls` block — and `sudo systemctl restart caddy`.
+
+(On the Docker path the same block lives in
+[`deploy/Caddyfile.docker`](../deploy/Caddyfile.docker), the credentials go in
+`deploy/.env`, and the `caddy:2-alpine` image needs rebuilding with the module
+— the Caddyfile comment has the three-line Dockerfile for it.)
 
 Forward **TCP 443** only.
 
@@ -307,6 +328,13 @@ If your public IP differs from the router's WAN IP, no inbound port can reach
 you. A tunnel dials *out* from the T14 and Cloudflare accepts connections on
 its edge, so **nothing needs forwarding and Caddy is not needed at all** —
 Cloudflare terminates TLS.
+
+**This one has a prerequisite the others do not.** Cloudflare will only route
+a hostname in a zone it serves, and `yanzhenchen.ca` is on Porkbun — so you
+would first have to move the nameservers to Cloudflare (free, but it is a
+change to your whole domain, not just this subdomain, and it takes time to
+propagate). If you are behind CGNAT and do not want to move DNS, **path D is
+the same idea without that cost**.
 
 ```sh
 # cloudflared: Cloudflare publishes an RPM repo for Fedora and a deb repo for
@@ -401,11 +429,84 @@ sudo ufw allow 80/tcp      # path A only
 sudo ufw allow 7777/udp    # native players only
 ```
 
-**DNS.** Add an `A` record `fps.yanzhenchen.ca` → your public IP. Residential
-IPs rotate, so automate it. On Cloudflare, reuse the token from §3 B with
-`ddclient` or a cron one-liner against their API; otherwise use DuckDNS and
-point the Caddyfile at the DuckDNS name instead. Path C needs none of this —
-the tunnel handles it.
+**DNS.** Paths C and D need none of this — the tunnel keeps its own routing.
+For A and B, set the record up at Porkbun as follows.
+
+*Credentials* (Account → [API Access](https://porkbun.com/account/api)). Porkbun
+issues a **pair**: an API key `pk1_…` and a secret `sk1_…`, and the secret is
+shown exactly once.
+
+Then the step that is easy to miss and hard to diagnose: **API access is
+per-domain and off by default.** Domain Management → `yanzhenchen.ca` →
+Details → toggle **API ACCESS** on. Without it the keys are perfectly valid and
+every write to this zone is refused, which presents as a wrong-key error.
+
+Check both at once — this endpoint also reports your public IP, so it doubles
+as the value the `A` record needs:
+
+```sh
+curl -sX POST https://api.porkbun.com/api/json/v3/ping \
+  -H 'Content-Type: application/json' \
+  -d '{"apikey":"pk1_...","secretapikey":"sk1_..."}'
+```
+
+`{"status":"SUCCESS","yourIp":"..."}` means keys and toggle are both good. Run
+it **from the server**, or `yourIp` is whatever network you happened to be on.
+
+*The record.* Domain Management → `yanzhenchen.ca` → DNS → add:
+
+| Type | Host | Answer | TTL |
+|---|---|---|---|
+| `A` | `fps` | the `yourIp` from above | `600` |
+
+Host `fps` produces `fps.yanzhenchen.ca`. TTL 600 rather than the default,
+because a residential IP rotates and a stale record should expire quickly.
+Confirm with `dig +short fps.yanzhenchen.ca`.
+
+*Keeping it current.* Residential IPs change, and faster than you would
+guess — ours moved twice in one evening, once between writing the address down
+and creating the record. Automate it from the start rather than after the
+second confusing outage:
+
+```sh
+sudo install -d -m 0755 /etc/fps
+sudo install -m 0600 /dev/null /etc/fps/porkbun.env
+```
+
+Put the credentials and target in `/etc/fps/porkbun.env`:
+
+```sh
+PORKBUN_API_KEY=pk1_...
+PORKBUN_API_SECRET_KEY=sk1_...
+PORKBUN_DOMAIN=yanzhenchen.ca
+PORKBUN_SUBDOMAIN=fps
+PORKBUN_TTL=600
+```
+
+Check it before scheduling anything — `--dry-run` reads but never writes:
+
+```sh
+python3 tools/porkbun_ddns.py --env-file /etc/fps/porkbun.env --dry-run
+```
+
+Then install the timer (edit `ExecStart` in the unit if the repo is not at
+`/opt/fps`):
+
+```sh
+sudo cp deploy/porkbun-ddns.* /etc/systemd/system/
+sudo systemctl enable --now porkbun-ddns.timer
+```
+
+```sh
+systemctl list-timers porkbun-ddns.timer && journalctl -u porkbun-ddns -n 20
+```
+
+It runs every five minutes, learns the address from Porkbun's own `/ping`
+endpoint, and **only writes when the record actually differs** — so a stable
+IP costs one read per run and changes nothing.
+
+Keep the pair in `deploy/.env` (gitignored) or the systemd drop-in from §3 B —
+never in the Caddyfile, which is world-readable in `/etc/caddy`.
 
 **Verify:**
 

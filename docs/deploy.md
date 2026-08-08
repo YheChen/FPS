@@ -9,16 +9,36 @@ Two pieces (see [ADR 0005](decisions/0005-web-client.md)):
   alternative.
 
 ```
-browser ──https──▶ Vercel (static .wasm/.js/.data)
+browser ──https://fps.yanzhenchen.ca──▶ Vercel (static .wasm/.js/.data)
    │
-   └──wss://fps.yanzhenchen.ca──▶ Caddy (TLS) ──ws://server:7778──▶ fps_server
-                                  └───────── docker compose ─────────┘
+   └──wss://fps-server.yanzhenchen.ca──▶ Caddy (TLS) ──ws://server:7778──▶ fps_server
+                                        └───────── docker compose ─────────┘
 ```
 
-Why split it this way rather than serve both from the T14: Vercel gives the
-page HTTPS and a CDN for free, so the T14 needs exactly **one** inbound port.
-It also fails cleanly — if the T14 is off, the page still loads and reports a
-connection error instead of not loading at all.
+**Two hostnames, and mixing them up is the likeliest way to break this:**
+
+| Name | DNS record | Points at | Serves |
+|---|---|---|---|
+| `fps.yanzhenchen.ca` | `CNAME` → Vercel | Vercel's CDN | the client — this is the link you share |
+| `fps-server.yanzhenchen.ca` | `A` → your public IP | the T14 | the game server, `wss://` only |
+
+Consequences worth internalising:
+
+- **`fps-server` in a browser returns 502, and that is correct.** It speaks the
+  WebSocket upgrade and nothing else; a plain `GET /` gets refused. Scanners
+  will hit it constantly and fill the Caddy log with 502s. Not a fault.
+- **Only `fps-server` is dynamic.** The DDNS timer (§4) must maintain that
+  record. Point it at `fps` and it will replace the Vercel CNAME with an A
+  record for your house, every five minutes.
+- **The server hostname is compiled into the client.** `FPS_WEB_SERVER_URL` is
+  a build-time define, not runtime config, so renaming the server means
+  rebuilding and redeploying the client — see §5.
+
+Why split it at all rather than serve both from the T14: Vercel gives the page
+HTTPS and a CDN for free, so the T14 needs exactly **one** inbound port and
+never serves a byte of static content. It also fails cleanly — if the T14 is
+off, the page still loads and reports a connection error instead of not
+loading at all.
 
 Why the proxy: a page served over HTTPS may only open secure (`wss://`)
 WebSockets, and a certificate authority needs a domain, not a bare IP. Caddy
@@ -236,7 +256,7 @@ as shown. **D needs neither** — it replaces Caddy entirely.
 **Start with D if you just want it working.** Tailscale is already installed
 on this machine, the certificate is automatic, nothing is forwarded, and it
 does not care whether you are behind CGNAT. The cost is the hostname: players
-get `https://<machine>.<tailnet>.ts.net` rather than `fps.yanzhenchen.ca`. For
+get `https://<machine>.<tailnet>.ts.net` rather than `fps-server.yanzhenchen.ca`. For
 a deathmatch you share a link to, that is usually a fine trade — and moving to
 A/B/C later is a config change, not a rebuild, as long as you rebuild the web
 client with the new `FPS_WEB_SERVER_URL`.
@@ -342,7 +362,7 @@ the same idea without that cost**.
 sudo dnf install -y cloudflared
 cloudflared tunnel login
 cloudflared tunnel create fps
-cloudflared tunnel route dns fps fps.yanzhenchen.ca
+cloudflared tunnel route dns fps fps-server.yanzhenchen.ca
 ```
 
 Point the tunnel at the plain WebSocket server:
@@ -352,7 +372,7 @@ Point the tunnel at the plain WebSocket server:
 tunnel: fps
 credentials-file: /root/.cloudflared/<tunnel-id>.json
 ingress:
-  - hostname: fps.yanzhenchen.ca
+  - hostname: fps-server.yanzhenchen.ca
     service: ws://localhost:7778
   - service: http_status:404
 ```
@@ -459,9 +479,9 @@ it **from the server**, or `yourIp` is whatever network you happened to be on.
 |---|---|---|---|
 | `A` | `fps` | the `yourIp` from above | `600` |
 
-Host `fps` produces `fps.yanzhenchen.ca`. TTL 600 rather than the default,
+Host `fps` produces `fps-server.yanzhenchen.ca`. TTL 600 rather than the default,
 because a residential IP rotates and a stale record should expire quickly.
-Confirm with `dig +short fps.yanzhenchen.ca`.
+Confirm with `dig +short fps-server.yanzhenchen.ca`.
 
 *Keeping it current.* Residential IPs change, and faster than you would
 guess — ours moved twice in one evening, once between writing the address down
@@ -479,7 +499,7 @@ Put the credentials and target in `/etc/fps/porkbun.env`:
 PORKBUN_API_KEY=pk1_...
 PORKBUN_API_SECRET_KEY=sk1_...
 PORKBUN_DOMAIN=yanzhenchen.ca
-PORKBUN_SUBDOMAIN=fps
+PORKBUN_SUBDOMAIN=fps-server
 PORKBUN_TTL=600
 ```
 
@@ -511,7 +531,7 @@ never in the Caddyfile, which is world-readable in `/etc/caddy`.
 **Verify:**
 
 ```sh
-curl -I https://fps.yanzhenchen.ca     # valid cert, a Caddy or Cloudflare response
+curl -I https://fps-server.yanzhenchen.ca     # valid cert, a Caddy or Cloudflare response
 ```
 
 ### If something is denied for no visible reason (Fedora)
@@ -540,7 +560,7 @@ default, then deploy the static output.
 
 ```sh
 source ~/emsdk/emsdk_env.sh
-FPS_WEB_SERVER_URL=wss://fps.yanzhenchen.ca scripts/build_web.sh
+FPS_WEB_SERVER_URL=wss://fps-server.yanzhenchen.ca scripts/build_web.sh
 # outputs build/web/game/{fps_client.html,.js,.wasm,.data} + vercel.json
 
 npm i -g vercel            # once
@@ -548,14 +568,32 @@ cd build/web/game
 vercel --prod              # first run links/creates the project
 ```
 
-Vercel serves `.wasm` as `application/wasm` automatically; `vercel.json` maps
-`/` to the client and long-caches the immutable `.wasm/.data/.js`. The result
-is a `https://<project>.vercel.app` URL (or attach a custom domain in the
-dashboard). Opening it connects straight to the T14 — no download, no IP to
-type.
+Vercel serves `.wasm` as `application/wasm` automatically, and `vercel.json`
+maps `/` to the client. The result is a `https://<project>.vercel.app` URL.
+Opening it connects straight to the T14 — no download, no IP to type.
 
-Rebuild after changes by re-running the two commands above. The `.data` bundle
-embeds `assets/`, so rebuild whenever assets change.
+**Do not connect the git repository to the Vercel project.** Vercel would try
+to build on every push and fail: it has no Emscripten toolchain, the client
+takes minutes of C++ to compile, and `build/` is gitignored so the artifacts
+are not in the repo at all. What the commands above do is upload an
+already-built output; Vercel is pure static hosting here.
+
+*Custom domain.* Vercel dashboard → Project → Settings → Domains → add
+`fps.yanzhenchen.ca`, then create the `CNAME` it asks for at Porkbun. If that
+name currently has an `A` record pointing at your house, **delete it first** —
+DNS does not permit a name to hold both a CNAME and an A record.
+
+*Caching.* `vercel.json` sets `max-age=0, must-revalidate` on
+`.wasm/.data/.js`. That looks wasteful and is deliberate: the filenames never
+change between builds, so the `immutable` caching this used to carry meant a
+returning player kept a stale client forever — including one compiled against
+a hostname that no longer exists. Revalidation costs a 304 when nothing
+changed. If you ever content-hash the filenames, put the long cache back.
+
+Rebuild after changes by re-running the two commands above, **including
+`FPS_WEB_SERVER_URL`** — it is compiled in, so omitting it silently ships a
+client pointing at `ws://localhost:7778`. The `.data` bundle embeds `assets/`,
+so rebuild whenever assets change.
 
 ## 6. End-to-end check
 
@@ -563,7 +601,7 @@ Before sharing the URL, prove the whole chain rather than each piece:
 
 ```sh
 # On the T14: is the game protocol really reachable through TLS?
-python3 tools/ws_smoke.py fps.yanzhenchen.ca 443
+python3 tools/ws_smoke.py fps-server.yanzhenchen.ca 443
 ```
 
 That speaks the real handshake and expects a `ServerWelcome` back. Then open

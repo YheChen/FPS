@@ -2,7 +2,7 @@
 #
 # Caddy terminates TLS (auto-provisioning a Let's Encrypt certificate) and
 # transparently proxies the WebSocket upgrade to the plain ws:// game server
-# on localhost. The browser client connects to wss://fps.yanzhenchen.ca; the
+# on localhost. The browser client connects to wss://fps-server.yanzhenchen.ca; the
 # C++ server never needs to know about TLS.
 #
 # Requires: a DNS A/AAAA record for the domain pointing at this host, and
@@ -11,7 +11,7 @@
 #
 # Install: sudo cp deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
 
-fps.yanzhenchen.ca {
+fps-server.yanzhenchen.ca {
 	reverse_proxy localhost:7778
 
 	# --- DNS-01 certificates (docs/deploy.md, TLS path B) -----------------

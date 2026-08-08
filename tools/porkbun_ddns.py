@@ -11,11 +11,18 @@ extra trust, and the credentials are already at hand.
 Only writes when the record actually differs, so it is safe to run every few
 minutes -- Porkbun rate-limits, and a no-op update still counts.
 
+Point this at the record for the SERVER, never at one that is a CNAME
+somewhere else. It writes an A record, so aiming it at a name delegated to a
+host provider would replace that delegation with this machine's address --
+and then do it again every five minutes, which reads as an intermittent
+outage rather than a misconfiguration. In this deployment that means
+`fps-server`, not `fps`: the latter is a CNAME to Vercel serving the client.
+
 Environment (or --env-file, which is what the systemd unit uses):
     PORKBUN_API_KEY         pk1_...
     PORKBUN_API_SECRET_KEY  sk1_...
     PORKBUN_DOMAIN          yanzhenchen.ca
-    PORKBUN_SUBDOMAIN       fps          ("" for the bare domain)
+    PORKBUN_SUBDOMAIN       fps-server   ("" for the bare domain)
     PORKBUN_TTL             600
 
 Exit codes: 0 changed or already correct, 1 failed.

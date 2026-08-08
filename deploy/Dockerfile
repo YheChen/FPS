@@ -14,11 +14,21 @@ RUN dnf install -y git cmake ninja-build gcc-c++ make ca-certificates \
 WORKDIR /src
 COPY . .
 
+# Bounded on purpose. A bare `--parallel` uses every hardware thread, and
+# Jolt's template-heavy translation units want ~1 GB each under GCC -- so on a
+# 12-thread laptop the build asks for more memory than the machine has and the
+# OOM killer takes cc1plus, and sometimes sshd with it. Four jobs peaks around
+# 4-6 GB and still finished this build in 105 s where the unbounded version
+# died after 10 minutes.
+#
+# Raise it with --build-arg BUILD_JOBS=8 on a machine with memory to spare.
+ARG BUILD_JOBS=4
+
 # FPS_BUILD_CLIENT=OFF is required, not merely tidy: SDL3's CMake hard-errors
 # during CONFIGURE when no X11/Wayland development libraries are present, even
 # though fps_server never links it. See docs/deploy.md.
 RUN cmake --preset release -DFPS_BUILD_CLIENT=OFF -DFPS_BUILD_TESTS=OFF \
-    && cmake --build --preset release --target fps_server --parallel
+    && cmake --build --preset release --target fps_server --parallel "${BUILD_JOBS}"
 
 # --- runtime ----------------------------------------------------------------
 FROM fedora:latest

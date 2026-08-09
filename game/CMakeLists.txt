@@ -8,6 +8,7 @@ add_library(game_shared STATIC
     shared/input_command.h
     shared/interpolation.cpp
     shared/interpolation.h
+    shared/player_color.h
     shared/player_movement.cpp
     shared/player_movement.h
     shared/prediction.cpp

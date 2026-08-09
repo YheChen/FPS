@@ -118,6 +118,8 @@ add_library(engine_platform STATIC
     rendering/shader.h
     rendering/shadow_map.cpp
     rendering/shadow_map.h
+    rendering/sky.cpp
+    rendering/sky.h
     rendering/texture.cpp
     rendering/texture.h
 )

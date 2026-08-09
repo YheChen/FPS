@@ -20,6 +20,7 @@
 #include "engine/physics/character_controller.h"
 #include "engine/physics/physics_world.h"
 #include "game/server/server_game.h"
+#include "game/shared/bot.h"
 #include "game/shared/player_movement.h"
 #include "game/shared/replay.h"
 #include "game/shared/weapon.h"
@@ -32,10 +33,11 @@ struct ServerArgs {
     bool enet = true;                      // --no-enet to run WS-only
     std::optional<double> run_seconds;
     bool verbose = false;
-    std::optional<std::string> record_path;  // --record: write a replay
-    std::optional<std::string> replay_path;  // --replay: re-simulate one and exit
-    int bots = 0;                            // --bots N: fill N slots with AI
-    std::string map = "maps/arena01.glb";    // --map: which arena to host
+    std::optional<std::string> record_path;             // --record: write a replay
+    std::optional<std::string> replay_path;             // --replay: re-simulate one and exit
+    int bots = 0;                                       // --bots N: fill N slots with AI
+    std::string map = "maps/arena01.glb";               // --map: which arena to host
+    game::BotSkill bot_skill = game::BotSkill::Normal;  // --bot-skill
 };
 
 ServerArgs parse_args(int argc, char** argv) {
@@ -93,6 +95,15 @@ ServerArgs parse_args(int argc, char** argv) {
         } else if (arg == "--map") {
             if (const auto value = next_value()) {
                 args.map = std::string{*value};
+            }
+        } else if (arg == "--bot-skill") {
+            if (const auto value = next_value()) {
+                if (const auto skill = game::bot_skill_from_name(*value)) {
+                    args.bot_skill = *skill;
+                } else {
+                    eng::log::warn("Unknown --bot-skill '{}'; keeping {}", *value,
+                                   game::bot_skill_name(args.bot_skill));
+                }
             }
         } else if (arg == "--verbose") {
             args.verbose = true;
@@ -257,6 +268,10 @@ int main(int argc, char** argv) {
     eng::CompositeTransport net{std::move(transports)};
 
     game::ServerGame server{std::move(collision), std::move(spawns), map_path, std::move(arsenal)};
+    server.set_bot_config(game::bot_config_for(args.bot_skill));
+    if (args.bots > 0) {
+        eng::log::info("Bot skill: {}", game::bot_skill_name(args.bot_skill));
+    }
     if (args.record_path) {
         server.start_recording(*args.record_path);
     }

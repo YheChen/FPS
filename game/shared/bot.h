@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
+#include <string_view>
 
 #include <glm/glm.hpp>
 
@@ -20,16 +22,63 @@
 namespace game {
 
 struct BotConfig {
-    float turn_speed = 5.0f;           // radians/sec toward the aim point
+    float turn_speed = 3.2f;           // radians/sec toward the aim point
     float sight_range = 45.0f;         // metres
-    float fire_cone_radians = 0.10f;   // only shoots when aim is this close
+    float fire_cone_radians = 0.06f;   // only shoots when aim is this close
     float preferred_range = 11.0f;     // backs off when nearer than this
     float engage_range = 26.0f;        // closes when further than this
     float strafe_seconds = 1.6f;       // between strafe direction flips
     float wander_seconds = 2.8f;       // between idle heading changes
     float jump_chance = 0.010f;        // per tick while engaging
     float wall_avoid_distance = 2.2f;  // turns away inside this
+
+    // --- the three things that make a bot beatable -----------------------
+    //
+    // Without these a bot's aim converges on its target and then STAYS there,
+    // exactly, forever, however the target moves. `turn_speed` bounds how
+    // fast it gets on target; nothing bounded how well it held. Steady-state
+    // error was zero, which is not a hard opponent so much as an impossible
+    // one.
+
+    // Seconds a target must be continuously visible before the bot reacts to
+    // it at all -- no turning, no firing. Human reaction to an unexpected
+    // visual stimulus is roughly 0.2-0.3 s, and a bot without any is the
+    // single most inhuman thing about it.
+    float reaction_seconds = 0.40f;
+
+    // Peak angular aim error, radians. This is an ANGLE, so the linear miss
+    // it produces grows with distance -- which is what makes long shots
+    // genuinely unreliable while a point-blank fight stays deadly. 0.085 rad
+    // is about 1.7 m of sway at 20 m, against a capsule 0.4 m in radius.
+    float aim_error_radians = 0.085f;
+
+    // How fast that error wanders. Slow on purpose: fast jitter would average
+    // back onto the target across a burst and read as a twitch, where a slow
+    // sway makes whole bursts miss the way a real player's do.
+    float aim_drift_hz = 0.55f;
+
+    // Trigger discipline, and the one that actually decides how lethal a bot
+    // is. The rifle fires 600 rpm for 25 damage against 100 health, so a held
+    // trigger kills in 0.4 s of hits -- at which point aim error only changes
+    // how long "a moment" is, not the outcome. A bot that held the trigger
+    // from first sight until someone died was never really an aiming problem.
+    //
+    // These also give a human the thing they actually need, which is a gap:
+    // time to break line of sight, close, or shoot back.
+    float burst_seconds = 0.24f;        // ~2-3 rounds from the rifle
+    float burst_pause_seconds = 0.90f;  // then off the trigger
 };
+
+// Presets, so difficulty is a launch flag rather than a recompile.
+//
+// `Deadly` is the pre-existing behaviour -- zero reaction time, zero aim
+// error -- kept because it is the useful control case when measuring whether
+// a change to movement or hit detection made bots better or worse.
+enum class BotSkill : std::uint8_t { Easy, Normal, Hard, Deadly };
+
+BotConfig bot_config_for(BotSkill skill);
+const char* bot_skill_name(BotSkill skill);
+std::optional<BotSkill> bot_skill_from_name(std::string_view name);
 
 // Everything a bot can perceive this tick. Explicit rather than a pointer to
 // the world, so `decide` stays pure and a test can hand it any situation.
@@ -57,6 +106,20 @@ struct BotState {
     float wander_yaw = 0.0f;
     float aim_yaw = 0.0f;
     float aim_pitch = 0.0f;
+    // Accumulated seconds, driving the aim wander. A continuous time base is
+    // what lets the error be smooth; the per-tick `seed` cannot provide one.
+    float aim_time = 0.0f;
+    // Fixed once per bot, so two bots sharing a config do not sway in
+    // lockstep and read as one opponent duplicated.
+    float aim_phase = 0.0f;
+    // How long the current target has been continuously visible, for the
+    // reaction delay. Held (not reset) while a known target is behind cover:
+    // the bot already knows it is there, and re-reacting on every flicker of
+    // line-of-sight would be its own artefact.
+    float target_seen_seconds = 0.0f;
+    // Trigger discipline: seconds left in the current burst or pause.
+    float burst_timer = 0.0f;
+    bool bursting = false;
     bool initialized = false;
 };
 

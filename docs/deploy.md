@@ -664,6 +664,16 @@ Nobody decided that. It is what happens when shipping depends on remembering.
 `tools/server_autodeploy.sh` closes it. A timer on the T14 asks GitHub whether
 `main` moved, and if so rebuilds and restarts.
 
+The script has to be installed to `/opt`, **not** run from the clone. On an
+SELinux host — which Fedora is, enforcing — a file under `/home` carries
+`user_home_t`, and systemd is not permitted to execute that. Pointing
+`ExecStart` into the repo fails with `203/EXEC` and a bare "Permission
+denied" that names no cause and looks like a file mode:
+
+```bash
+sudo install -D -m 0755 tools/server_autodeploy.sh /opt/fps/tools/server_autodeploy.sh
+```
+
 ```bash
 sudo cp deploy/fps-autodeploy.* /etc/systemd/system/
 ```
@@ -726,6 +736,10 @@ Which is correct — the Vercel secrets are not set, so no client has been
 published, so nothing can vouch for protocol 5. **The guard will keep refusing
 M29 until the client pipeline works.** `--force` skips it; the only good reason
 is a server-only rollback.
+
+The unit sets `SuccessExitStatus=2` so a refusal does not leave it `failed`.
+Refusing is the *expected* answer for as long as the client lags, and a unit
+permanently red is a unit nobody reads.
 
 Other refusals, both deliberate:
 

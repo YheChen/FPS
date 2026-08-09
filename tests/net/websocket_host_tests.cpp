@@ -5,6 +5,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -111,6 +112,22 @@ std::vector<std::uint8_t> masked_frame_with_declared_length(std::uint64_t declar
         frame.push_back(static_cast<std::uint8_t>(0x00 ^ mask[i % 4]));
     }
     return frame;
+}
+
+// Pumps the host until a peer is announced as connected, or gives up.
+bool poll_until_connected(eng::WebSocketHost& host, int attempts = 400) {
+    std::vector<eng::NetEvent> events;
+    for (int i = 0; i < attempts; ++i) {
+        events.clear();
+        host.poll(events);
+        for (const eng::NetEvent& event : events) {
+            if (event.type == eng::NetEvent::Type::Connected) {
+                return true;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return false;
 }
 
 // Pumps the host until it reports the peer gone, or gives up.
@@ -223,6 +240,122 @@ TEST_CASE("an unterminated message is cut off before it exhausts memory", "[webs
 
     CHECK((disconnected || poll_until_disconnected(*host)));
     CHECK(host->peer_count() == 0);
+}
+
+// Every other hostile-input check here concerns a peer that has upgraded. This
+// one concerns a peer that never does: it costs an attacker one TCP connection
+// and no valid protocol at all, and `max_peers` of them lock out every real
+// player for as long as the sockets stay open. On a public server that is the
+// cheapest denial of service available.
+TEST_CASE("un-upgraded connections are reaped so they cannot hold every slot", "[websocket]") {
+    constexpr std::uint16_t kPort = 47813;
+    constexpr std::size_t kMaxPeers = 4;
+    // Generous on purpose. The assertions before the sleep require the idle
+    // peers to still be here, so a deadline short enough to expire during a
+    // scheduling stall on a loaded runner would fail for the wrong reason.
+    constexpr auto kTimeout = std::chrono::milliseconds(600);
+    auto host = eng::WebSocketHost::create_server(kPort, kMaxPeers, kTimeout);
+    REQUIRE(host.has_value());
+
+    // Fill every slot with sockets that connect and then say nothing at all.
+    std::vector<std::unique_ptr<RawClient>> idle;
+    for (std::size_t i = 0; i < kMaxPeers; ++i) {
+        idle.push_back(std::make_unique<RawClient>(kPort));
+        REQUIRE(idle.back()->valid());
+    }
+    std::vector<eng::NetEvent> events;
+    host->poll(events);
+    REQUIRE(host->peer_count() == kMaxPeers);
+
+    // With the slots held, a legitimate client is refused -- this is the
+    // damage the timeout exists to bound, and it holds either way.
+    {
+        RawClient blocked{kPort};
+        REQUIRE(blocked.valid());
+        REQUIRE(blocked.send_text(kHandshake));
+        CHECK_FALSE(poll_until_connected(*host, 20));
+        CHECK(host->peer_count() == kMaxPeers);
+    }
+
+    // Past the deadline the silent sockets are dropped. Without the timeout
+    // they are still here, and this is the assertion that says so.
+    std::this_thread::sleep_for(kTimeout + std::chrono::milliseconds(150));
+    events.clear();
+    host->poll(events);
+    CHECK(host->peer_count() == 0);
+
+    // Reaping a peer that was never announced must not announce its
+    // departure: the game would be hearing about a player it never had.
+    for (const eng::NetEvent& event : events) {
+        CHECK(event.type != eng::NetEvent::Type::Disconnected);
+    }
+
+    // And the freed slots are usable, which is the point of freeing them.
+    RawClient client{kPort};
+    REQUIRE(client.valid());
+    REQUIRE(client.send_text(kHandshake));
+    CHECK(poll_until_connected(*host));
+    CHECK(host->peer_count() == 1);
+}
+
+// The deadline is on the upgrade, not on the connection. A player who has
+// joined and is merely quiet -- waiting at a menu, tabbed out, on a bad link
+// -- must not be dropped by it.
+TEST_CASE("an upgraded connection outlives the handshake deadline", "[websocket]") {
+    constexpr std::uint16_t kPort = 47814;
+    // The upgrade has to beat this deadline for the test to mean anything, so
+    // the margin is against a stalled runner, not against a realistic upgrade
+    // (which takes single-digit milliseconds).
+    constexpr auto kTimeout = std::chrono::milliseconds(500);
+    auto host = eng::WebSocketHost::create_server(kPort, 4, kTimeout);
+    REQUIRE(host.has_value());
+
+    RawClient client{kPort};
+    REQUIRE(client.valid());
+    REQUIRE(client.send_text(kHandshake));
+    REQUIRE(poll_until_connected(*host));
+
+    // Well past the deadline, sending nothing the entire time.
+    std::vector<eng::NetEvent> events;
+    for (int i = 0; i < 8; ++i) {
+        std::this_thread::sleep_for(kTimeout / 2);
+        events.clear();
+        host->poll(events);
+        for (const eng::NetEvent& event : events) {
+            CHECK(event.type != eng::NetEvent::Type::Disconnected);
+        }
+    }
+    CHECK(host->peer_count() == 1);
+}
+
+// The deadline bounds time; this bounds memory. Frame-length caps do not apply
+// before the upgrade, because there is no framing yet -- so a peer that opens
+// a request and never sends the blank line that ends it can stream bytes into
+// the handshake buffer for as long as the deadline allows.
+TEST_CASE("a peer cannot flood the pre-upgrade buffer", "[websocket]") {
+    constexpr std::uint16_t kPort = 47815;
+    auto host = eng::WebSocketHost::create_server(kPort, 4);
+    REQUIRE(host.has_value());
+
+    RawClient client{kPort};
+    REQUIRE(client.valid());
+
+    // A well-formed request line, then a header value that never terminates.
+    REQUIRE(client.send_text("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Pad: "));
+
+    const std::string filler(8192, 'A');
+    std::vector<eng::NetEvent> events;
+    bool closed = false;
+    for (int i = 0; i < 32 && !closed; ++i) {
+        if (!client.send_text(filler)) {
+            closed = true;  // the host hung up mid-write, which is the point
+            break;
+        }
+        events.clear();
+        host->poll(events);
+        closed = (host->peer_count() == 0);
+    }
+    CHECK(closed);
 }
 
 }  // namespace

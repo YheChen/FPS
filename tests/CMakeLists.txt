@@ -20,6 +20,7 @@ add_executable(engine_tests
     game/bot_tests.cpp
     game/hitscan_tests.cpp
     game/interpolation_tests.cpp
+    game/kill_cam_tests.cpp
     game/lag_comp_tests.cpp
     game/player_movement_tests.cpp
     game/prediction_tests.cpp

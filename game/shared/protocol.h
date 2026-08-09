@@ -9,6 +9,7 @@
 
 #include "engine/net/byte_buffer.h"
 #include "game/shared/input_command.h"
+#include "game/shared/kill_cam.h"
 #include "game/shared/weapon.h"
 
 // Wire protocol (docs/packet-format.md is the human-readable spec; keep in
@@ -17,7 +18,7 @@
 // returning nullopt means "hostile or corrupt packet - drop it".
 namespace game {
 
-inline constexpr std::uint16_t kProtocolVersion = 5;
+inline constexpr std::uint16_t kProtocolVersion = 6;
 inline constexpr std::uint8_t kMaxPlayers = 8;
 inline constexpr std::size_t kMaxNameLength = 16;
 inline constexpr int kSnapshotDivisor = 3;  // 60 Hz ticks -> 20 Hz snapshots
@@ -44,6 +45,10 @@ enum class MessageType : std::uint8_t {
     // reliable. Pushed after the welcome and again at match end; the
     // client never asks for it, so there is no request to rate-limit.
     Leaderboard = 15,
+    // Killcam (M30), server -> the victim only, reliable, on death.
+    // Unicast rather than broadcast: it is the one message in the
+    // protocol addressed to a single player about their own death.
+    KillCam = 16,
 };
 
 // How many rows the server will ever send. Bounded on the wire because
@@ -89,6 +94,15 @@ struct LeaderboardEntry {
 
 struct LeaderboardMsg {
     std::vector<LeaderboardEntry> entries;  // best first, at most kLeaderboardSize
+};
+
+// The seconds before a death, from the killer's eyes. Samples are oldest
+// first at the snapshot rate. Empty when the killer is gone or the death had
+// no killer (a fall, or the world), in which case the client just shows the
+// ordinary death overlay.
+struct KillCamMsg {
+    std::uint8_t killer = kNoPlayer;
+    std::vector<ViewSample> samples;
 };
 
 struct ServerReject {
@@ -209,6 +223,7 @@ void write(eng::ByteWriter& w, const PlayerRespawnedMsg& m);
 void write(eng::ByteWriter& w, const ScoreUpdateMsg& m);
 void write(eng::ByteWriter& w, const MatchStateMsg& m);
 void write(eng::ByteWriter& w, const LeaderboardMsg& m);
+void write(eng::ByteWriter& w, const KillCamMsg& m);
 void write(eng::ByteWriter& w, const WeaponStatusMsg& m);
 
 // --- decode (after the type byte has been consumed) -------------------------
@@ -226,6 +241,7 @@ std::optional<PlayerRespawnedMsg> read_player_respawned(eng::ByteReader& r);
 std::optional<ScoreUpdateMsg> read_score_update(eng::ByteReader& r);
 std::optional<MatchStateMsg> read_match_state(eng::ByteReader& r);
 std::optional<LeaderboardMsg> read_leaderboard(eng::ByteReader& r);
+std::optional<KillCamMsg> read_kill_cam(eng::ByteReader& r);
 std::optional<WeaponStatusMsg> read_weapon_status(eng::ByteReader& r);
 
 // Reads and validates the leading type byte.

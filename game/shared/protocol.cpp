@@ -165,6 +165,20 @@ void write(eng::ByteWriter& w, const LeaderboardMsg& m) {
     }
 }
 
+void write(eng::ByteWriter& w, const KillCamMsg& m) {
+    w.u8(static_cast<std::uint8_t>(MessageType::KillCam));
+    w.u8(m.killer);
+    const std::size_t count = std::min(m.samples.size(), kKillCamSamples);
+    w.u8(static_cast<std::uint8_t>(count));
+    for (std::size_t i = 0; i < count; ++i) {
+        w.f32(m.samples[i].position.x);
+        w.f32(m.samples[i].position.y);
+        w.f32(m.samples[i].position.z);
+        w.f32(m.samples[i].yaw);
+        w.f32(m.samples[i].pitch);
+    }
+}
+
 void write(eng::ByteWriter& w, const MatchStateMsg& m) {
     w.u8(static_cast<std::uint8_t>(MessageType::MatchState));
     w.u8(static_cast<std::uint8_t>(m.phase));
@@ -185,7 +199,7 @@ void write(eng::ByteWriter& w, const WeaponStatusMsg& m) {
 std::optional<MessageType> read_message_type(eng::ByteReader& r) {
     const auto value = r.u8();
     if (!value || *value < static_cast<std::uint8_t>(MessageType::ClientHello) ||
-        *value > static_cast<std::uint8_t>(MessageType::Leaderboard)) {
+        *value > static_cast<std::uint8_t>(MessageType::KillCam)) {
         return std::nullopt;
     }
     return static_cast<MessageType>(*value);
@@ -417,6 +431,36 @@ std::optional<LeaderboardMsg> read_leaderboard(eng::ByteReader& r) {
             return std::nullopt;
         }
         message.entries.push_back({*name, *kills, *deaths, *matches});
+    }
+    if (!r.finished()) {
+        return std::nullopt;
+    }
+    return message;
+}
+
+std::optional<KillCamMsg> read_kill_cam(eng::ByteReader& r) {
+    const auto killer = r.u8();
+    const auto count = r.u8();
+    if (!killer || (*killer >= kMaxPlayers && *killer != kNoPlayer) || !count ||
+        *count > kKillCamSamples) {
+        return std::nullopt;
+    }
+    KillCamMsg message;
+    message.killer = *killer;
+    message.samples.reserve(*count);
+    for (std::uint8_t i = 0; i < *count; ++i) {
+        const auto x = r.f32();
+        const auto y = r.f32();
+        const auto z = r.f32();
+        const auto yaw = r.f32();
+        const auto pitch = r.f32();
+        // f32() already rejects non-finite values, which matters here because
+        // these drive a camera transform: a NaN would not crash, it would
+        // silently produce a black screen nobody could explain.
+        if (!x || !y || !z || !yaw || !pitch) {
+            return std::nullopt;
+        }
+        message.samples.push_back({{*x, *y, *z}, *yaw, *pitch});
     }
     if (!r.finished()) {
         return std::nullopt;

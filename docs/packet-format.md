@@ -1,6 +1,6 @@
 # Packet format
 
-Status: **implemented** (protocol version 5, `game/shared/protocol.*`).
+Status: **implemented** (protocol version 6, `game/shared/protocol.*`).
 Update this document in the same commit as any protocol change.
 
 ## Encoding rules
@@ -39,6 +39,7 @@ Channel R = ENet reliable ordered (ch 0), U = unreliable sequenced (ch 1).
 | 14   | ScoreUpdate      | S→C  | R  | on change (M8)   | 8 B/row  | |
 | 15   | MatchState       | S→C  | R  | on change + join | 16 B     | phase, time remaining |
 | 16   | Leaderboard      | S→C  | R  | on join + match end (M29) | ≤ 10 rows | career kills/deaths/matches |
+| 17   | KillCam          | S→**victim** | R | on death (M30) | ≤ 40 × 20 B | the killer's view, oldest first |
 
 ### ClientHello (C→S, reliable, once)
 
@@ -99,8 +100,10 @@ compatibility — both binaries ship together.
 is a static bundle on a CDN and the server is a container on someone's desk;
 they are deployed by different mechanisms and nothing enforces the ordering.
 A version bump that reaches only one of them turns every connection into
-`ServerReject(VersionMismatch)`. M29 bumped 4 → 5, so it must not reach the
-live server before the matching client is published.
+`ServerReject(VersionMismatch)`. M29 bumped 4 → 5 and M30 bumped 5 → 6, so neither
+may reach the live server before the matching client is published.
+`tools/server_autodeploy.sh` enforces exactly this and refuses to deploy
+across a version gap.
 
 There is one grace in the design: an unknown message *type* is rejected by
 `read_message_type` rather than skipped, so a client that somehow saw a newer

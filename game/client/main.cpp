@@ -370,6 +370,25 @@ struct DrawItem {
     int joint_count = 0;
 };
 
+// Shortest signed step from `from` to `to`, in (-pi, pi]. bot.h has the
+// canonical copy, but the client has no business pulling in bot
+// decision-making for three lines of angle maths. Interpolating yaw without
+// this spins the long way round whenever a sample pair straddles +/-pi, which
+// on screen reads as the camera glitching rather than as an angle wrap.
+float shortest_yaw_delta(float from, float to) {
+    constexpr float kTwoPi = 2.0f * std::numbers::pi_v<float>;
+    float delta = std::fmod(to - from + std::numbers::pi_v<float>, kTwoPi);
+    if (delta < 0.0f) {
+        delta += kTwoPi;
+    }
+    return delta - std::numbers::pi_v<float>;
+}
+
+// Killcam playback rate. Must match the rate the server SAMPLES at
+// (kKillCamTickStride against the 60 Hz tick), or the replay runs fast or
+// slow and the moment of the shot lands somewhere other than the end.
+constexpr float kKillCamPlaybackHz = 60.0f / static_cast<float>(game::kKillCamTickStride);
+
 // One replayed player: the same PlayerState and controller the server uses,
 // stepped by the recorded inputs. Positions were never recorded, so what is
 // on screen is genuinely re-simulated rather than played back.
@@ -1108,6 +1127,10 @@ int main(int argc, char** argv) {
     std::uint32_t input_sequence = 0;
 
     float smoothed_eye_height = game::kMove.eye_height;
+    // Killcam playback position, in seconds. Reset while alive rather than on
+    // arrival: the message can land a frame before or after PlayerDied, and
+    // keying off "am I dead" makes the ordering of the two irrelevant.
+    float kill_cam_elapsed = 0.0f;
     fly.camera.position = spawn + glm::vec3{0.0f, 8.0f, 12.0f};
     fly.camera.pitch = -0.5f;
     bool fly_mode = false;
@@ -1183,6 +1206,9 @@ int main(int argc, char** argv) {
         if (online) {
             net->set_simulation(sim_config);
             net->poll();
+            if (net->self_alive()) {
+                kill_cam_elapsed = 0.0f;
+            }
             // Geometry was loaded before the server could be asked which map
             // it runs, so the welcome is the first chance to find out. A
             // mismatch is not a degraded match, it is a different world:
@@ -1548,6 +1574,31 @@ int main(int argc, char** argv) {
             // rather than a debug toggle.
             fly.update(input, static_cast<float>(dt), window->relative_mouse());
             camera = fly.camera;
+        } else if (online && !net->self_alive() && !net->kill_cam().empty()) {
+            // Killcam: the seconds before this death, from the killer's eyes.
+            // Driven off wall-clock rather than the simulation tick, because
+            // the local player is not being simulated while dead.
+            const std::vector<game::ViewSample>& trail = net->kill_cam();
+            kill_cam_elapsed += static_cast<float>(dt);
+            const float span = static_cast<float>(trail.size() - 1) / kKillCamPlaybackHz;
+            // Holds on the final sample instead of looping. A killcam that
+            // restarts reads as a bug, and the last frame -- the moment of
+            // the shot -- is the one worth sitting on.
+            const float t = std::min(kill_cam_elapsed, std::max(span, 0.0f));
+            const float exact = t * kKillCamPlaybackHz;
+            const std::size_t index = std::min(static_cast<std::size_t>(exact), trail.size() - 1);
+            const std::size_t next = std::min(index + 1, trail.size() - 1);
+            const float alpha = exact - static_cast<float>(index);
+
+            const game::ViewSample& a = trail[index];
+            const game::ViewSample& b = trail[next];
+            camera.position = glm::mix(a.position, b.position, alpha) +
+                              glm::vec3{0.0f, game::kMove.eye_height, 0.0f};
+            // Shortest-way interpolation: a killer who crossed the +/-pi
+            // wrap between two samples would otherwise spin the long way
+            // round, which looks like the camera glitching.
+            camera.yaw = a.yaw + shortest_yaw_delta(a.yaw, b.yaw) * alpha;
+            camera.pitch = glm::mix(a.pitch, b.pitch, alpha);
         } else {
             const float alpha = static_cast<float>(step.alpha());
             // Ease the eye between stances so crouching doesn't snap the view.
@@ -2098,6 +2149,14 @@ int main(int argc, char** argv) {
                                  ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBackground);
                 ImGui::SetWindowFontScale(2.0f);
                 ImGui::TextColored({1.0f, 0.3f, 0.3f, 1.0f}, "YOU DIED");
+                // Without this the view jumping to somewhere the player was
+                // not just reads as a camera bug. Naming the killer is what
+                // makes it legible as a killcam.
+                if (!net->kill_cam().empty()) {
+                    ImGui::SetWindowFontScale(1.0f);
+                    ImGui::TextColored({0.85f, 0.85f, 0.85f, 1.0f}, "killed by %s",
+                                       player_name(net->kill_cam_killer()).c_str());
+                }
                 ImGui::End();
             }
         }

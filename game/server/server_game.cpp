@@ -369,6 +369,12 @@ void ServerGame::tick(eng::IServerTransport& net) {
 
         advance_player(player.state, command, kTickSeconds, *player.controller, world_);
         player.history.push(tick_, player.state.position);
+        // At the snapshot rate, not the tick rate: 60 Hz would triple the
+        // message for motion nobody can see at playback speed.
+        if (tick_ % kKillCamTickStride == 0) {
+            player.trail.push(
+                ViewSample{player.state.position, player.view_yaw, player.view_pitch});
+        }
 
         // Fell out of the world: counts as an environment death.
         if (player.state.position.y < -20.0f) {
@@ -606,6 +612,18 @@ void ServerGame::kill_player(std::uint8_t victim_id, std::uint8_t killer_id,
             stats_.record_kill(players_[killer_id]->name);
         }
     }
+    // Unicast to the victim before the death broadcast, so it has arrived by
+    // the time their client puts up the death overlay. Skipped for bots (they
+    // have no peer) and for deaths with no killer -- falling out of the world
+    // has no viewpoint worth showing.
+    if (!victim.is_bot && killer_id != kNoPlayer && players_[killer_id]) {
+        KillCamMsg cam;
+        cam.killer = killer_id;
+        cam.samples = players_[killer_id]->trail.recent(kKillCamSamples);
+        if (!cam.samples.empty()) {
+            net.send(victim.peer, encode(cam), eng::NetChannel::Reliable, true);
+        }
+    }
     broadcast_reliable(encode(PlayerDiedMsg{victim_id, killer_id}), net);
     broadcast_reliable(encode(ScoreUpdateMsg{victim_id, victim.kills, victim.deaths}), net);
     eng::log::info("Player {} '{}' killed by {}", victim_id, victim.name,
@@ -614,6 +632,9 @@ void ServerGame::kill_player(std::uint8_t victim_id, std::uint8_t killer_id,
 
 void ServerGame::respawn_player(std::uint8_t player_id, eng::IServerTransport& net) {
     Player& player = *players_[player_id];
+    // Carrying the previous life's trail into this one would show a future
+    // victim footage from before the killer was even alive.
+    player.trail.clear();
     const glm::vec3 spawn = spawns_[next_spawn_++ % spawns_.size()];
     player.state = {};
     player.state.position = spawn;

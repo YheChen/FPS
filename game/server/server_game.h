@@ -16,6 +16,7 @@
 #include "game/shared/bot.h"
 #include "game/shared/health.h"
 #include "game/shared/input_command.h"
+#include "game/shared/kill_cam.h"
 #include "game/shared/lag_comp.h"
 #include "game/shared/player_movement.h"
 #include "game/shared/protocol.h"
@@ -101,6 +102,12 @@ private:
         std::map<std::uint32_t, InputCommand> pending;  // seq -> command
         InputCommand last_command;                      // reused when starved
         int starved_ticks = 0;
+
+        // The last couple of seconds of where this player was looking, so a
+        // victim can be shown their own death from the killer's eyes.
+        // Separate from `history` below: that one is half a second of
+        // positions for rewind, this is seconds of positions AND angles.
+        ViewTrail trail;
 
         // Lag compensation: recent positions + the client's claimed view
         // tick (already range-limited at deserialization, clamped on use).

@@ -2053,6 +2053,39 @@ int main(int argc, char** argv) {
                     }
                     ImGui::EndTable();
                 }
+
+                // Career records, when the server keeps them. Below the live
+                // scores and visually secondary, because the match is what
+                // the player is in the middle of.
+                if (!net->leaderboard().empty()) {
+                    ImGui::Separator();
+                    ImGui::Text("ALL-TIME");
+                    // Said here, not in a README nobody opens. There are no
+                    // accounts and nothing checks who typed what, so these are
+                    // claims. A leaderboard that looks authoritative and is
+                    // not would be worse than having none at all.
+                    ImGui::TextColored({0.7f, 0.7f, 0.7f, 1.0f},
+                                       "names are unverified - anyone can type any name");
+                    if (ImGui::BeginTable("careers", 4, ImGuiTableFlags_Borders)) {
+                        ImGui::TableSetupColumn("player");
+                        ImGui::TableSetupColumn("kills");
+                        ImGui::TableSetupColumn("deaths");
+                        ImGui::TableSetupColumn("matches");
+                        ImGui::TableHeadersRow();
+                        for (const game::LeaderboardEntry& entry : net->leaderboard()) {
+                            ImGui::TableNextRow();
+                            ImGui::TableSetColumnIndex(0);
+                            ImGui::Text("%s", entry.name.c_str());
+                            ImGui::TableSetColumnIndex(1);
+                            ImGui::Text("%u", entry.kills);
+                            ImGui::TableSetColumnIndex(2);
+                            ImGui::Text("%u", entry.deaths);
+                            ImGui::TableSetColumnIndex(3);
+                            ImGui::Text("%u", entry.matches);
+                        }
+                        ImGui::EndTable();
+                    }
+                }
                 ImGui::End();
             }
 

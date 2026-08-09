@@ -89,6 +89,12 @@ public:
         std::uint16_t deaths = 0;
     };
     const std::map<std::uint8_t, Scores>& scores() const { return scores_; }
+
+    // Career records across restarts, best first. Empty on a server with no
+    // stats file. UNAUTHENTICATED: rows are keyed by the name a player typed,
+    // and nothing stops anyone typing someone else's -- which is why the UI
+    // that shows these says so.
+    const std::vector<LeaderboardEntry>& leaderboard() const { return leaderboard_; }
     float self_health() const { return self_health_; }
     std::uint8_t self_ammo() const { return self_ammo_; }
     bool self_reloading() const { return self_reloading_; }
@@ -117,6 +123,7 @@ private:
     std::uint8_t my_id_ = 0;
     std::uint32_t latest_server_tick_ = 0;
     std::string server_map_;
+    std::vector<LeaderboardEntry> leaderboard_;
     std::uint32_t last_processed_input_ = 0;
     std::map<std::uint8_t, NetPlayer> players_;
     std::optional<SelfAck> pending_self_ack_;

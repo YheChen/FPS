@@ -147,6 +147,7 @@ void ServerGame::handle_hello(std::uint32_t peer, eng::ByteReader& reader,
     welcome.server_tick = tick_;
     welcome.map = map_name_;
     net.send(peer, encode(welcome), eng::NetChannel::Reliable, true);
+    send_leaderboard(peer, net);
 
     // Tell them about everyone already here, and everyone about them.
     for (std::uint8_t i = 0; i < kMaxPlayers; ++i) {
@@ -296,6 +297,11 @@ bool ServerGame::write_replay() const {
 }
 
 void ServerGame::drop_player(std::uint8_t player_id, eng::IServerTransport& net) {
+    // A match lasts five minutes and a session can end at any point in one,
+    // so waiting for match end to persist would drop most of what happened.
+    if (stats_enabled_ && players_[player_id] && !players_[player_id]->is_bot) {
+        save_stats();
+    }
     players_[player_id].reset();
     const auto left = encode(PlayerLeft{player_id});
     for (const auto& player : players_) {
@@ -457,6 +463,36 @@ void ServerGame::send_weapon_status(const Player& player, eng::IServerTransport&
         eng::NetChannel::Reliable, true);
 }
 
+void ServerGame::set_stats_path(std::filesystem::path path) {
+    stats_ = StatsStore::open(std::move(path));
+    stats_enabled_ = true;
+}
+
+void ServerGame::save_stats() const {
+    if (stats_enabled_) {
+        stats_.save();  // failures are logged by the store, and are not fatal
+    }
+}
+
+LeaderboardMsg ServerGame::leaderboard() const {
+    LeaderboardMsg message;
+    for (const PlayerRecord& record : stats_.top(kLeaderboardSize)) {
+        message.entries.push_back({record.name, record.kills, record.deaths, record.matches});
+    }
+    return message;
+}
+
+void ServerGame::send_leaderboard(std::uint32_t peer, eng::IServerTransport& net) const {
+    if (!stats_enabled_) {
+        return;
+    }
+    const LeaderboardMsg message = leaderboard();
+    if (message.entries.empty()) {
+        return;  // nothing to show on a fresh server
+    }
+    net.send(peer, encode(message), eng::NetChannel::Reliable, true);
+}
+
 MatchStateMsg ServerGame::match_state() const {
     MatchStateMsg m;
     m.phase = phase_;
@@ -560,6 +596,16 @@ void ServerGame::kill_player(std::uint8_t victim_id, std::uint8_t killer_id,
                                                  players_[killer_id]->deaths}),
                            net);
     }
+    // Bots are excluded on purpose. They exist so the server is never empty,
+    // and a career table topped by `bot3` says nothing about anyone.
+    if (stats_enabled_) {
+        if (!victim.is_bot) {
+            stats_.record_death(victim.name);
+        }
+        if (killer_id != kNoPlayer && players_[killer_id] && !players_[killer_id]->is_bot) {
+            stats_.record_kill(players_[killer_id]->name);
+        }
+    }
     broadcast_reliable(encode(PlayerDiedMsg{victim_id, killer_id}), net);
     broadcast_reliable(encode(ScoreUpdateMsg{victim_id, victim.kills, victim.deaths}), net);
     eng::log::info("Player {} '{}' killed by {}", victim_id, victim.name,
@@ -602,6 +648,16 @@ void ServerGame::update_match(eng::IServerTransport& net) {
 }
 
 void ServerGame::restart_match(eng::IServerTransport& net) {
+    // Before the reset below wipes them: whoever was here played this match.
+    if (stats_enabled_) {
+        for (std::uint8_t id = 0; id < kMaxPlayers; ++id) {
+            if (players_[id] && !players_[id]->is_bot) {
+                stats_.record_match(players_[id]->name);
+            }
+        }
+        save_stats();
+        broadcast_reliable(encode(leaderboard()), net);
+    }
     phase_ = MatchPhase::Playing;
     match_remaining_ = kMatchSeconds;
     for (std::uint8_t id = 0; id < kMaxPlayers; ++id) {

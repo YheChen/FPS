@@ -12,6 +12,7 @@
 #include "engine/net/transport.h"
 #include "engine/physics/character_controller.h"
 #include "engine/physics/physics_world.h"
+#include "game/server/stats_store.h"
 #include "game/shared/bot.h"
 #include "game/shared/health.h"
 #include "game/shared/input_command.h"
@@ -59,6 +60,14 @@ public:
     // Applies to every bot, including ones already in the match. Difficulty
     // is a property of the server, not of an individual bot.
     void set_bot_config(const BotConfig& config) { bot_config_ = config; }
+
+    // Career stats that outlive the process. Optional: with no store the
+    // server behaves exactly as it did before, which is what keeps the
+    // feature from being a new way for the server to fail to start.
+    void set_stats_path(std::filesystem::path path);
+    // Flushed at match end and on the last player leaving, not per kill --
+    // a save is a file rewrite, and a 60 Hz server has better things to do.
+    void save_stats() const;
 
     void start_recording(std::filesystem::path path);
     bool recording() const { return recorder_.recording(); }
@@ -122,6 +131,8 @@ private:
     void broadcast_reliable(const std::vector<std::uint8_t>& data, eng::IServerTransport& net);
     void send_weapon_status(const Player& player, eng::IServerTransport& net);
     MatchStateMsg match_state() const;
+    LeaderboardMsg leaderboard() const;
+    void send_leaderboard(std::uint32_t peer, eng::IServerTransport& net) const;
 
     eng::PhysicsWorld world_;
     std::vector<glm::vec3> spawns_;
@@ -129,6 +140,8 @@ private:
     Arsenal arsenal_;
     std::array<std::optional<Player>, kMaxPlayers> players_;
     BotConfig bot_config_;
+    StatsStore stats_;
+    bool stats_enabled_ = false;
     ReplayRecorder recorder_;
     std::filesystem::path replay_path_;
     std::uint32_t tick_ = 0;

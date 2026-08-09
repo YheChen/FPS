@@ -151,6 +151,20 @@ void write(eng::ByteWriter& w, const ScoreUpdateMsg& m) {
     w.u16(m.deaths);
 }
 
+void write(eng::ByteWriter& w, const LeaderboardMsg& m) {
+    w.u8(static_cast<std::uint8_t>(MessageType::Leaderboard));
+    // Truncated by the writer rather than trusted to be short: the count is a
+    // u8 on the wire, and the reader enforces the same cap.
+    const std::size_t count = std::min(m.entries.size(), kLeaderboardSize);
+    w.u8(static_cast<std::uint8_t>(count));
+    for (std::size_t i = 0; i < count; ++i) {
+        w.str(m.entries[i].name);
+        w.u32(m.entries[i].kills);
+        w.u32(m.entries[i].deaths);
+        w.u32(m.entries[i].matches);
+    }
+}
+
 void write(eng::ByteWriter& w, const MatchStateMsg& m) {
     w.u8(static_cast<std::uint8_t>(MessageType::MatchState));
     w.u8(static_cast<std::uint8_t>(m.phase));
@@ -171,7 +185,7 @@ void write(eng::ByteWriter& w, const WeaponStatusMsg& m) {
 std::optional<MessageType> read_message_type(eng::ByteReader& r) {
     const auto value = r.u8();
     if (!value || *value < static_cast<std::uint8_t>(MessageType::ClientHello) ||
-        *value > static_cast<std::uint8_t>(MessageType::WeaponStatus)) {
+        *value > static_cast<std::uint8_t>(MessageType::Leaderboard)) {
         return std::nullopt;
     }
     return static_cast<MessageType>(*value);
@@ -385,6 +399,29 @@ std::optional<ScoreUpdateMsg> read_score_update(eng::ByteReader& r) {
         return std::nullopt;
     }
     return ScoreUpdateMsg{*player, *kills, *deaths};
+}
+
+std::optional<LeaderboardMsg> read_leaderboard(eng::ByteReader& r) {
+    const auto count = r.u8();
+    if (!count || *count > kLeaderboardSize) {
+        return std::nullopt;
+    }
+    LeaderboardMsg message;
+    message.entries.reserve(*count);
+    for (std::uint8_t i = 0; i < *count; ++i) {
+        const auto name = r.str(kMaxNameLength);
+        const auto kills = r.u32();
+        const auto deaths = r.u32();
+        const auto matches = r.u32();
+        if (!name || name->empty() || !kills || !deaths || !matches) {
+            return std::nullopt;
+        }
+        message.entries.push_back({*name, *kills, *deaths, *matches});
+    }
+    if (!r.finished()) {
+        return std::nullopt;
+    }
+    return message;
 }
 
 std::optional<MatchStateMsg> read_match_state(eng::ByteReader& r) {

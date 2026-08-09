@@ -1,0 +1,28 @@
+# Polls for a new main and redeploys. See docs/deploy.md.
+#
+#     sudo cp deploy/fps-autodeploy.* /etc/systemd/system/
+#     sudo systemctl enable --now fps-autodeploy.timer
+#     systemctl list-timers fps-autodeploy.timer
+
+[Unit]
+Description=Check whether the FPS server is behind main
+Documentation=https://github.com/YheChen/FPS/blob/main/docs/deploy.md
+
+[Timer]
+# A reboot is a moment the host can be behind without anyone noticing, and
+# this also seeds OnUnitActiveSec below: a monotonic timer has nothing to
+# count from until the unit has activated once.
+OnBootSec=3min
+
+# Ten minutes. The check is a `git fetch` against one ref -- cheap enough that
+# polling costs nothing, and a redeploy only happens when the SHA actually
+# moved. Faster would mostly mean interrupting a match to ship a README fix.
+OnUnitActiveSec=10min
+
+# A build takes minutes. Without this a slow one could have the next timer
+# firing into it; systemd would queue rather than parallelise, but the queued
+# run would then be pointless work against a repo that just updated.
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

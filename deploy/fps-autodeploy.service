@@ -1,0 +1,39 @@
+# Redeploys the dedicated server when main moves. See docs/deploy.md.
+#
+# Paired with fps-autodeploy.timer -- oneshot, does nothing on its own:
+#     sudo cp deploy/fps-autodeploy.* /etc/systemd/system/
+#     sudo systemctl enable --now fps-autodeploy.timer
+#
+# User= must be the account that owns the clone AND is in the `docker` group.
+# Edit both it and the paths below if yours differs.
+
+[Unit]
+Description=Redeploy the FPS dedicated server when main moves
+Documentation=https://github.com/YheChen/FPS/blob/main/docs/deploy.md
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=yanzhen
+WorkingDirectory=/home/yanzhen/GitHub/FPS
+Environment=FPS_REPO=/home/yanzhen/GitHub/FPS
+ExecStart=/home/yanzhen/GitHub/FPS/tools/server_autodeploy.sh
+
+# A build is minutes, not seconds, and the timer must not stack another run on
+# top of one already going.
+TimeoutStartSec=1800
+
+# Deliberately NOT sandboxed the way porkbun-ddns.service is. That unit makes
+# two HTTPS calls and can afford ProtectHome=true; this one drives git and
+# docker against a clone in the user's home directory, so ProtectHome would
+# make the repo invisible and ProtectSystem=strict would break the docker
+# socket. Locking this down means moving the clone out of /home and running
+# the build as a dedicated service account -- worth doing, not pretended at
+# here with directives that would only look reassuring.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

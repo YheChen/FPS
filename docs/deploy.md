@@ -654,6 +654,87 @@ DNS does not permit a name to hold both a CNAME and an A record.
 change between builds. If you ever content-hash the filenames, put the long
 cache back.
 
+## 5b. Keeping the server current, automatically
+
+CI publishes the client on every push to `main`. Nothing published the
+**server** — and on 2026-08-09 the live host was found five milestones behind,
+including a merged fix for a denial of service it was still vulnerable to.
+Nobody decided that. It is what happens when shipping depends on remembering.
+
+`tools/server_autodeploy.sh` closes it. A timer on the T14 asks GitHub whether
+`main` moved, and if so rebuilds and restarts.
+
+```bash
+sudo cp deploy/fps-autodeploy.* /etc/systemd/system/
+```
+
+```bash
+sudo systemctl enable --now fps-autodeploy.timer
+```
+
+```bash
+systemctl list-timers fps-autodeploy.timer && journalctl -u fps-autodeploy -n 30
+```
+
+Run it by hand first — it says exactly what it would do and changes nothing:
+
+```bash
+~/GitHub/FPS/tools/server_autodeploy.sh --dry-run
+```
+
+### Pull, not push
+
+The obvious design is CI reaching in over SSH. That would mean storing a
+Tailscale auth key *and* an SSH key to a machine inside your LAN with a third
+party, and SSH is not exposed to the internet anyway (only 80/443 are
+forwarded). Polling outward hands out nothing and opens nothing. It costs a
+`git fetch` against one ref every ten minutes, and only rebuilds when the SHA
+actually moved.
+
+The unit runs as the account that owns the clone, which is in the `docker`
+group — **no sudo anywhere** in the deploy path.
+
+### The protocol guard, which is the point
+
+Client and server ship together; there is no in-protocol compatibility. A
+server whose `kProtocolVersion` has moved past the **published** client turns
+every connection into `ServerReject(VersionMismatch)` — the game down, from a
+green build. So the script:
+
+| Situation | What happens |
+|---|---|
+| Protocol unchanged | Deploy. This is almost every commit. |
+| Protocol changed, live client speaks the new version | Deploy. |
+| Protocol changed, live client speaks something else | **Refuse**, exit 2. |
+| Protocol changed, client version unknown | **Refuse**, exit 2. |
+
+It learns what the live client speaks from `version.json`, which the
+`deploy-web` CI job publishes beside the client. The client is the only half
+that can honestly declare this, because it is the half that gets published to
+a URL.
+
+This is not theoretical. Run against the live host while `main` carried M29:
+
+```
+[autodeploy] 876d857 -> 8343da3
+[autodeploy] protocol 4 -> 5; checking what the live client speaks
+[autodeploy] REFUSING: protocol moved to 5 and https://fps.yanzhenchen.ca/version.json
+[autodeploy]           could not be read, so the published client's version is unknown.
+```
+
+Which is correct — the Vercel secrets are not set, so no client has been
+published, so nothing can vouch for protocol 5. **The guard will keep refusing
+M29 until the client pipeline works.** `--force` skips it; the only good reason
+is a server-only rollback.
+
+Other refusals, both deliberate:
+
+- **A dirty worktree.** Someone was working there by hand; rebuilding would
+  either ship their edit or destroy it, and neither is the script's call.
+- **A failed health check** rolls back to the previous commit and rebuilds.
+  `compose up --wait` blocks on the container's own healthcheck, which is
+  `ws_smoke.py` speaking the real protocol to itself.
+
 ## 6. End-to-end check
 
 Before sharing the URL, prove the whole chain rather than each piece:

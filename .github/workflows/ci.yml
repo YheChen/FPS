@@ -188,6 +188,17 @@ jobs:
              build/web/game/favicon.ico \
              dist/
           cp web/vercel.json dist/
+          # What this client speaks, published alongside it. The server's
+          # autodeploy on the T14 reads this and REFUSES to ship a server
+          # whose protocol has moved past it -- otherwise a green build
+          # deploys a server no existing client can join. The client is the
+          # only half that can honestly declare this, because it is the half
+          # that gets published to a URL.
+          protocol=$(grep -oE 'kProtocolVersion = [0-9]+' game/shared/protocol.h \
+                     | grep -oE '[0-9]+')
+          [ -n "$protocol" ] || { echo "::error::could not read kProtocolVersion"; exit 1; }
+          printf '{"protocol": %s, "commit": "%s"}\n' "$protocol" "$GITHUB_SHA" > dist/version.json
+          cat dist/version.json
           ls -l dist
 
       - name: Upload the built client

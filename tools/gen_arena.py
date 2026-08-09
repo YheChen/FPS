@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
-"""Generates assets/maps/arena01.glb - the textured deathmatch arena.
+"""Generates the deathmatch maps in assets/maps/.
 
 Pure-python GLB (glTF 2.0 binary) writer: no external dependencies, so the
-map can be regenerated anywhere. The arena is built from boxes, each emitted
+maps can be regenerated anywhere. Each map is built from boxes, each emitted
 as its own mesh so UVs can be scaled to WORLD size - that keeps texel density
 constant, instead of stretching one 0..1 UV square across a 40 m floor.
 
 Textures (from tools/gen_textures.py) are embedded in the .glb as PNG buffer
-views, so the map is a single self-contained file.
+views, so each map is a single self-contained file.
 
 Conventions: meters, +Y up, -Z forward (glTF standard). Floor top at y = 0.
+Every layout must be fully enclosed by walls: nothing stops a player who
+walks off an edge, because there is no kill volume.
 
-Usage: python3 tools/gen_arena.py [output.glb]
+A layout is just boxes and spawn points, so a new map is data here rather
+than an art pipeline. The engine finds spawns by node name (`spawn_N`) and
+collision from every mesh, so nothing downstream needs to know a map exists.
+
+Usage:
+    python3 tools/gen_arena.py                    # regenerate every map
+    python3 tools/gen_arena.py --map arena02      # just one
+    python3 tools/gen_arena.py --map arena01 --out /tmp/a.glb
 """
 
+import argparse
 import json
 import math
 import struct
@@ -32,8 +42,11 @@ MATERIALS = [
 ]
 MATERIAL_INDEX = {name: i for i, (name, _, _) in enumerate(MATERIALS)}
 
+# arena01 - a symmetric 40x40 box around a raised centre platform. Fights
+# converge on the middle, which is the highest ground and the most exposed.
+#
 # (name, material, translation, scale, rotation_z_degrees|None)
-BOXES = [
+ARENA01_BOXES = [
     ("floor", "mat_floor", (0, -0.5, 0), (40, 1, 40), None),
     ("wall_north", "mat_wall", (0, 2, -20.5), (42, 4, 1), None),
     ("wall_south", "mat_wall", (0, 2, 20.5), (42, 4, 1), None),
@@ -50,10 +63,57 @@ BOXES = [
     ("cover_s", "mat_pillar", (0, 0.6, 13), (5, 1.2, 1.2), None),
 ]
 
-SPAWNS = [
+ARENA01_SPAWNS = [
     (15, 0.1, 15), (-15, 0.1, 15), (15, 0.1, -15), (-15, 0.1, -15),
     (0, 0.1, 16), (0, 0.1, -16), (16, 0.1, 0), (-16, 0.1, 0),
 ]
+
+# arena02 - a 48x32 hall with the high ground pushed to opposite ENDS instead
+# of the middle. That inverts arena01's shape of fight: holding height means
+# giving up the centre rather than owning it, and the long axis gives the
+# sniper sightlines arena01 never has.
+#
+# Each platform is reached by two ramps, so a defender cannot cover the only
+# way up; the staggered cover down the middle is what makes crossing the open
+# span survivable.
+ARENA02_BOXES = [
+    ("floor", "mat_floor", (0, -0.5, 0), (48, 1, 32), None),
+    ("wall_north", "mat_wall", (0, 2, -16.5), (50, 4, 1), None),
+    ("wall_south", "mat_wall", (0, 2, 16.5), (50, 4, 1), None),
+    ("wall_east", "mat_wall", (24.5, 2, 0), (1, 4, 34), None),
+    ("wall_west", "mat_wall", (-24.5, 2, 0), (1, 4, 34), None),
+    # The two galleries. They stop short of the north/south walls, leaving a
+    # ground-level lane behind each one to flank along.
+    ("platform_east", "mat_platform", (19, 0.75, 0), (10, 1.5, 20), None),
+    ("platform_west", "mat_platform", (-19, 0.75, 0), (10, 1.5, 20), None),
+    # Same geometry as arena01's ramps, which are known to be climbable: the
+    # top surface lands ~0.13 m under the platform lip, well inside step
+    # height. Sign of the rotation is what decides which end is the high one.
+    ("ramp_east_n", "mat_platform", (12, 0.65, -6), (4.2, 0.3, 3), 16),
+    ("ramp_east_s", "mat_platform", (12, 0.65, 6), (4.2, 0.3, 3), 16),
+    ("ramp_west_n", "mat_platform", (-12, 0.65, -6), (4.2, 0.3, 3), -16),
+    ("ramp_west_s", "mat_platform", (-12, 0.65, 6), (4.2, 0.3, 3), -16),
+    ("pillar_n", "mat_pillar", (0, 1.5, -12), (2, 3, 2), None),
+    ("pillar_s", "mat_pillar", (0, 1.5, 12), (2, 3, 2), None),
+    ("cover_centre", "mat_pillar", (0, 0.6, 0), (3, 1.2, 3), None),
+    ("cover_nw", "mat_pillar", (-6, 0.6, -8), (4, 1.2, 1.2), None),
+    ("cover_ne", "mat_pillar", (6, 0.6, -8), (4, 1.2, 1.2), None),
+    ("cover_sw", "mat_pillar", (-6, 0.6, 8), (4, 1.2, 1.2), None),
+    ("cover_se", "mat_pillar", (6, 0.6, 8), (4, 1.2, 1.2), None),
+]
+
+# Four on the galleries (y clears the 1.5 m platform top), four on the floor.
+# None sits inside a box: the pillars are at z = +-12 and the spawns behind
+# them at +-14, and the x = +-10 pair is clear of the ramps at z = +-6.
+ARENA02_SPAWNS = [
+    (20, 1.6, -7), (20, 1.6, 7), (-20, 1.6, -7), (-20, 1.6, 7),
+    (0, 0.1, -14), (0, 0.1, 14), (10, 0.1, 0), (-10, 0.1, 0),
+]
+
+LAYOUTS = {
+    "arena01": (ARENA01_BOXES, ARENA01_SPAWNS),
+    "arena02": (ARENA02_BOXES, ARENA02_SPAWNS),
+}
 
 
 def zrot_quat(degrees):
@@ -125,7 +185,10 @@ class GlbBuilder:
         return len(self.accessors) - 1
 
 
-def build_glb(texture_dir: Path):
+def build_glb(texture_dir: Path, map_name: str):
+    # Not `name`: the box loop below binds that per box, and shadowing this
+    # silently named the scene after the last box.
+    boxes, spawns = LAYOUTS[map_name]
     b = GlbBuilder()
 
     # --- textures (embedded PNG bytes) ---
@@ -151,7 +214,7 @@ def build_glb(texture_dir: Path):
 
     # --- one mesh per box, with world-scaled UVs ---
     meshes, nodes = [], []
-    for name, material, translation, scale, rotation in BOXES:
+    for name, material, translation, scale, rotation in boxes:
         positions, normals, uvs, indices = box_geometry(scale)
 
         pos_view = b.add_view(b"".join(struct.pack("<3f", *p) for p in positions), 34962)
@@ -184,13 +247,13 @@ def build_glb(texture_dir: Path):
             node["rotation"] = zrot_quat(rotation)
         nodes.append(node)
 
-    for i, position in enumerate(SPAWNS):
+    for i, position in enumerate(spawns):
         nodes.append({"name": f"spawn_{i}", "translation": list(position)})
 
     gltf = {
         "asset": {"version": "2.0", "generator": "fps-engine gen_arena.py"},
         "scene": 0,
-        "scenes": [{"name": "arena01", "nodes": list(range(len(nodes)))}],
+        "scenes": [{"name": map_name, "nodes": list(range(len(nodes)))}],
         "nodes": nodes,
         "meshes": meshes,
         "materials": materials,
@@ -219,15 +282,24 @@ def build_glb(texture_dir: Path):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--map", choices=sorted(LAYOUTS), help="one layout (default: all)")
+    parser.add_argument("--out", type=Path, help="output path; requires --map")
+    args = parser.parse_args()
+    if args.out and not args.map:
+        parser.error("--out names a single file, so it needs --map")
+
     root = Path(__file__).resolve().parent.parent
     texture_dir = root / "assets" / "textures"
     if not (texture_dir / "concrete.png").exists():
         print("textures missing; run tools/gen_textures.py first", file=sys.stderr)
         return 1
-    out_path = Path(sys.argv[1]) if len(sys.argv) > 1 else root / "assets" / "maps" / "arena01.glb"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_bytes(build_glb(texture_dir))
-    print(f"wrote {out_path} ({out_path.stat().st_size} bytes)")
+
+    for name in ([args.map] if args.map else sorted(LAYOUTS)):
+        out_path = args.out or root / "assets" / "maps" / f"{name}.glb"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(build_glb(texture_dir, name))
+        print(f"wrote {out_path} ({out_path.stat().st_size} bytes)")
     return 0
 
 

@@ -73,6 +73,7 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
             if (const auto welcome = read_server_welcome(reader)) {
                 my_id_ = welcome->player_id;
                 latest_server_tick_ = welcome->server_tick;
+                server_map_ = welcome->map;
                 state_ = State::InGame;
                 players_[my_id_].name = player_name_;
                 eng::log::info("Welcome: player {} on '{}' (tick {}, {} Hz / {} Hz snapshots)",

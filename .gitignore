@@ -22,6 +22,10 @@ deploy/.env
 CMakeUserPresets.json
 compile_commands.json
 
+# Python bytecode, from importing anything under tools/
+__pycache__/
+*.pyc
+
 # OS noise
 .DS_Store
 Thumbs.db

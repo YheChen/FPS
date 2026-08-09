@@ -38,6 +38,65 @@ TEST_CASE("arena01.glb loads with expected structure", "[gltf]") {
     }
 }
 
+// Counting nodes proves a file parsed. These are the properties that decide
+// whether a map can actually be HOSTED, and they are checked for every map
+// rather than for one -- a second map is only worth having if adding a third
+// is a data change, and that is only true if the invariants are enforced
+// somewhere other than in whoever wrote the layout's head.
+TEST_CASE("every shipped map satisfies what the server relies on", "[gltf]") {
+    static eng::AssetCache cache{*eng::find_assets_root()};
+
+    for (const char* name : {"maps/arena01.glb", "maps/arena02.glb"}) {
+        CAPTURE(name);
+        const eng::GltfModel* model = cache.model(name);
+        REQUIRE(model != nullptr);
+
+        std::vector<glm::vec3> spawns;
+        std::size_t collision_primitives = 0;
+        glm::vec3 lo{1e9f};
+        glm::vec3 hi{-1e9f};
+        for (const eng::GltfNode& node : model->nodes) {
+            if (node.name.starts_with("spawn_")) {
+                spawns.emplace_back(node.transform[3]);
+            }
+            if (node.mesh < 0) {
+                continue;
+            }
+            for (const eng::GltfPrimitive& primitive :
+                 model->meshes[static_cast<std::size_t>(node.mesh)].primitives) {
+                ++collision_primitives;
+                for (const eng::Vertex& vertex : primitive.mesh.vertices) {
+                    const glm::vec3 world =
+                        glm::vec3(node.transform * glm::vec4(vertex.position, 1.0f));
+                    lo = glm::min(lo, world);
+                    hi = glm::max(hi, world);
+                }
+            }
+        }
+
+        // The server picks spawn positions purely by node name. With none,
+        // every player materializes at the origin -- inside whatever is there.
+        CHECK(spawns.size() >= 4);
+        // Geometry is what the server turns into collision; a map with none
+        // is a void players fall through forever.
+        CHECK(collision_primitives > 0);
+
+        for (const glm::vec3& spawn : spawns) {
+            CAPTURE(spawn.x, spawn.y, spawn.z);
+            // Floor top is y = 0 by convention, so a spawn at or below it
+            // starts the player embedded in the floor.
+            CHECK(spawn.y > 0.0f);
+            // Strictly inside the geometry's extent in the ground plane. A
+            // spawn outside the walls is a player who falls out of the world
+            // on the first tick, and there is no kill volume to catch them.
+            CHECK(spawn.x > lo.x);
+            CHECK(spawn.x < hi.x);
+            CHECK(spawn.z > lo.z);
+            CHECK(spawn.z < hi.z);
+        }
+    }
+}
+
 TEST_CASE("arena materials reference decoded textures", "[gltf]") {
     const eng::GltfModel* model = load_arena();
     REQUIRE(model != nullptr);

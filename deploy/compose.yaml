@@ -29,15 +29,25 @@ services:
       # redeploy the client (CI does it on a push to main) when you change it.
       - "--map"
       - "${FPS_MAP:-maps/arena01.glb}"
+      # Career stats. The path is inside the one writable mount below; a
+      # server told to write anywhere else on this root filesystem would
+      # fail, loudly, at the first save rather than at startup.
+      - "--stats"
+      - "/var/lib/fps/stats.bin"
     # Not published to the host: only Caddy needs to reach it, over the
     # compose network. Publishing 7778 would put the plain ws:// server on the
     # LAN alongside the TLS one, which is the opposite of the point.
     expose:
       - "7778"
     networks: [fps]
-    # The game server holds no state; a read-only root filesystem costs
-    # nothing and removes a class of surprise.
+    # The root filesystem stays read-only: career stats are the ONLY state
+    # this process keeps, so they get one named volume rather than a writable
+    # root. StatsStore writes a temp file and renames it, so both live in this
+    # directory -- a rename across a mount boundary is a copy, not an atomic
+    # replace, which would reintroduce the torn write it exists to prevent.
     read_only: true
+    volumes:
+      - fps-stats:/var/lib/fps:z
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
@@ -86,3 +96,6 @@ volumes:
   # Encrypt rate limits on every restart.
   caddy_data:
   caddy_config:
+  # Career stats. Named for the same reason: `docker compose down` is a normal
+  # thing to do, and it must not take everyone's record with it.
+  fps-stats:

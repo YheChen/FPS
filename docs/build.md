@@ -94,6 +94,46 @@ above the floor and strictly inside the geometry's extent, and at least one
 collision mesh. Those are the invariants that make a map hostable, and there
 is no kill volume to catch a player who spawns outside the walls.
 
+## Career stats
+
+Off unless asked for. A server given `--stats` keeps per-player kills, deaths
+and matches across restarts, and pushes the top ten to each client on join and
+at match end — shown under the live scores on the Tab scoreboard.
+
+```sh
+./build/release/game/fps_server --bots 3 --stats ./stats.bin
+```
+
+**These are claims, not achievements, and the UI says so on screen.** There are
+no accounts; a row is keyed by the name someone typed, and nothing stops anyone
+typing yours. Building identity first would be a different milestone; showing
+an unqualified leaderboard would have implied one existed.
+
+Consequences of that, which are design decisions rather than oversights:
+
+- **Bots are excluded.** They exist so the server is never empty, and a career
+  table topped by `bot3` says nothing about anyone.
+- **The store is bounded** at 500 records, evicting the least active. Without a
+  cap, anyone can grow the file forever by joining under fresh names.
+
+The file is a small binary blob written through the same `ByteWriter`/
+`ByteReader` as the network protocol, so a corrupt one is rejected by the same
+discipline as a hostile packet. Two properties worth knowing:
+
+- Saves go to a temp file and are **renamed** over the target, which is atomic.
+  A crash mid-save leaves the previous file intact, not half of a new one. In
+  the container both live in the same volume — a rename across a mount
+  boundary is a copy, which would reintroduce exactly the torn write this
+  avoids.
+- A file that exists but does not parse leaves the store **unhealthy**, and an
+  unhealthy store **refuses to save**. The server keeps playing and says
+  loudly what happened. Silently starting over would turn one bad read into
+  permanent loss on the next write.
+
+Flushed at match end, when a player leaves, and on clean shutdown. That last
+one was missing at first and cost a whole test match — a five-minute match
+means most sessions end at a restart, not at a match boundary.
+
 ## Bot difficulty
 
 ```sh

@@ -1,6 +1,6 @@
 # Packet format
 
-Status: **implemented** (protocol version 4, `game/shared/protocol.*`).
+Status: **implemented** (protocol version 5, `game/shared/protocol.*`).
 Update this document in the same commit as any protocol change.
 
 ## Encoding rules
@@ -38,6 +38,7 @@ Channel R = ENet reliable ordered (ch 0), U = unreliable sequenced (ch 1).
 | 13   | PlayerRespawned  | S→C  | R  | on respawn (M8)  | 20 B     | |
 | 14   | ScoreUpdate      | S→C  | R  | on change (M8)   | 8 B/row  | |
 | 15   | MatchState       | S→C  | R  | on change + join | 16 B     | phase, time remaining |
+| 16   | Leaderboard      | S→C  | R  | on join + match end (M29) | ≤ 10 rows | career kills/deaths/matches |
 
 ### ClientHello (C→S, reliable, once)
 
@@ -93,3 +94,15 @@ at 8 players ≈ 226 B × 20/s ≈ 4.5 kB/s per client.
 
 Any wire change bumps `protocol_version`. No in-protocol backward
 compatibility — both binaries ship together.
+
+**"Ship together" is a deployment constraint, not just a slogan.** The client
+is a static bundle on a CDN and the server is a container on someone's desk;
+they are deployed by different mechanisms and nothing enforces the ordering.
+A version bump that reaches only one of them turns every connection into
+`ServerReject(VersionMismatch)`. M29 bumped 4 → 5, so it must not reach the
+live server before the matching client is published.
+
+There is one grace in the design: an unknown message *type* is rejected by
+`read_message_type` rather than skipped, so a client that somehow saw a newer
+message would drop it rather than misparse it. That is a safety net against
+corruption, not a compatibility mechanism.

@@ -36,6 +36,12 @@ add_executable(engine_tests
     rendering/particle_tests.cpp
     rendering/postfx_tests.cpp
     scene/scene_tests.cpp
+    server/stats_store_tests.cpp
+    # Compiled in directly rather than linked: the dedicated server is an
+    # executable, and this is a leaf module with no dependency on the rest of
+    # it. A persistence format nobody round-trips in a test is one that gets
+    # discovered to be wrong by losing somebody's stats.
+    ../game/server/stats_store.cpp
 )
 # The WebRTC tests drive libdatachannel directly as the client half, so they
 # only exist when the transport is built.

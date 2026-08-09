@@ -82,6 +82,13 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
             }
             break;
         }
+        case MessageType::Leaderboard: {
+            if (const auto board = read_leaderboard(reader)) {
+                leaderboard_ = board->entries;
+                eng::log::info("Leaderboard: {} career records", leaderboard_.size());
+            }
+            break;
+        }
         case MessageType::ServerReject: {
             if (const auto reject = read_server_reject(reader)) {
                 eng::log::error("Server rejected connection (reason {})",

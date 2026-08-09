@@ -38,6 +38,10 @@ struct ServerArgs {
     int bots = 0;                                       // --bots N: fill N slots with AI
     std::string map = "maps/arena01.glb";               // --map: which arena to host
     game::BotSkill bot_skill = game::BotSkill::Normal;  // --bot-skill
+    // --stats PATH: career records that outlive the process. Off by default,
+    // because a server that suddenly needs a writable path is a server that
+    // suddenly has a new way to fail to start.
+    std::optional<std::string> stats_path;
 };
 
 ServerArgs parse_args(int argc, char** argv) {
@@ -95,6 +99,10 @@ ServerArgs parse_args(int argc, char** argv) {
         } else if (arg == "--map") {
             if (const auto value = next_value()) {
                 args.map = std::string{*value};
+            }
+        } else if (arg == "--stats") {
+            if (i + 1 < argc) {
+                args.stats_path = argv[++i];
             }
         } else if (arg == "--bot-skill") {
             if (const auto value = next_value()) {
@@ -269,6 +277,9 @@ int main(int argc, char** argv) {
 
     game::ServerGame server{std::move(collision), std::move(spawns), map_path, std::move(arsenal)};
     server.set_bot_config(game::bot_config_for(args.bot_skill));
+    if (args.stats_path) {
+        server.set_stats_path(*args.stats_path);
+    }
     if (args.bots > 0) {
         eng::log::info("Bot skill: {}", game::bot_skill_name(args.bot_skill));
     }
@@ -317,6 +328,13 @@ int main(int argc, char** argv) {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+
+    // Stats are flushed at match end and when a player leaves, but a match
+    // runs five minutes and a restart lands wherever it lands -- without this
+    // a clean shutdown would drop everything since the last flush, which is
+    // most of what happened. Found by playing a match and getting an empty
+    // file, not by reasoning about it.
+    server.save_stats();
 
     // Written on the way out rather than incrementally: a match is a few
     // hundred KB of inputs, and a partial file would decode to a truncated

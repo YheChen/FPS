@@ -280,4 +280,66 @@ TEST_CASE("hostile packets are rejected", "[protocol]") {
     }
 }
 
+TEST_CASE("the leaderboard round-trips and rejects hostile input", "[protocol]") {
+    game::LeaderboardMsg sent;
+    sent.entries.push_back({"alice", 12, 3, 2});
+    sent.entries.push_back({"bob", 4, 9, 1});
+
+    const auto bytes = encode(sent);
+    eng::ByteReader r{{bytes.data(), bytes.size()}};
+    REQUIRE(game::read_message_type(r) == game::MessageType::Leaderboard);
+    const auto got = game::read_leaderboard(r);
+    REQUIRE(got.has_value());
+    REQUIRE(got->entries.size() == 2);
+    CHECK(got->entries[0].name == "alice");
+    CHECK(got->entries[0].kills == 12);
+    CHECK(got->entries[0].deaths == 3);
+    CHECK(got->entries[0].matches == 2);
+    CHECK(got->entries[1].name == "bob");
+
+    // The writer truncates rather than trusting its caller: the wire count is
+    // a u8 and the reader enforces the same cap, so an over-long board must
+    // not produce a message the reader will then reject.
+    {
+        game::LeaderboardMsg huge;
+        for (std::size_t i = 0; i < game::kLeaderboardSize * 3; ++i) {
+            huge.entries.push_back({"p" + std::to_string(i), 1, 1, 1});
+        }
+        const auto encoded = encode(huge);
+        eng::ByteReader reader{{encoded.data(), encoded.size()}};
+        game::read_message_type(reader);
+        const auto parsed = game::read_leaderboard(reader);
+        REQUIRE(parsed.has_value());
+        CHECK(parsed->entries.size() == game::kLeaderboardSize);
+    }
+
+    // A declared count beyond the cap is an allocation request, not a message.
+    {
+        eng::ByteWriter w;
+        w.u8(static_cast<std::uint8_t>(game::MessageType::Leaderboard));
+        w.u8(255);
+        eng::ByteReader reader{w.data()};
+        game::read_message_type(reader);
+        CHECK(game::read_leaderboard(reader) == std::nullopt);
+    }
+
+    // Truncated at every possible point.
+    for (std::size_t cut = 1; cut < bytes.size(); ++cut) {
+        std::vector<std::uint8_t> partial{bytes.begin(),
+                                          bytes.begin() + static_cast<std::ptrdiff_t>(cut)};
+        eng::ByteReader reader{{partial.data(), partial.size()}};
+        game::read_message_type(reader);
+        CHECK(game::read_leaderboard(reader) == std::nullopt);
+    }
+
+    // Trailing garbage.
+    {
+        auto extra = bytes;
+        extra.push_back(0xFF);
+        eng::ByteReader reader{{extra.data(), extra.size()}};
+        game::read_message_type(reader);
+        CHECK(game::read_leaderboard(reader) == std::nullopt);
+    }
+}
+
 }  // namespace

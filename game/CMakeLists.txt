@@ -83,6 +83,8 @@ if(NOT EMSCRIPTEN)
         server/main.cpp
         server/server_game.cpp
         server/server_game.h
+        server/stats_store.cpp
+        server/stats_store.h
     )
     target_link_libraries(fps_server PRIVATE fps::engine fps::game_shared)
     fps_set_warnings(fps_server)

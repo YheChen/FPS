@@ -17,7 +17,7 @@
 // returning nullopt means "hostile or corrupt packet - drop it".
 namespace game {
 
-inline constexpr std::uint16_t kProtocolVersion = 4;
+inline constexpr std::uint16_t kProtocolVersion = 5;
 inline constexpr std::uint8_t kMaxPlayers = 8;
 inline constexpr std::size_t kMaxNameLength = 16;
 inline constexpr int kSnapshotDivisor = 3;  // 60 Hz ticks -> 20 Hz snapshots
@@ -40,7 +40,16 @@ enum class MessageType : std::uint8_t {
     ScoreUpdate = 12,
     MatchState = 13,
     WeaponStatus = 14,
+    // Career stats that outlive the match (M29), server -> client,
+    // reliable. Pushed after the welcome and again at match end; the
+    // client never asks for it, so there is no request to rate-limit.
+    Leaderboard = 15,
 };
+
+// How many rows the server will ever send. Bounded on the wire because
+// the store behind it is bounded too, and a leaderboard nobody can read
+// in one screen is not a leaderboard.
+inline constexpr std::size_t kLeaderboardSize = 10;
 
 inline constexpr std::uint8_t kNoPlayer = 255;  // "no player" id (world/none)
 
@@ -65,6 +74,21 @@ struct ServerWelcome {
     std::uint8_t snapshot_rate = 20;
     std::uint32_t server_tick = 0;
     std::string map;  // e.g. "maps/arena01.glb"
+};
+
+// One career record. These are NOT authenticated: there are no accounts,
+// players are identified by the name they typed, and anyone may type any
+// name. The client says so on screen -- a leaderboard that looks
+// authoritative and is not would be worse than having none.
+struct LeaderboardEntry {
+    std::string name;
+    std::uint32_t kills = 0;
+    std::uint32_t deaths = 0;
+    std::uint32_t matches = 0;
+};
+
+struct LeaderboardMsg {
+    std::vector<LeaderboardEntry> entries;  // best first, at most kLeaderboardSize
 };
 
 struct ServerReject {
@@ -184,6 +208,7 @@ void write(eng::ByteWriter& w, const PlayerDiedMsg& m);
 void write(eng::ByteWriter& w, const PlayerRespawnedMsg& m);
 void write(eng::ByteWriter& w, const ScoreUpdateMsg& m);
 void write(eng::ByteWriter& w, const MatchStateMsg& m);
+void write(eng::ByteWriter& w, const LeaderboardMsg& m);
 void write(eng::ByteWriter& w, const WeaponStatusMsg& m);
 
 // --- decode (after the type byte has been consumed) -------------------------
@@ -200,6 +225,7 @@ std::optional<PlayerDiedMsg> read_player_died(eng::ByteReader& r);
 std::optional<PlayerRespawnedMsg> read_player_respawned(eng::ByteReader& r);
 std::optional<ScoreUpdateMsg> read_score_update(eng::ByteReader& r);
 std::optional<MatchStateMsg> read_match_state(eng::ByteReader& r);
+std::optional<LeaderboardMsg> read_leaderboard(eng::ByteReader& r);
 std::optional<WeaponStatusMsg> read_weapon_status(eng::ByteReader& r);
 
 // Reads and validates the leading type byte.

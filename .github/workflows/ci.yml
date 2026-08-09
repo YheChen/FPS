@@ -5,6 +5,17 @@ on:
     branches: [main]
   pull_request:
 
+# The client's server address is compiled in, not read at runtime, so it is a
+# property of the build rather than of the deployment. Setting it here means
+# the binary the browser smoke test exercises is the same binary that ships --
+# baking it only at deploy time would ship something no test ever loaded.
+#
+# Repository variables override both, so a fork does not have to inherit this
+# deployment's hostnames.
+env:
+  FPS_WEB_SERVER_URL: ${{ vars.FPS_WEB_SERVER_URL || 'wss://fps-server.yanzhenchen.ca' }}
+  FPS_CLIENT_URL: ${{ vars.FPS_CLIENT_URL || 'https://fps.yanzhenchen.ca' }}
+
 jobs:
   build-and-test:
     strategy:
@@ -135,7 +146,9 @@ jobs:
       # everywhere else become real narrowing on this target. Turning this on
       # found three of them in the WebSocket frame parser.
       - name: Configure
-        run: emcmake cmake --preset web -DFPS_WARNINGS_AS_ERRORS=ON
+        run: |
+          emcmake cmake --preset web -DFPS_WARNINGS_AS_ERRORS=ON \
+                        -DFPS_WEB_SERVER_URL="$FPS_WEB_SERVER_URL"
 
       - name: Build
         run: cmake --build --preset web --parallel
@@ -151,17 +164,144 @@ jobs:
       - name: Browser smoke test (zero-height canvas at startup)
         run: node tools/web_smoke.mjs --zero-canvas
 
+      # Assembled into one flat directory rather than uploaded as scattered
+      # paths, because this IS the deployable site: what `deploy-web` uploads
+      # to Vercel is this directory verbatim. Staging it here means the layout
+      # is decided by the job that knows how the build lays out, and the same
+      # tree is what a human downloads when a smoke test fails.
+      #
+      # `favicon.ico` is copied next to the client by CMake (it cannot ride in
+      # the --preload-file bundle; the tab chrome fetches it over HTTP), and
+      # `vercel.json` carries the `/` rewrite and the cache headers.
+      - name: Stage the deployable site
+        if: always()
+        run: |
+          if [ ! -f build/web/game/fps_client.wasm ]; then
+            echo "::notice::no client build to stage"
+            exit 0
+          fi
+          mkdir -p dist
+          cp build/web/game/fps_client.html \
+             build/web/game/fps_client.js \
+             build/web/game/fps_client.wasm \
+             build/web/game/fps_client.data \
+             build/web/game/favicon.ico \
+             dist/
+          cp web/vercel.json dist/
+          ls -l dist
+
       - name: Upload the built client
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: web-client
-          path: |
-            build/web/game/fps_client.html
-            build/web/game/fps_client.js
-            build/web/game/fps_client.wasm
-            build/web/game/fps_client.data
+          path: dist
           if-no-files-found: warn
+
+  # Publishes the client the `web` job just proved renders in a real browser.
+  #
+  # It deploys that job's ARTIFACT rather than rebuilding: a second compile is
+  # a second binary, and shipping one no smoke test ever loaded is precisely
+  # the gap this milestone closes. The `needs:` is therefore a quality gate,
+  # not just ordering -- a client that fails to render cannot reach players.
+  #
+  # Only on a push to main. Pull requests must not deploy, and must not be
+  # handed the token: a PR from a fork would otherwise get publish rights to
+  # the live site.
+  deploy-web:
+    needs: web
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Two pushes in quick succession would otherwise race, and the loser --
+    # not the newer commit -- could be the one left live. Never cancel a
+    # deploy midway; a half-uploaded site is worse than a queued one.
+    concurrency:
+      group: deploy-web
+      cancel-in-progress: false
+    steps:
+      # The `secrets` context is not available in a job-level `if`, so the
+      # gate has to be a step. An unconfigured repository (a fork, or this one
+      # before the secrets are added) should skip the deploy and say so --
+      # not fail a build whose code is fine.
+      - name: Is Vercel configured?
+        id: gate
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          if [ -n "$VERCEL_TOKEN" ] && [ -n "$VERCEL_ORG_ID" ] && [ -n "$VERCEL_PROJECT_ID" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Vercel secrets not set; skipping the deploy (docs/deploy.md section 5)."
+          fi
+
+      - name: Download the smoke-tested client
+        if: steps.gate.outputs.ready == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: web-client
+          path: dist
+
+      # Pinned like every other dependency. `--yes` skips the interactive
+      # project prompt; ORG/PROJECT ids in the environment are what tell the
+      # CLI which project this is, with no `vercel link` and no committed
+      # `.vercel/` directory.
+      - name: Deploy to Vercel
+        if: steps.gate.outputs.ready == 'true'
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          npm install -g vercel@58.9.0
+          vercel deploy dist --prod --yes --token "$VERCEL_TOKEN"
+
+      # A deploy that reports success and serves the previous build is the
+      # exact failure this project has already hit once: `vercel.json` used to
+      # mark these filenames `immutable`, so returning players kept a client
+      # compiled against a hostname that no longer existed. "The command
+      # exited 0" is not evidence the site changed -- fetching it is.
+      #
+      # Retried because a CDN propagates; failed outright after five minutes,
+      # because by then it is not propagation.
+      - name: Verify the live site serves this exact build
+        if: steps.gate.outputs.ready == 'true'
+        run: |
+          set -uo pipefail
+          expected=$(sha256sum dist/fps_client.wasm | cut -d' ' -f1)
+          echo "built wasm sha256: $expected"
+          for attempt in $(seq 1 20); do
+            actual=$(curl -fsSL --max-time 60 "$FPS_CLIENT_URL/fps_client.wasm" \
+                     | sha256sum | cut -d' ' -f1 || true)
+            if [ "$actual" = "$expected" ]; then
+              echo "live site matches the build after attempt ${attempt}"
+              # The `/` rewrite is configuration too, and it can break on its
+              # own while the asset is perfectly correct.
+              curl -fsS --max-time 30 "$FPS_CLIENT_URL/" | grep -qi 'canvas' \
+                || { echo "::error::$FPS_CLIENT_URL/ did not serve the client page"; exit 1; }
+              # These filenames never change between builds, so `immutable`
+              # means a returning player is pinned to whatever they cached --
+              # for a year. That has already happened here once, and it had to
+              # be found by hand in a private browsing window. `vercel.json`
+              # fixes it; this makes sure the fix is what actually shipped,
+              # since uploading a correct config and serving an old one is the
+              # failure mode, not writing the wrong config.
+              if curl -fsSI --max-time 30 "$FPS_CLIENT_URL/fps_client.wasm" \
+                 | grep -qi 'cache-control:.*immutable'; then
+                echo "::error::$FPS_CLIENT_URL serves fps_client.wasm as immutable; vercel.json did not take effect"
+                exit 1
+              fi
+              echo "### Deployed [$FPS_CLIENT_URL]($FPS_CLIENT_URL)" >> "$GITHUB_STEP_SUMMARY"
+              echo "\`fps_client.wasm\` sha256 \`$expected\` verified live." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "attempt ${attempt}: live site served '${actual:-<fetch failed>}'"
+            sleep 15
+          done
+          echo "::error::$FPS_CLIENT_URL never served the wasm just deployed"
+          exit 1
 
   # Proves the deploy instructions, which are the one build nobody runs by
   # accident: a headless box that installs a toolchain and nothing else, then

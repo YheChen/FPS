@@ -342,4 +342,92 @@ TEST_CASE("the leaderboard round-trips and rejects hostile input", "[protocol]")
     }
 }
 
+TEST_CASE("the killcam round-trips and rejects hostile input", "[protocol]") {
+    game::KillCamMsg sent;
+    sent.killer = 3;
+    sent.samples.push_back({{1.0f, 2.0f, 3.0f}, 0.5f, -0.25f});
+    sent.samples.push_back({{4.0f, 5.0f, 6.0f}, -1.5f, 0.75f});
+
+    const auto bytes = encode(sent);
+    eng::ByteReader r{{bytes.data(), bytes.size()}};
+    REQUIRE(game::read_message_type(r) == game::MessageType::KillCam);
+    const auto got = game::read_kill_cam(r);
+    REQUIRE(got.has_value());
+    CHECK(got->killer == 3);
+    REQUIRE(got->samples.size() == 2);
+    CHECK(got->samples[0].position.y == Catch::Approx(2.0f));
+    CHECK(got->samples[0].yaw == Catch::Approx(0.5f));
+    CHECK(got->samples[1].pitch == Catch::Approx(0.75f));
+
+    // The writer truncates rather than trusting its caller; the count is a u8
+    // and the reader enforces the same cap.
+    {
+        game::KillCamMsg huge;
+        huge.killer = 1;
+        for (std::size_t i = 0; i < game::kKillCamSamples * 2; ++i) {
+            huge.samples.push_back({{0.0f, 0.0f, 0.0f}, 0.0f, 0.0f});
+        }
+        const auto encoded = encode(huge);
+        eng::ByteReader reader{{encoded.data(), encoded.size()}};
+        game::read_message_type(reader);
+        const auto parsed = game::read_kill_cam(reader);
+        REQUIRE(parsed.has_value());
+        CHECK(parsed->samples.size() == game::kKillCamSamples);
+    }
+
+    // A count past the cap is an allocation request, not a message.
+    {
+        eng::ByteWriter w;
+        w.u8(static_cast<std::uint8_t>(game::MessageType::KillCam));
+        w.u8(0);
+        w.u8(255);
+        eng::ByteReader reader{w.data()};
+        game::read_message_type(reader);
+        CHECK(game::read_kill_cam(reader) == std::nullopt);
+    }
+
+    // A NaN would not crash -- it would drive the camera transform to
+    // nowhere and produce a black screen nobody could explain.
+    {
+        eng::ByteWriter w;
+        w.u8(static_cast<std::uint8_t>(game::MessageType::KillCam));
+        w.u8(0);
+        w.u8(1);
+        w.u32(0x7FC00000u);  // quiet NaN
+        for (int i = 0; i < 4; ++i) {
+            w.f32(0.0f);
+        }
+        eng::ByteReader reader{w.data()};
+        game::read_message_type(reader);
+        CHECK(game::read_kill_cam(reader) == std::nullopt);
+    }
+
+    // An out-of-range killer id, which would index a player array.
+    {
+        eng::ByteWriter w;
+        w.u8(static_cast<std::uint8_t>(game::MessageType::KillCam));
+        w.u8(200);  // neither a valid slot nor kNoPlayer
+        w.u8(0);
+        eng::ByteReader reader{w.data()};
+        game::read_message_type(reader);
+        CHECK(game::read_kill_cam(reader) == std::nullopt);
+    }
+
+    // Truncated at every offset, and trailing junk.
+    for (std::size_t cut = 1; cut < bytes.size(); ++cut) {
+        std::vector<std::uint8_t> partial{bytes.begin(),
+                                          bytes.begin() + static_cast<std::ptrdiff_t>(cut)};
+        eng::ByteReader reader{{partial.data(), partial.size()}};
+        game::read_message_type(reader);
+        CHECK(game::read_kill_cam(reader) == std::nullopt);
+    }
+    {
+        auto extra = bytes;
+        extra.push_back(0xFF);
+        eng::ByteReader reader{{extra.data(), extra.size()}};
+        game::read_message_type(reader);
+        CHECK(game::read_kill_cam(reader) == std::nullopt);
+    }
+}
+
 }  // namespace

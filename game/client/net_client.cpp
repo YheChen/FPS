@@ -89,6 +89,14 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
             }
             break;
         }
+        case MessageType::KillCam: {
+            if (const auto cam = read_kill_cam(reader)) {
+                kill_cam_ = cam->samples;
+                kill_cam_killer_ = cam->killer;
+                eng::log::info("Killcam: {} samples from player {}", kill_cam_.size(), cam->killer);
+            }
+            break;
+        }
         case MessageType::ServerReject: {
             if (const auto reject = read_server_reject(reader)) {
                 eng::log::error("Server rejected connection (reason {})",
@@ -173,6 +181,8 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
                 if (m->player == my_id_) {
                     self_alive_ = true;
                     self_health_ = 100.0f;
+                    kill_cam_.clear();
+                    kill_cam_killer_ = kNoPlayer;
                 }
                 respawn_events_.push_back(*m);
             }

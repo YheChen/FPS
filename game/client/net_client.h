@@ -102,6 +102,13 @@ public:
     std::uint8_t self_magazine() const { return self_magazine_; }
     bool self_switching() const { return self_switching_; }
     bool self_alive() const { return self_alive_; }
+
+    // The killer's view over the couple of seconds before the local player
+    // died, oldest first. Empty when there is nothing to show -- an
+    // environment death, or a killer who had only just spawned. Cleared on
+    // respawn so a later death cannot replay an older one.
+    const std::vector<ViewSample>& kill_cam() const { return kill_cam_; }
+    std::uint8_t kill_cam_killer() const { return kill_cam_killer_; }
     MatchPhase match_phase() const { return match_phase_; }
     std::uint16_t match_seconds() const { return match_seconds_; }
 
@@ -124,6 +131,8 @@ private:
     std::uint32_t latest_server_tick_ = 0;
     std::string server_map_;
     std::vector<LeaderboardEntry> leaderboard_;
+    std::vector<ViewSample> kill_cam_;
+    std::uint8_t kill_cam_killer_ = kNoPlayer;
     std::uint32_t last_processed_input_ = 0;
     std::map<std::uint8_t, NetPlayer> players_;
     std::optional<SelfAck> pending_self_ack_;

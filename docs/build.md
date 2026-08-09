@@ -94,6 +94,29 @@ above the floor and strictly inside the geometry's extent, and at least one
 collision mesh. Those are the invariants that make a map hostable, and there
 is no kill volume to catch a player who spawns outside the walls.
 
+## Killcam
+
+On death the victim is shown the couple of seconds before it, from the
+killer's viewpoint, with "killed by NAME" under the death overlay. It plays
+once and holds on the final frame rather than looping — a killcam that
+restarts reads as a bug, and the last frame is the moment of the shot.
+
+Nothing about it touches the replay system. **Replays store inputs, not
+positions**, so that a replay landing somewhere different is a determinism bug
+rather than a replay bug; that property is worth more than a killcam. Instead
+the server keeps a small per-player `ViewTrail` (`game/shared/kill_cam.h`) —
+40 samples at 20 Hz, about two seconds — and unicasts the killer's to the
+victim when they die.
+
+It is not the lag-compensation buffer either. `PositionHistory` is 32 ticks
+(~0.5 s) because rewind never goes past 15, and it stores position only.
+Widening a hot, correctness-critical path to carry view angles it has no use
+for would be the wrong trade.
+
+Partial trails are normal, not an error: a killer who spawned a second ago has
+a one-second story. The trail is cleared on respawn, so a later death can
+never replay footage from a previous life.
+
 ## Career stats
 
 Off unless asked for. A server given `--stats` keeps per-player kills, deaths

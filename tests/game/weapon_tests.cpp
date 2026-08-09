@@ -109,4 +109,59 @@ TEST_CASE("manual reload only with a non-full magazine", "[weapon]") {
     CHECK(state.ammo == config.magazine_size);
 }
 
+// A melee weapon is not a gun with absurd stats. Every one of these would be
+// wrong if the knife were modelled as `magazine_size = 999999`: it would
+// still dry-fire eventually, still auto-reload, and still show a round count.
+TEST_CASE("a melee weapon never runs dry and never reloads", "[weapon]") {
+    game::WeaponConfig knife;
+    knife.melee = true;
+    knife.magazine_size = 0;
+    knife.rounds_per_minute = 150.0f;
+    knife.reload_seconds = 0.0f;
+
+    game::WeaponState state;
+    state.ammo = 0;  // and it stays there
+
+    int fired = 0;
+    for (int tick = 0; tick < 600; ++tick) {  // ten seconds of holding it down
+        const game::WeaponTickResult r = game::update_weapon(
+            state, knife, /*fire_held=*/true, /*reload_requested=*/false, 1.0f / 60.0f);
+        if (r.fired) {
+            ++fired;
+        }
+        CHECK_FALSE(r.dry_fired);
+        CHECK_FALSE(r.reload_started);
+        CHECK_FALSE(state.reloading());
+    }
+    // 150 rpm over 10 s is 25 swings, give or take one for tick alignment.
+    CHECK(fired >= 24);
+    CHECK(fired <= 26);
+    CHECK(state.ammo == 0);
+}
+
+TEST_CASE("an explicit reload request does nothing to a melee weapon", "[weapon]") {
+    game::WeaponConfig knife;
+    knife.melee = true;
+    knife.magazine_size = 0;
+    knife.reload_seconds = 2.0f;
+
+    game::WeaponState state;
+    const game::WeaponTickResult r = game::update_weapon(state, knife, /*fire_held=*/false,
+                                                         /*reload_requested=*/true, 1.0f / 60.0f);
+    CHECK_FALSE(r.reload_started);
+    CHECK_FALSE(state.reloading());
+}
+
+// The knife relaxes exactly one validation rule, and only for itself.
+TEST_CASE("magazine_size 0 is allowed only with melee", "[weapon]") {
+    const std::string body =
+        "name=x\ndamage=10\nrounds_per_minute=100\nreload_seconds=0\nrange=2\n";
+    CHECK_FALSE(game::parse_weapon_config(body + "magazine_size=0\n").has_value());
+    CHECK(game::parse_weapon_config(body + "magazine_size=0\nmelee=true\n").has_value());
+    // Negative is still nonsense either way.
+    CHECK_FALSE(game::parse_weapon_config(body + "magazine_size=-1\nmelee=true\n").has_value());
+    // And a non-boolean melee value fails the parse rather than defaulting.
+    CHECK_FALSE(game::parse_weapon_config(body + "magazine_size=1\nmelee=maybe\n").has_value());
+}
+
 }  // namespace

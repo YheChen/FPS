@@ -51,6 +51,8 @@ std::optional<Key> translate_scancode(SDL_Scancode scancode) {
             return Key::Num3;
         case SDL_SCANCODE_4:
             return Key::Num4;
+        case SDL_SCANCODE_5:
+            return Key::Num5;
         default:
             return std::nullopt;
     }

@@ -86,6 +86,31 @@ is described.
 - **Malformed packets:** deserialization returns an error; packet dropped and
   counted; repeated garbage → kick.
 
+## WebSocket transport limits
+
+This is the transport exposed to the open internet — `wss://` in front of a
+browser, reachable by anyone who resolves the name. Everything a peer declares
+is therefore treated as an assertion by an adversary, not as a fact.
+
+| Limit | Value | Why it exists |
+|---|---|---|
+| Frame payload | 64 KiB | The length field is 64 bits and entirely peer-controlled. Unbounded, it is an allocation request, an index, and arithmetic that wraps — `header + len` overflowing lets a nine-byte buffer satisfy the frame-is-complete check. It also has to narrow to `size_t`, which is **32 bits on wasm32**. |
+| Reassembled message | 256 KiB | FIN is the peer's to set. Individually legal continuation frames that never terminate grow the reassembly buffer until the process dies. |
+| Pre-upgrade buffer | 16 KiB | The two caps above are framing limits, and there is no framing before the upgrade. A request that never sends its terminating blank line would otherwise stream in freely. |
+| Time to upgrade | 10 s | An accepted socket holds a peer slot without being a player. |
+
+The last one is the cheapest attack of the four: `max_peers` TCP connections
+that send **nothing at all** — no valid protocol, no data, no cost to the
+attacker — deny every real player a slot for as long as they stay open. The
+largest legitimate message here is a full snapshot, a couple of hundred bytes,
+and a real upgrade completes in single-digit milliseconds; every limit above
+sits orders of magnitude clear of normal traffic.
+
+Reaping an un-upgraded peer emits **no** `Disconnected` event. Only a peer that
+upgraded was ever announced as `Connected`, so reporting its departure would be
+the first `ServerGame` ever heard of it — and during exactly the flood the
+deadline exists to stop, it would be a steady stream of them.
+
 ## WebRTC DataChannel transport (M19a)
 
 Browsers cannot open UDP sockets, so the browser client reaches the server

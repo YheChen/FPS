@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -194,6 +195,13 @@ constexpr std::uint8_t kOpPong = 0xA;
 constexpr std::uint64_t kMaxFramePayload = 64u * 1024u;
 constexpr std::size_t kMaxMessageLength = 256u * 1024u;
 
+// The caps above cover framed traffic, which only exists after the upgrade.
+// Before it there is no framing to bound, so a peer that opens an HTTP request
+// and never sends the blank line ending it could otherwise stream into the
+// handshake buffer for the whole timeout window. A real upgrade request is a
+// few hundred bytes.
+constexpr std::size_t kMaxHandshakeBytes = 16u * 1024u;
+
 // Appends a server->client frame (never masked) with the given opcode.
 void append_frame(std::vector<std::uint8_t>& out, std::uint8_t opcode,
                   std::span<const std::uint8_t> payload) {
@@ -220,11 +228,13 @@ void append_frame(std::vector<std::uint8_t>& out, std::uint8_t opcode,
 struct WebSocketHost::Impl {
     socket_t listener = INVALID_SOCKET;
     std::size_t max_peers = 8;
+    std::chrono::milliseconds handshake_timeout = WebSocketHost::kDefaultHandshakeTimeout;
     std::uint32_t next_peer_id = 1;
     NetStats stats;
 
     struct Connection {
         socket_t fd = INVALID_SOCKET;
+        std::chrono::steady_clock::time_point accepted_at{};
         bool handshaked = false;
         bool closing = false;
         std::vector<std::uint8_t> in;   // raw bytes received, not yet parsed
@@ -278,8 +288,8 @@ WebSocketHost::~WebSocketHost() = default;
 WebSocketHost::WebSocketHost(WebSocketHost&&) noexcept = default;
 WebSocketHost& WebSocketHost::operator=(WebSocketHost&&) noexcept = default;
 
-std::optional<WebSocketHost> WebSocketHost::create_server(std::uint16_t port,
-                                                          std::size_t max_peers) {
+std::optional<WebSocketHost> WebSocketHost::create_server(
+    std::uint16_t port, std::size_t max_peers, std::chrono::milliseconds handshake_timeout) {
 #if defined(_WIN32)
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
@@ -289,6 +299,7 @@ std::optional<WebSocketHost> WebSocketHost::create_server(std::uint16_t port,
 #endif
     WebSocketHost host;
     host.impl_->max_peers = max_peers;
+    host.impl_->handshake_timeout = handshake_timeout;
     host.impl_->listener = socket(AF_INET, SOCK_STREAM, 0);
     if (host.impl_->listener == INVALID_SOCKET) {
         log::error("WebSocket: socket() failed");
@@ -329,10 +340,15 @@ void WebSocketHost::poll(std::vector<NetEvent>& out) {
         set_nonblocking(fd);
         set_nodelay(fd);
         const std::uint32_t id = impl_->next_peer_id++;
-        impl_->peers[id].fd = fd;
+        auto& conn = impl_->peers[id];
+        conn.fd = fd;
+        conn.accepted_at = std::chrono::steady_clock::now();
     }
 
     std::vector<std::uint32_t> dead;
+    // One reading for the whole sweep, so peers are judged against the same
+    // instant rather than drifting apart across a long poll.
+    const auto now = std::chrono::steady_clock::now();
     for (auto& [id, conn] : impl_->peers) {
         // Read whatever is available.
         std::array<std::uint8_t, 4096> buffer;
@@ -379,6 +395,25 @@ void WebSocketHost::poll(std::vector<NetEvent>& out) {
                     conn.handshaked = true;
                     out.push_back({NetEvent::Type::Connected, id, NetChannel::Reliable, {}});
                 }
+            }
+        }
+
+        // Limits that apply only before the upgrade. A connection that has not
+        // upgraded occupies a peer slot without being a player, so both what
+        // it may buffer and how long it may hold that slot are bounded --
+        // otherwise `max_peers` silent sockets, costing an attacker nothing
+        // and speaking no valid protocol, lock out every real player for as
+        // long as they stay open. Checked after the handshake block so a peer
+        // that upgrades on this very poll is not judged by the deadline.
+        if (!conn.handshaked && !closed) {
+            if (conn.in.size() > kMaxHandshakeBytes) {
+                log::warn("WebSocket peer {}: handshake exceeds {} bytes, closing", id,
+                          kMaxHandshakeBytes);
+                closed = true;
+            } else if (now - conn.accepted_at > impl_->handshake_timeout) {
+                log::warn("WebSocket peer {}: no upgrade within {} ms, closing", id,
+                          impl_->handshake_timeout.count());
+                closed = true;
             }
         }
 
@@ -486,11 +521,20 @@ void WebSocketHost::poll(std::vector<NetEvent>& out) {
 
     for (const std::uint32_t id : dead) {
         auto it = impl_->peers.find(id);
-        if (it != impl_->peers.end()) {
-            ENG_CLOSESOCK(it->second.fd);
-            impl_->peers.erase(it);
+        if (it == impl_->peers.end()) {
+            continue;
         }
-        out.push_back({NetEvent::Type::Disconnected, id, NetChannel::Reliable, {}});
+        // Only a peer that upgraded was ever announced as Connected, and only
+        // that peer's departure is news. Reporting a Disconnected for one that
+        // never upgraded would be the first the game ever heard of it -- and
+        // under the flood this timeout exists to stop, it would be a steady
+        // stream of them.
+        const bool announced = it->second.handshaked;
+        ENG_CLOSESOCK(it->second.fd);
+        impl_->peers.erase(it);
+        if (announced) {
+            out.push_back({NetEvent::Type::Disconnected, id, NetChannel::Reliable, {}});
+        }
     }
 }
 

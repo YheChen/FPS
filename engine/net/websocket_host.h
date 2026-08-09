@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -21,7 +22,17 @@ namespace eng {
 
 class WebSocketHost final : public IServerTransport {
 public:
-    static std::optional<WebSocketHost> create_server(std::uint16_t port, std::size_t max_peers);
+    // How long a connection may sit accepted-but-not-upgraded before it is
+    // dropped. A socket that never speaks still holds a peer slot, so without
+    // a deadline `max_peers` idle connections -- which cost an attacker
+    // nothing and need no valid protocol -- lock every real player out. Ten
+    // seconds is far past what a real upgrade takes and far short of what an
+    // attacker needs.
+    static constexpr std::chrono::milliseconds kDefaultHandshakeTimeout{10'000};
+
+    static std::optional<WebSocketHost> create_server(
+        std::uint16_t port, std::size_t max_peers,
+        std::chrono::milliseconds handshake_timeout = kDefaultHandshakeTimeout);
 
     ~WebSocketHost() override;
     WebSocketHost(WebSocketHost&&) noexcept;

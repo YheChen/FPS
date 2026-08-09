@@ -21,6 +21,8 @@ services:
       - "--no-enet"
       - "--bots"
       - "${FPS_BOTS:-0}"
+      - "--bot-skill"
+      - "${FPS_BOT_SKILL:-normal}"
       # The client loads its geometry before it knows which map the server
       # runs, so changing this makes browser clients built for the old map
       # refuse to join rather than play against invisible walls. Rebuild and

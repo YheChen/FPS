@@ -56,6 +56,10 @@ public:
     // cases for them.
     bool add_bot(std::string name);
 
+    // Applies to every bot, including ones already in the match. Difficulty
+    // is a property of the server, not of an individual bot.
+    void set_bot_config(const BotConfig& config) { bot_config_ = config; }
+
     void start_recording(std::filesystem::path path);
     bool recording() const { return recorder_.recording(); }
     // Writes the recording started by start_recording(). No-op (returning

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <string_view>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -84,15 +85,22 @@ TEST_CASE("a bot turns toward its target at a bounded rate", "[bot]") {
     game::BotSenses senses = looking_at_enemy(15.0f);
     senses.target_position = {15.0f, 0.0f, 0.0f};
 
-    const game::InputCommand first = game::decide(state, senses, config, kDt, 1);
+    // Past the reaction delay, but only just.
+    const int reaction_ticks = static_cast<int>(config.reaction_seconds / kDt) + 1;
+    run(state, senses, config, reaction_ticks);
+    const float before = state.aim_yaw;
+    const game::InputCommand step = game::decide(state, senses, config, kDt, 999);
     // One tick must not snap all the way round: instant aim would make bots
     // unbeatable and would bypass the fire cone entirely.
-    CHECK(std::abs(first.yaw) <= config.turn_speed * kDt + 1e-5f);
-    CHECK(std::abs(first.yaw) > 0.0f);
+    CHECK(std::abs(game::shortest_angle_delta(before, step.yaw)) <=
+          config.turn_speed * kDt + 1e-5f);
+    CHECK(std::abs(game::shortest_angle_delta(before, step.yaw)) > 0.0f);
 
-    // Given time, it arrives.
-    run(state, senses, config, 120);
-    CHECK(std::abs(game::shortest_angle_delta(state.aim_yaw, kPi * 0.5f)) < 0.02f);
+    // Given time it arrives -- but only to within its aim error, never onto
+    // the target exactly. That residual is the point of the whole mechanism.
+    run(state, senses, config, 240);
+    const float settled_error = std::abs(game::shortest_angle_delta(state.aim_yaw, kPi * 0.5f));
+    CHECK(settled_error < config.aim_error_radians + 0.02f);
 }
 
 TEST_CASE("a bot holds fire until it is actually on target", "[bot]") {
@@ -104,8 +112,135 @@ TEST_CASE("a bot holds fire until it is actually on target", "[bot]") {
     const game::InputCommand first = game::decide(state, senses, config, kDt, 1);
     CHECK_FALSE(game::has_button(first, game::Button::Fire));
 
-    const game::InputCommand settled = run(state, senses, config, 120);
-    CHECK(game::has_button(settled, game::Button::Fire));
+    // It gets there eventually. Checked over a window rather than on one
+    // tick, because trigger discipline means a settled bot is deliberately
+    // not firing much of the time.
+    run(state, senses, config, 240);
+    int firing = 0;
+    for (int i = 0; i < 240; ++i) {
+        if (game::has_button(
+                game::decide(state, senses, config, kDt, 5000u + static_cast<std::uint32_t>(i)),
+                game::Button::Fire)) {
+            ++firing;
+        }
+    }
+    CHECK(firing > 0);
+}
+
+// Reaction time is the most human-feeling of the three limits and the one a
+// player notices most: it is the difference between rounding a corner and
+// dying, and rounding a corner and getting to act first.
+TEST_CASE("a bot does not react to a target instantly", "[bot]") {
+    game::BotConfig config;
+    game::BotState state;
+    const game::BotSenses senses = looking_at_enemy(15.0f);
+
+    const int reaction_ticks = static_cast<int>(config.reaction_seconds / kDt);
+    REQUIRE(reaction_ticks > 1);
+
+    // Nothing at all for the whole delay: no shooting, and no turning either.
+    const float initial_yaw = state.aim_yaw;
+    for (int i = 0; i < reaction_ticks - 1; ++i) {
+        const game::InputCommand command =
+            game::decide(state, senses, config, kDt, static_cast<std::uint32_t>(i));
+        CHECK_FALSE(game::has_button(command, game::Button::Fire));
+    }
+    CHECK(state.aim_yaw == Approx(initial_yaw));
+
+    // And then it acts.
+    int firing = 0;
+    for (int i = 0; i < 240; ++i) {
+        if (game::has_button(
+                game::decide(state, senses, config, kDt, 900u + static_cast<std::uint32_t>(i)),
+                game::Button::Fire)) {
+            ++firing;
+        }
+    }
+    CHECK(firing > 0);
+}
+
+// The bug this guards: aim used to converge on the target and stay there
+// exactly, so `turn_speed` bounded how fast a bot got on target and NOTHING
+// bounded how well it held. Steady-state error was zero -- an opponent that
+// cannot be outplayed, only outranged.
+TEST_CASE("a bot's aim never settles exactly on its target", "[bot]") {
+    game::BotConfig config;
+    game::BotState state;
+    const game::BotSenses senses = looking_at_enemy(15.0f);  // dead ahead
+
+    run(state, senses, config, 240);  // long past reaction and acquisition
+
+    float peak = 0.0f;
+    for (int i = 0; i < 600; ++i) {  // ten seconds, several sway cycles
+        game::decide(state, senses, config, kDt, 7000u + static_cast<std::uint32_t>(i));
+        peak = std::max(peak, std::abs(game::shortest_angle_delta(state.aim_yaw, 0.0f)));
+    }
+    // It genuinely wanders...
+    CHECK(peak > 0.3f * config.aim_error_radians);
+    // ...but stays bounded, so a bot never spins off somewhere absurd.
+    CHECK(peak <= config.aim_error_radians + 1e-3f);
+}
+
+// Trigger discipline is what actually decides lethality: the rifle is 600 rpm
+// for 25 damage against 100 health, so a held trigger kills in 0.4 s of hits
+// and aim error only changes how long "a moment" lasts.
+TEST_CASE("a bot releases the trigger between bursts", "[bot]") {
+    game::BotConfig config;
+    game::BotState state;
+    const game::BotSenses senses = looking_at_enemy(12.0f);  // dead ahead, in range
+
+    run(state, senses, config, 240);
+
+    int firing = 0;
+    int holding = 0;
+    for (int i = 0; i < 600; ++i) {
+        if (game::has_button(
+                game::decide(state, senses, config, kDt, 3000u + static_cast<std::uint32_t>(i)),
+                game::Button::Fire)) {
+            ++firing;
+        } else {
+            ++holding;
+        }
+    }
+    // Both happen: a bot that never fires is broken, and one that never stops
+    // is the thing being fixed.
+    CHECK(firing > 0);
+    CHECK(holding > 0);
+    // And the gaps are a real share of the time, not a single dropped tick.
+    CHECK(holding > 60);
+}
+
+// A preset ladder is only useful if it is ordered. This is cheap insurance
+// against a future edit that makes `easy` the hardest by accident.
+TEST_CASE("the bot skill ladder is monotonic", "[bot]") {
+    const auto easy = game::bot_config_for(game::BotSkill::Easy);
+    const auto normal = game::bot_config_for(game::BotSkill::Normal);
+    const auto hard = game::bot_config_for(game::BotSkill::Hard);
+    const auto deadly = game::bot_config_for(game::BotSkill::Deadly);
+
+    // Slower to react, the easier it is.
+    CHECK(easy.reaction_seconds > normal.reaction_seconds);
+    CHECK(normal.reaction_seconds > hard.reaction_seconds);
+    CHECK(hard.reaction_seconds > deadly.reaction_seconds);
+    // Worse aim, the easier it is.
+    CHECK(easy.aim_error_radians > normal.aim_error_radians);
+    CHECK(normal.aim_error_radians > hard.aim_error_radians);
+    CHECK(hard.aim_error_radians > deadly.aim_error_radians);
+    // More time off the trigger, the easier it is.
+    CHECK(easy.burst_pause_seconds > normal.burst_pause_seconds);
+    CHECK(normal.burst_pause_seconds > hard.burst_pause_seconds);
+    CHECK(hard.burst_pause_seconds > deadly.burst_pause_seconds);
+
+    // Deadly is the control case: the exact pre-M31 behaviour, kept so a
+    // change to movement or hit detection can be measured against something
+    // with no deliberate handicap in it.
+    CHECK(deadly.reaction_seconds == 0.0f);
+    CHECK(deadly.aim_error_radians == 0.0f);
+
+    CHECK(game::bot_skill_from_name("easy") == game::BotSkill::Easy);
+    CHECK(game::bot_skill_from_name("deadly") == game::BotSkill::Deadly);
+    CHECK_FALSE(game::bot_skill_from_name("nonsense").has_value());
+    CHECK(std::string_view{game::bot_skill_name(game::BotSkill::Hard)} == "hard");
 }
 
 TEST_CASE("a bot does not shoot through cover", "[bot]") {

@@ -94,6 +94,49 @@ above the floor and strictly inside the geometry's extent, and at least one
 collision mesh. Those are the invariants that make a map hostable, and there
 is no kill volume to catch a player who spawns outside the walls.
 
+## Bot difficulty
+
+```sh
+./build/release/game/fps_server --bots 4 --bot-skill easy
+```
+
+`easy | normal | hard | deadly`, default `normal`.
+
+A bot is a player whose `InputCommand`s are synthesized, so it goes through
+the same movement, hit detection and scoring as a human. What used to make
+them unfair was not that they cheated — it was that three human limits were
+simply absent:
+
+| Limit | Why it matters |
+|---|---|
+| **Reaction time** | Bots acted on the same tick a target appeared. This is the difference between rounding a corner and dying, and rounding a corner and getting to act first. |
+| **Aim error** | Aim converged on the target and then stayed there *exactly*, forever, however the target moved. `turn_speed` bounded how fast a bot got on target; nothing bounded how well it held. |
+| **Trigger discipline** | The trigger was held from first sight until someone died. |
+
+The third one dominates, and it is worth knowing why: the rifle is 600 rpm for
+25 damage against 100 health, so a held trigger kills in **0.4 s of hits**. At
+that rate aim error only changes how long "a moment" lasts, not the outcome —
+the first attempt at this tuned aim error alone and moved bot-vs-bot lethality
+by barely a tenth.
+
+Measured over 60 s with four bots on arena01, deterministically:
+
+| Skill | Kills | Average life |
+|---|---|---|
+| `easy` | 11 | ~22 s |
+| `normal` | 24 | ~10 s |
+| `hard` | 42 | ~6 s |
+| `deadly` | 48 | ~5 s |
+
+`deadly` is the pre-M31 behaviour exactly — zero reaction, zero aim error,
+trigger never released. It is kept as the control case for measuring whether a
+change to movement or hit detection made bots better or worse, not as a
+difficulty anyone should have to play against.
+
+Bot decisions stay a pure function of `(state, senses, config, seed)` with the
+gameplay RNG, so all of this is deterministic and a recorded match containing
+bots still replays exactly.
+
 ## Options
 
 | CMake option              | Default | Effect                                  |

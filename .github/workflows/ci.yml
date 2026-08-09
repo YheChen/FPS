@@ -223,6 +223,9 @@ jobs:
     needs: web
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # To move the `client-live` tag below.
+    permissions:
+      contents: write
     # Two pushes in quick succession would otherwise race, and the loser --
     # not the newer commit -- could be the one left live. Never cancel a
     # deploy midway; a half-uploaded site is worse than a queued one.
@@ -313,6 +316,25 @@ jobs:
           done
           echo "::error::$FPS_CLIENT_URL never served the wasm just deployed"
           exit 1
+
+      # Records WHICH COMMIT's client is live, as a git tag.
+      #
+      # version.json says the same thing over HTTP, and that turned out to be
+      # unreadable by anything that is not a browser: Vercel's bot mitigation
+      # answers `curl` with a JavaScript challenge page and a 403. A guard
+      # whose source of truth sits behind a WAF is a guard that fails closed
+      # forever, which is what happened.
+      #
+      # A tag has none of that. The consumer is a host that already does a
+      # `git fetch` against this repo, needs no new credential, and gets an
+      # answer no interstitial can intercept. version.json stays -- it is
+      # genuinely useful from a browser console -- but it is no longer what
+      # anything depends on.
+      - name: Mark this commit as the live client
+        if: steps.gate.outputs.ready == 'true'
+        run: |
+          git tag -f client-live "$GITHUB_SHA"
+          git push -f origin refs/tags/client-live
 
   # Proves the deploy instructions, which are the one build nobody runs by
   # accident: a headless box that installs a toolchain and nothing else, then

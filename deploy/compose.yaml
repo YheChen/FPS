@@ -47,7 +47,11 @@ services:
     # replace, which would reintroduce the torn write it exists to prevent.
     read_only: true
     volumes:
-      - fps-stats:/var/lib/fps:z
+      # No `:z` here. That flag relabels a BIND mount for SELinux; on a named
+      # volume it is meaningless, and Docker warns "mount of type volume
+      # should not define bind option". The other mounts in this file are
+      # binds and do need it.
+      - fps-stats:/var/lib/fps
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]

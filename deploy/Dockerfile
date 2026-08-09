@@ -39,6 +39,14 @@ RUN dnf install -y python3 \
     && dnf clean all \
     && useradd --system --home /opt/fps --shell /usr/sbin/nologin fps
 
+# The stats volume mounts here. The directory has to exist IN THE IMAGE, owned
+# by the user the server runs as: Docker initializes a new named volume from
+# the image's ownership at that path, and when the path is absent it creates
+# it root-owned instead. The server then runs as uid 999 against a root:root
+# 0755 directory and every save fails with "cannot write ... .tmp" -- which is
+# exactly what the first real deploy did.
+RUN install -d -o fps -g fps -m 0755 /var/lib/fps
+
 WORKDIR /opt/fps
 
 COPY --from=build /src/build/release/game/fps_server /opt/fps/fps_server

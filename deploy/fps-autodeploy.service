@@ -5,7 +5,19 @@
 #     sudo systemctl enable --now fps-autodeploy.timer
 #
 # User= must be the account that owns the clone AND is in the `docker` group.
-# Edit both it and the paths below if yours differs.
+# Edit it and the paths below if yours differs.
+#
+# INSTALL THE SCRIPT TO /opt, NOT FROM THE CLONE. On a SELinux host -- which
+# Fedora is, enforcing, and which is the documented target -- a file under
+# /home carries `user_home_t`, and systemd (init_t) is not permitted to
+# execute that. Pointing ExecStart into the repo fails with a 203/EXEC and a
+# bare "Permission denied" that names no cause and looks like a file mode:
+#
+#     sudo install -m 0755 tools/server_autodeploy.sh \
+#          /opt/fps/tools/server_autodeploy.sh
+#
+# Only the executable needs moving. WorkingDirectory and FPS_REPO still point
+# at the clone, which the script only reads and writes as the user.
 
 [Unit]
 Description=Redeploy the FPS dedicated server when main moves
@@ -19,7 +31,15 @@ Type=oneshot
 User=yanzhen
 WorkingDirectory=/home/yanzhen/GitHub/FPS
 Environment=FPS_REPO=/home/yanzhen/GitHub/FPS
-ExecStart=/home/yanzhen/GitHub/FPS/tools/server_autodeploy.sh
+ExecStart=/opt/fps/tools/server_autodeploy.sh
+
+# Exit 2 is the protocol guard declining to ship a server that no published
+# client could join. That is a correct, expected and RECURRING outcome -- it
+# is the answer every ten minutes for as long as the client lags behind -- so
+# it must not leave the unit sitting in "failed", where it would be permanent
+# red in systemctl and a page for anything watching. Exit 1 stays a real
+# failure.
+SuccessExitStatus=2
 
 # A build is minutes, not seconds, and the timer must not stack another run on
 # top of one already going.

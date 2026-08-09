@@ -66,6 +66,11 @@ public:
     const char* state_name() const;
     std::uint8_t my_id() const { return my_id_; }
     std::uint32_t server_tick() const { return latest_server_tick_; }
+    // The map the server says it is running, from ServerWelcome. Empty until
+    // the welcome arrives. The client loads its map before connecting, so
+    // this is what it has to be checked against -- playing a match against
+    // geometry the server is not simulating is silently, unfixably wrong.
+    const std::string& server_map() const { return server_map_; }
     std::uint32_t last_processed_input() const { return last_processed_input_; }
     std::uint32_t rtt_ms() const { return transport_->rtt_ms(); }
     const eng::NetStats& stats() const { return transport_->stats(); }
@@ -111,6 +116,7 @@ private:
     State state_ = State::Connecting;
     std::uint8_t my_id_ = 0;
     std::uint32_t latest_server_tick_ = 0;
+    std::string server_map_;
     std::uint32_t last_processed_input_ = 0;
     std::map<std::uint8_t, NetPlayer> players_;
     std::optional<SelfAck> pending_self_ack_;

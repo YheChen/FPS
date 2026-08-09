@@ -257,6 +257,10 @@ struct ClientArgs {
     std::optional<float> fixed_yaw;          // lock the view yaw (radians)
     std::optional<std::string> screenshot;   // PNG written on the final frame
     std::optional<std::string> replay_path;  // --replay: watch a recording
+    // Geometry is loaded once, before the menu, because the menu orbits it.
+    // So the map has to be chosen before the server can be asked which one it
+    // is running; a mismatch is caught at the welcome instead.
+    std::string map = "maps/arena01.glb";  // --map
 };
 
 ClientArgs parse_args(int argc, char** argv) {
@@ -292,6 +296,10 @@ ClientArgs parse_args(int argc, char** argv) {
         } else if (arg == "--name") {
             if (const auto value = next_value()) {
                 args.name = std::string(*value);
+            }
+        } else if (arg == "--map") {
+            if (const auto value = next_value()) {
+                args.map = std::string(*value);
             }
         } else if (arg == "--no-vsync") {
             args.vsync = false;
@@ -752,10 +760,17 @@ int main(int argc, char** argv) {
         return 1;
     }
     eng::AssetCache assets{*assets_root};
-    const eng::GltfModel* arena = assets.model("maps/arena01.glb");
-    if (arena == nullptr) {
+    const std::string map_path = eng::normalize_asset_path(args.map);
+    if (map_path.empty() || eng::asset_path_escapes_root(map_path)) {
+        eng::log::error("--map '{}' is not a path inside assets/", args.map);
         return 1;
     }
+    const eng::GltfModel* arena = assets.model(map_path);
+    if (arena == nullptr) {
+        eng::log::error("Could not load map '{}'", map_path);
+        return 1;
+    }
+    eng::log::info("Map: {}", map_path);
 
     // Base color images are sRGB-encoded; the shader wants linear values, so
     // GL does the conversion on sample. No vertical flip: glTF's UV origin is
@@ -1168,12 +1183,28 @@ int main(int argc, char** argv) {
         if (online) {
             net->set_simulation(sim_config);
             net->poll();
+            // Geometry was loaded before the server could be asked which map
+            // it runs, so the welcome is the first chance to find out. A
+            // mismatch is not a degraded match, it is a different world:
+            // shots stop at walls the server has never heard of and every
+            // authoritative position is meaningless. Refuse it, and say what
+            // to relaunch with rather than leaving the player to guess why
+            // the game is behaving impossibly.
+            const bool wrong_map = net->state() == game::NetClient::State::InGame &&
+                                   !net->server_map().empty() && net->server_map() != map_path;
             // Server gone or refused us: back to the menu.
-            if (net->state() == game::NetClient::State::Disconnected ||
+            if (wrong_map || net->state() == game::NetClient::State::Disconnected ||
                 net->state() == game::NetClient::State::Rejected) {
-                menu_error = net->state() == game::NetClient::State::Rejected
-                                 ? "server rejected the connection"
-                                 : "disconnected from server";
+                if (wrong_map) {
+                    eng::log::error("Server runs '{}' but this client loaded '{}'",
+                                    net->server_map(), map_path);
+                    menu_error = "server is on " + net->server_map() + "; relaunch with --map " +
+                                 net->server_map();
+                } else {
+                    menu_error = net->state() == game::NetClient::State::Rejected
+                                     ? "server rejected the connection"
+                                     : "disconnected from server";
+                }
                 net.reset();
                 prediction.reset();
                 online = false;

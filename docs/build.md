@@ -53,6 +53,47 @@ so the web client joins over WebSockets: point it at a `ws://` or `wss://` URL
 CI builds this and runs it in a browser on every PR; see
 [the browser smoke test](#the-browser-smoke-test).
 
+## Maps
+
+Two ship: `maps/arena01.glb`, a symmetric 40×40 box built around a raised
+centre platform, and `maps/arena02.glb`, a 48×32 hall with the high ground at
+opposite **ends** instead of the middle — which inverts the fight, since
+holding height there means giving up the centre rather than owning it.
+
+Both are generated, not modelled. `tools/gen_arena.py` is a dependency-free
+GLB writer, and a layout is a list of boxes and spawn points, so adding a
+third map is a data change:
+
+```sh
+python3 tools/gen_arena.py               # regenerate every map
+python3 tools/gen_arena.py --map arena02 # just one
+```
+
+Select one at launch — **both binaries take `--map`**:
+
+```sh
+./build/release/game/fps_server --map maps/arena02.glb
+```
+
+```sh
+./build/release/game/fps_client --map maps/arena02.glb --connect 127.0.0.1
+```
+
+The client needs the flag because it loads its geometry **before** the menu
+(which orbits the arena) and therefore before it can ask the server what it is
+running. `ServerWelcome` carries the map name, so a mismatch is caught at that
+point and the client returns to the menu naming the map to relaunch with,
+rather than playing against walls the server has never heard of. Switching
+maps in-session would mean rebuilding the physics world and every GPU
+resource mid-frame; it is deliberately not done.
+
+Nothing downstream needs to be told a map exists: the server takes collision
+from every mesh and spawn points from nodes named `spawn_N`. A test walks
+every shipped map and enforces what that implies — at least four spawns, each
+above the floor and strictly inside the geometry's extent, and at least one
+collision mesh. Those are the invariants that make a map hostable, and there
+is no kill volume to catch a player who spawns outside the walls.
+
 ## Options
 
 | CMake option              | Default | Effect                                  |

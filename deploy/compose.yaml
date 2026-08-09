@@ -21,6 +21,12 @@ services:
       - "--no-enet"
       - "--bots"
       - "${FPS_BOTS:-0}"
+      # The client loads its geometry before it knows which map the server
+      # runs, so changing this makes browser clients built for the old map
+      # refuse to join rather than play against invisible walls. Rebuild and
+      # redeploy the client (CI does it on a push to main) when you change it.
+      - "--map"
+      - "${FPS_MAP:-maps/arena01.glb}"
     # Not published to the host: only Caddy needs to reach it, over the
     # compose network. Publishing 7778 would put the plain ws:// server on the
     # LAN alongside the TLS one, which is the opposite of the point.

@@ -35,6 +35,7 @@ struct ServerArgs {
     std::optional<std::string> record_path;  // --record: write a replay
     std::optional<std::string> replay_path;  // --replay: re-simulate one and exit
     int bots = 0;                            // --bots N: fill N slots with AI
+    std::string map = "maps/arena01.glb";    // --map: which arena to host
 };
 
 ServerArgs parse_args(int argc, char** argv) {
@@ -88,6 +89,10 @@ ServerArgs parse_args(int argc, char** argv) {
                     std::errc{}) {
                     args.bots = std::clamp(count, 0, static_cast<int>(game::kMaxPlayers));
                 }
+            }
+        } else if (arg == "--map") {
+            if (const auto value = next_value()) {
+                args.map = std::string{*value};
             }
         } else if (arg == "--verbose") {
             args.verbose = true;
@@ -173,14 +178,24 @@ int main(int argc, char** argv) {
         eng::log::error("Could not locate the assets/ directory");
         return 1;
     }
-    constexpr const char* kMapPath = "maps/arena01.glb";
+    // The map name is echoed to every client in ServerWelcome, so it is a
+    // value this process hands out, not just one it reads. Normalizing and
+    // rejecting an escaping path keeps `--map ../../etc/passwd` from becoming
+    // a load attempt here or a path the client is told to open.
+    const std::string map_path = eng::normalize_asset_path(args.map);
+    if (map_path.empty() || eng::asset_path_escapes_root(map_path)) {
+        eng::log::error("--map '{}' is not a path inside assets/", args.map);
+        return 1;
+    }
     // The server needs collision geometry only, so texture pixels are never
     // decoded: that is the expensive part of loading a map.
     eng::AssetCache assets{*assets_root, /*decode_images=*/false};
-    const eng::GltfModel* map = assets.model(kMapPath);
+    const eng::GltfModel* map = assets.model(map_path);
     if (map == nullptr) {
+        eng::log::error("Could not load map '{}'", map_path);
         return 1;
     }
+    eng::log::info("Map: {}", map_path);
 
     std::vector<std::pair<eng::MeshData, glm::mat4>> collision;
     std::vector<glm::vec3> spawns;
@@ -241,7 +256,7 @@ int main(int argc, char** argv) {
     }
     eng::CompositeTransport net{std::move(transports)};
 
-    game::ServerGame server{std::move(collision), std::move(spawns), kMapPath, std::move(arsenal)};
+    game::ServerGame server{std::move(collision), std::move(spawns), map_path, std::move(arsenal)};
     if (args.record_path) {
         server.start_recording(*args.record_path);
     }

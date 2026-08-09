@@ -31,8 +31,9 @@ Milestone 2 (renderer). This document grows with the code.
 6. Directional shadow map for the sun (M13) ✅
 7. Particles (M14) ✅
 8. Post-processing: bloom, ACES tonemap, FXAA (M15) ✅
-9. Point lights — later, if the maps ever need them
-10. Frustum culling — only when the map is big enough to need it
+9. Procedural sky + sun disc (M40) ✅
+10. Point lights — later, if the maps ever need them
+11. Frustum culling — only when the map is big enough to need it
 
 ## Post-processing (M15)
 
@@ -82,6 +83,55 @@ Colour management is deliberately unchanged from before this milestone:
 intermediate stores tonemapped *linear* values in 8 bits. That can band in
 dark gradients; moving the whole chain to an explicit gamma step is a
 separate change.
+
+## Sky (M40)
+
+`eng::Sky` replaces the flat clear colour with a procedural sky: a
+horizon-to-zenith gradient plus a sun disc and halo, evaluated in one
+fullscreen fragment shader. No cubemap and no texture — a gradient is
+cheaper to evaluate than to fetch, and it adds nothing to the `assets/`
+bytes every browser player downloads.
+
+The sun is the point of it. `Sky::draw` takes the same direction vector the
+lit shader gets as `u_light_direction`, so the disc lands exactly where the
+shadows say the light comes from; before this the frame had nothing in it to
+explain the shadow direction. Aiming the camera straight down
+`normalize(-kSunDirection)` puts the crosshair on the middle of the disc,
+which is the check to re-run if either side ever moves.
+
+### Decisions worth keeping
+
+- **Drawn last of the opaque work, not first.** The triangle sits exactly on
+  the far plane (`gl_Position.z == w`) and the pass runs with `GL_LEQUAL`, so
+  the depth test throws away every fragment the arena already covered and the
+  shader only ever runs on sky you can actually see. Drawing it first with
+  depth writes off is one line shorter and shades the whole frame, most of it
+  for the world to paint over immediately.
+- **Into the HDR target, with the rest of the scene.** That is what lets the
+  sun feed bloom. Disc radiance is `sun_intensity` (14) — far above the 1.0
+  bloom threshold — while the gradient stays below 1.0, because a whole
+  hemisphere over the threshold would veil the entire frame.
+- **The halo is what blooms, not the disc.** A hard-edged disc two degrees
+  across aliases in the half-resolution bright pass; a soft
+  `exp(-(1 - cos angle) * falloff)` glow around it does not. `halo_falloff`
+  started at 70 and held the sky saturated for 20-odd degrees, which read as
+  a white hole rather than a sun; 220 puts the glow at 1/e about 5 degrees
+  out and gone by 12.
+- **Depth state is restored, not saved.** `Sky::draw` puts `GL_LESS` and
+  depth writes back afterwards, the same way `ParticleRenderer::draw` does —
+  `PostFx::begin_scene` is what re-enables the depth *test* each frame.
+- **The clear colour is now black**, and is never meant to be seen. Flat
+  black in a frame means the sky pass did not run, rather than "that is the
+  background".
+
+### No distance fog
+
+Considered and rejected. Both arenas are sealed boxes with 4 m walls: the
+longest sight line in arena01 is the 56 m diagonal, and the horizon is never
+visible from inside one, so fog has nothing to blend the geometry into. Fog
+weak enough not to touch a 30 m duel would be invisible; fog strong enough
+to see would be lifting the darkest pixels of an enemy silhouette at exactly
+the ranges where targets are acquired. Readability wins.
 
 ## Particles (M14)
 
@@ -234,8 +284,11 @@ It stalls the pipeline on `glReadPixels`, so it is a verification and
 bug-report tool, not something to call in a hot loop. Rendering milestones
 are expected to attach one of these rather than assert "it looks right".
 
-`--fixed-yaw <radians>` locks the view direction so a screenshot run can aim
-at whatever the change under test needs to show.
+`--fixed-yaw <radians>` and `--fixed-pitch <radians, + is up>` lock the view
+direction so a screenshot run can aim at whatever the change under test
+needs to show. Both apply offline and online. Pointing them at
+`normalize(-kSunDirection)` — `--fixed-yaw 2.2143 --fixed-pitch 1.107` for
+the current sun — is how the sky's agreement with the light gets checked.
 
 **A clean emcc build does not mean the web client works.** Shader
 compilation happens at runtime, so GLSL ES errors only surface in a browser.

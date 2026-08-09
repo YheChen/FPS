@@ -47,6 +47,7 @@
 #include "engine/rendering/screenshot.h"
 #include "engine/rendering/shader.h"
 #include "engine/rendering/shadow_map.h"
+#include "engine/rendering/sky.h"
 #include "engine/rendering/texture.h"
 #include "engine/scene/scene.h"
 
@@ -255,6 +256,7 @@ struct ClientArgs {
     // Automated-verification hooks (harmless in normal play):
     bool auto_fire = false;                  // hold the trigger every tick
     std::optional<float> fixed_yaw;          // lock the view yaw (radians)
+    std::optional<float> fixed_pitch;        // lock the view pitch (radians, + is up)
     std::optional<std::string> screenshot;   // PNG written on the final frame
     std::optional<std::string> replay_path;  // --replay: watch a recording
     // Geometry is loaded once, before the menu, because the menu orbits it.
@@ -319,6 +321,14 @@ ClientArgs parse_args(int argc, char** argv) {
                 if (std::from_chars(value->data(), value->data() + value->size(), yaw).ec ==
                     std::errc{}) {
                     args.fixed_yaw = yaw;
+                }
+            }
+        } else if (arg == "--fixed-pitch") {
+            if (const auto value = next_value()) {
+                float pitch = 0.0f;
+                if (std::from_chars(value->data(), value->data() + value->size(), pitch).ec ==
+                    std::errc{}) {
+                    args.fixed_pitch = pitch;
                 }
             }
         } else if (arg == "--fake-latency") {
@@ -764,13 +774,15 @@ int main(int argc, char** argv) {
     auto shadow_map = eng::ShadowMap::create(kShadowResolution);
     auto particle_renderer = eng::ParticleRenderer::create(kMaxParticles);
     auto postfx = eng::PostFx::create(window->width_px(), window->height_px());
+    auto sky = eng::Sky::create();
     auto joint_texture = eng::JointTexture::create(kMaxJoints);
     if (!imgui || !lit_shader || !depth_shader || !debug_draw || !shadow_map ||
-        !particle_renderer || !postfx || !joint_texture) {
+        !particle_renderer || !postfx || !sky || !joint_texture) {
         return 1;
     }
     eng::ParticlePool particles{kMaxParticles};
     eng::PostFx::Settings postfx_settings;
+    eng::Sky::Params sky_params;
 
     // --- assets & scene ---------------------------------------------------
     const auto assets_root = eng::find_assets_root();
@@ -1267,9 +1279,15 @@ int main(int argc, char** argv) {
             }
 
             // Applied to both modes so screenshot runs can aim at whatever
-            // the change under test needs to show.
+            // the change under test needs to show. Pitch is clamped the same
+            // way the mouse path clamps it -- past +-89 degrees the view
+            // basis flips over and the frame is useless as evidence.
             if (args.fixed_yaw) {
                 view_yaw = *args.fixed_yaw;
+            }
+            if (args.fixed_pitch) {
+                view_pitch = std::clamp(*args.fixed_pitch, -eng::Camera::kMaxPitchRadians,
+                                        eng::Camera::kMaxPitchRadians);
             }
 
             if (online) {
@@ -1783,8 +1801,11 @@ int main(int argc, char** argv) {
         shadow_map->end_depth_pass(window->width_px(), window->height_px());
 
         // Pass 2: lit, from the camera, into the HDR post-processing target.
-        // The sky is above 1.0 so the tonemap has something to roll off.
-        postfx->begin_scene({0.075f, 0.095f, 0.125f, 1.0f});
+        // The clear colour is black and is never meant to be seen: the sky
+        // pass below fills every pixel the world does not, so flat black in a
+        // frame means something went wrong rather than "that is the
+        // background".
+        postfx->begin_scene({0.0f, 0.0f, 0.0f, 1.0f});
 
         const glm::mat4 view_projection = camera.view_projection();
 
@@ -1841,6 +1862,17 @@ int main(int argc, char** argv) {
                 ++draw_calls;
             }
         }
+
+        // Sky last of the opaque work, not first. Its triangle sits exactly
+        // on the far plane (gl_Position.z == w, depth func LEQUAL), so the
+        // depth test throws it away wherever the arena already covered the
+        // pixel and it only ever shades sky you can actually see. Drawing it
+        // first with depth writes off would be a line shorter and would shade
+        // every pixel in the frame, most of them for the world to paint over
+        // immediately. It goes into the HDR target with the rest of the
+        // scene, which is what lets the sun feed bloom.
+        sky->draw(view_projection, camera.position, glm::normalize(kSunDirection), sky_params);
+        ++draw_calls;
 
         // Particles after the opaque scene so they blend against it, and
         // before the debug lines so tracers stay readable through smoke.
@@ -2034,6 +2066,17 @@ int main(int argc, char** argv) {
             ImGui::SliderFloat("bloom threshold", &postfx_settings.bloom_threshold, 0.0f, 4.0f);
             ImGui::SliderFloat("bloom knee", &postfx_settings.bloom_knee, 0.0f, 1.0f);
             ImGui::SliderFloat("bloom intensity", &postfx_settings.bloom_intensity, 0.0f, 2.0f);
+        }
+
+        if (ImGui::CollapsingHeader("sky")) {
+            ImGui::ColorEdit3("horizon", &sky_params.horizon_color.x);
+            ImGui::ColorEdit3("zenith", &sky_params.zenith_color.x);
+            ImGui::ColorEdit3("sun", &sky_params.sun_color.x);
+            // Sun intensity ranges well past 1.0 because the disc is the only
+            // thing in the sky the bright pass is meant to catch.
+            ImGui::SliderFloat("sun intensity", &sky_params.sun_intensity, 0.0f, 40.0f);
+            ImGui::SliderFloat("sun radius", &sky_params.sun_angular_radius, 0.005f, 0.15f);
+            ImGui::SliderFloat("halo intensity", &sky_params.halo_intensity, 0.0f, 0.5f);
         }
         ImGui::TextDisabled(
             "Esc: capture | WASD+Space | Shift: sprint | Ctrl: crouch | 1-4: weapon | LMB "

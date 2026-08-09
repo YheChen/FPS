@@ -555,28 +555,94 @@ deliberately exposing to the internet; read the denial instead.
 
 ## 5. Client on Vercel
 
-Build the WASM client with the production server URL baked into its menu
-default, then deploy the static output.
+**CI deploys this.** Every push to `main` builds the WASM client, loads it in a
+real headless browser, and only then publishes it — so a client that fails to
+render cannot reach players, and the deployed binary is the *same artifact*
+the smoke test loaded rather than a second compile of the same source.
 
-```sh
-source ~/emsdk/emsdk_env.sh
-FPS_WEB_SERVER_URL=wss://fps-server.yanzhenchen.ca scripts/build_web.sh
-# outputs build/web/game/{fps_client.html,.js,.wasm,.data} + vercel.json
+That closes a footgun this section used to warn about at length: the server
+address is compiled in, so a hand-rebuild that forgot `FPS_WEB_SERVER_URL`
+silently shipped a client pointing at `ws://localhost:7778`. CI now takes it
+from a repository variable and bakes it into every build in the workflow,
+including the one under test.
 
-npm i -g vercel            # once
-cd build/web/game
-vercel --prod              # first run links/creates the project
+### One-time setup
+
+The project has to exist before CI can push to it, so the first deploy is
+manual (see the fallback below), or create an empty project in the dashboard.
+Then link it locally once to learn its ids:
+
+```bash
+npx vercel@58.9.0 link
 ```
 
-Vercel serves `.wasm` as `application/wasm` automatically, and `vercel.json`
-maps `/` to the client. The result is a `https://<project>.vercel.app` URL.
-Opening it connects straight to the T14 — no download, no IP to type.
+That writes `.vercel/project.json` containing `orgId` and `projectId`.
+**`.vercel/` is gitignored and must stay that way.** Create a token at Vercel →
+Account Settings → Tokens, then:
 
-**Do not connect the git repository to the Vercel project.** Vercel would try
-to build on every push and fail: it has no Emscripten toolchain, the client
-takes minutes of C++ to compile, and `build/` is gitignored so the artifacts
-are not in the repo at all. What the commands above do is upload an
-already-built output; Vercel is pure static hosting here.
+```bash
+gh secret set VERCEL_TOKEN
+```
+
+```bash
+gh secret set VERCEL_ORG_ID --body "$(python3 -c 'import json;print(json.load(open(".vercel/project.json"))["orgId"])')"
+```
+
+```bash
+gh secret set VERCEL_PROJECT_ID --body "$(python3 -c 'import json;print(json.load(open(".vercel/project.json"))["projectId"])')"
+```
+
+Until all three exist the deploy step **skips with a notice rather than
+failing** — a fork should not have a red build because it has no Vercel
+account. Verify with `gh run view --job deploy-web` after the next push.
+
+Both hostnames default to this deployment's and are overridable per-repository
+without touching the workflow:
+
+| Variable | Default | What it is |
+|---|---|---|
+| `FPS_WEB_SERVER_URL` | `wss://fps-server.yanzhenchen.ca` | compiled into the client's menu default |
+| `FPS_CLIENT_URL` | `https://fps.yanzhenchen.ca` | where the deploy is verified afterwards |
+
+Set with `gh variable set FPS_WEB_SERVER_URL --body wss://…`.
+
+### The deploy verifies itself
+
+A deploy that exits 0 and serves the *previous* build is a failure this
+project has already had: `vercel.json` once marked these filenames
+`immutable`, so returning players kept a client compiled against a hostname
+that no longer existed — while every command involved reported success. The
+job therefore fetches `$FPS_CLIENT_URL/fps_client.wasm` afterwards and
+compares its sha256 against the file it just uploaded, retrying for five
+minutes to allow for CDN propagation and failing the build if they never
+match. It also checks that `/` still serves the client page, since the rewrite
+can break while the asset is perfectly correct.
+
+### Manual fallback
+
+Still works, and is what you need for the very first deploy:
+
+```bash
+FPS_WEB_SERVER_URL=wss://fps-server.yanzhenchen.ca scripts/build_web.sh
+```
+
+```bash
+npx vercel@58.9.0 deploy build/web/game --prod
+```
+
+`scripts/build_web.sh` stages `vercel.json` beside the artifacts; CMake copies
+`favicon.ico` there as a post-build step. The `.data` bundle embeds `assets/`,
+so a rebuild is needed whenever assets change.
+
+Vercel serves `.wasm` as `application/wasm` automatically, and `vercel.json`
+maps `/` to the client.
+
+**Do not connect the git repository to the Vercel project.** This is not a
+contradiction of the CI deploy above — the two are different mechanisms.
+Vercel's own Git integration would try to *build* on every push and fail: it
+has no Emscripten toolchain, the client takes minutes of C++ to compile, and
+`build/` is gitignored so the artifacts are not in the repo at all. CI uploads
+an already-built output. Vercel stays pure static hosting either way.
 
 *Custom domain.* Vercel dashboard → Project → Settings → Domains → add
 `fps.yanzhenchen.ca`, then create the `CNAME` it asks for at Porkbun. If that
@@ -585,15 +651,8 @@ DNS does not permit a name to hold both a CNAME and an A record.
 
 *Caching.* `vercel.json` sets `max-age=0, must-revalidate` on
 `.wasm/.data/.js`. That looks wasteful and is deliberate: the filenames never
-change between builds, so the `immutable` caching this used to carry meant a
-returning player kept a stale client forever — including one compiled against
-a hostname that no longer exists. Revalidation costs a 304 when nothing
-changed. If you ever content-hash the filenames, put the long cache back.
-
-Rebuild after changes by re-running the two commands above, **including
-`FPS_WEB_SERVER_URL`** — it is compiled in, so omitting it silently ships a
-client pointing at `ws://localhost:7778`. The `.data` bundle embeds `assets/`,
-so rebuild whenever assets change.
+change between builds. If you ever content-hash the filenames, put the long
+cache back.
 
 ## 6. End-to-end check
 

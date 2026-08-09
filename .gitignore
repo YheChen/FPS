@@ -7,9 +7,13 @@ dist/
 fps_settings.cfg
 handover.json
 
-# Deployment secrets: the domain is harmless, CF_API_TOKEN is not.
-# deploy/.env.example is the committed template.
+# Deployment secrets: the domain is harmless, the Porkbun key/secret pair is
+# not. deploy/.env.example is the committed template.
 deploy/.env
+
+# Written by `vercel link`. Holds the org and project ids that CI carries as
+# secrets instead; committing it puts deployment targeting in the repo.
+.vercel/
 
 # IDE / editor
 .vscode/

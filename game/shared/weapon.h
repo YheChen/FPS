@@ -12,7 +12,7 @@
 // offline) and the authoritative server.
 namespace game {
 
-inline constexpr std::size_t kMaxWeapons = 4;
+inline constexpr std::size_t kMaxWeapons = 5;
 
 struct WeaponConfig {
     std::string name = "rifle";
@@ -30,6 +30,11 @@ struct WeaponConfig {
     bool automatic = true;
     // Time to raise this weapon after switching to it.
     float switch_seconds = 0.4f;
+    // Melee: no magazine, no reload, and `range` is arm's reach rather than
+    // a ballistic limit. Modelled as a flag rather than as a gun with absurd
+    // stats, because "magazine_size = 999999" would still dry-fire, still
+    // auto-reload, and still put a round counter on the HUD.
+    bool melee = false;
 
     float shot_interval_seconds() const { return 60.0f / rounds_per_minute; }
 };

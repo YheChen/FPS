@@ -237,7 +237,7 @@ int main(int argc, char** argv) {
 
     // Slot order is the arsenal order: 1=rifle, 2=smg, 3=shotgun, 4=sniper.
     game::Arsenal arsenal;
-    for (const char* weapon : {"rifle", "smg", "shotgun", "sniper"}) {
+    for (const char* weapon : {"rifle", "smg", "shotgun", "sniper", "knife"}) {
         const auto text =
             eng::read_text_file(*assets_root / "weapons" / (std::string(weapon) + ".cfg"));
         if (!text) {

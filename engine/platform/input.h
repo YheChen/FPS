@@ -29,6 +29,7 @@ enum class Key : std::uint8_t {
     Num2,
     Num3,
     Num4,
+    Num5,
     kCount,
 };
 

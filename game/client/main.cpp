@@ -971,7 +971,7 @@ int main(int argc, char** argv) {
 
     // Slot order must match the server's: 1=rifle, 2=smg, 3=shotgun, 4=sniper.
     game::Arsenal arsenal;
-    for (const char* weapon_name : {"rifle", "smg", "shotgun", "sniper"}) {
+    for (const char* weapon_name : {"rifle", "smg", "shotgun", "sniper", "knife"}) {
         const auto text =
             eng::read_text_file(*assets_root / "weapons" / (std::string(weapon_name) + ".cfg"));
         if (!text) {
@@ -1180,8 +1180,8 @@ int main(int argc, char** argv) {
         // Weapon selection is state, not an edge: we keep sending the chosen
         // slot every tick so a dropped packet cannot lose the switch.
         if (mode != Mode::Menu) {
-            const std::array<eng::Key, 4> slot_keys = {eng::Key::Num1, eng::Key::Num2,
-                                                       eng::Key::Num3, eng::Key::Num4};
+            const std::array<eng::Key, 5> slot_keys = {
+                eng::Key::Num1, eng::Key::Num2, eng::Key::Num3, eng::Key::Num4, eng::Key::Num5};
             for (std::uint8_t i = 0; i < slot_keys.size(); ++i) {
                 if (input.was_pressed(slot_keys[i]) && i < arsenal.size()) {
                     desired_slot = i;

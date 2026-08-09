@@ -62,6 +62,14 @@ std::optional<WeaponConfig> parse_weapon_config(std::string_view text) {
             ok = parse_float(value, config.rounds_per_minute);
         } else if (key == "magazine_size") {
             ok = parse_int(value, config.magazine_size);
+        } else if (key == "melee") {
+            if (value == "true" || value == "1") {
+                config.melee = true;
+            } else if (value == "false" || value == "0") {
+                config.melee = false;
+            } else {
+                ok = false;
+            }
         } else if (key == "reload_seconds") {
             ok = parse_float(value, config.reload_seconds);
         } else if (key == "range") {
@@ -90,9 +98,15 @@ std::optional<WeaponConfig> parse_weapon_config(std::string_view text) {
         }
     }
 
-    if (config.rounds_per_minute <= 0.0f || config.magazine_size <= 0 || config.damage <= 0.0f ||
-        config.range <= 0.0f || config.reload_seconds < 0.0f || config.pellets <= 0 ||
-        config.pellets > 32 || config.spread_degrees < 0.0f || config.spread_degrees > 45.0f ||
+    // A melee weapon legitimately has no magazine, so the usual "> 0" rule
+    // would reject the one config that means it.
+    if (config.magazine_size < 0 || (!config.melee && config.magazine_size <= 0)) {
+        eng::log::error("weapon config: magazine_size must be > 0 unless melee=true");
+        return std::nullopt;
+    }
+    if (config.rounds_per_minute <= 0.0f || config.damage <= 0.0f || config.range <= 0.0f ||
+        config.reload_seconds < 0.0f || config.pellets <= 0 || config.pellets > 32 ||
+        config.spread_degrees < 0.0f || config.spread_degrees > 45.0f ||
         config.switch_seconds < 0.0f) {
         eng::log::error("weapon config: values out of range");
         return std::nullopt;
@@ -120,14 +134,19 @@ WeaponTickResult update_weapon(WeaponState& state, const WeaponConfig& config, b
         return result;  // nothing else while reloading
     }
 
-    if (reload_requested && state.ammo < config.magazine_size) {
+    // A knife has nothing to reload and never runs dry, so both the explicit
+    // reload and the empty-magazine path below are skipped for it.
+    if (!config.melee && reload_requested && state.ammo < config.magazine_size) {
         state.reload_remaining_seconds = config.reload_seconds;
         result.reload_started = true;
         return result;
     }
 
     if (trigger_pulled && state.cooldown_seconds <= 0.0f) {
-        if (state.ammo > 0) {
+        if (config.melee) {
+            state.cooldown_seconds = config.shot_interval_seconds();
+            result.fired = true;
+        } else if (state.ammo > 0) {
             --state.ammo;
             state.cooldown_seconds = config.shot_interval_seconds();
             result.fired = true;

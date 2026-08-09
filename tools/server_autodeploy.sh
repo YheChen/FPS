@@ -19,9 +19,16 @@
 # build. So:
 #
 #   * protocol unchanged  -> deploy. This is almost every commit.
-#   * protocol changed    -> deploy ONLY if the live client says it speaks the
-#                            new version (its version.json, published by the
-#                            deploy-web CI job). Otherwise refuse and say so.
+#   * protocol changed    -> deploy ONLY if the PUBLISHED client speaks the new
+#                            version. Otherwise refuse and say so.
+#
+# "What the published client speaks" is read from the `client-live` git tag,
+# which deploy-web moves after it has verified the deploy. It was originally
+# read from https://<client>/version.json over HTTP, which does not work: the
+# host is behind Vercel, whose bot mitigation answers curl with a JavaScript
+# challenge page and a 403. A guard whose source of truth sits behind a WAF
+# fails closed forever. A tag rides the git fetch this script already does,
+# needs no credential, and nothing can interpose on it.
 #
 # Failing closed on that check is the whole point: a server that is a few
 # commits stale is a nuisance, and one that no client can join is an outage.
@@ -33,7 +40,7 @@
 set -uo pipefail
 
 REPO="${FPS_REPO:-$HOME/GitHub/FPS}"
-CLIENT_URL="${FPS_CLIENT_URL:-https://fps.yanzhenchen.ca}"
+LIVE_CLIENT_TAG="${FPS_CLIENT_TAG:-client-live}"
 DRY_RUN=0
 FORCE=0
 
@@ -64,7 +71,9 @@ protocol_version_at() {
 }
 
 # --- is there anything to do? ------------------------------------------------
-git fetch origin main --quiet || die "git fetch failed"
+# --tags --force so a moved `client-live` is picked up rather than kept at
+# whatever it pointed to the first time.
+git fetch origin main --tags --force --quiet || die "git fetch failed"
 LOCAL=$(git rev-parse HEAD)
 REMOTE=$(git rev-parse origin/main)
 
@@ -88,24 +97,24 @@ NEW_PROTOCOL=$(protocol_version_at origin/main)
 [ -n "$OLD_PROTOCOL" ] && [ -n "$NEW_PROTOCOL" ] || die "could not read kProtocolVersion"
 
 if [ "$OLD_PROTOCOL" != "$NEW_PROTOCOL" ]; then
-    say "protocol $OLD_PROTOCOL -> $NEW_PROTOCOL; checking what the live client speaks"
-    LIVE_PROTOCOL=$(curl -fsS --max-time 20 "$CLIENT_URL/version.json" 2>/dev/null |
-        grep -oE '"protocol"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$')
+    say "protocol $OLD_PROTOCOL -> $NEW_PROTOCOL; checking what the published client speaks"
+    LIVE_PROTOCOL=$(protocol_version_at "$LIVE_CLIENT_TAG")
 
     if [ "$FORCE" = "1" ]; then
         say "WARNING: --force, skipping the protocol guard"
     elif [ -z "$LIVE_PROTOCOL" ]; then
-        say "REFUSING: protocol moved to $NEW_PROTOCOL and $CLIENT_URL/version.json"
-        say "          could not be read, so the published client's version is unknown."
-        say "          Publish the client first (CI deploy-web), then this proceeds."
+        say "REFUSING: protocol moved to $NEW_PROTOCOL and the '$LIVE_CLIENT_TAG' tag"
+        say "          does not exist, so no client is known to be published."
+        say "          It is created by the deploy-web CI job on a push to main."
         exit 2
     elif [ "$LIVE_PROTOCOL" != "$NEW_PROTOCOL" ]; then
-        say "REFUSING: server would be protocol $NEW_PROTOCOL but the live client"
+        say "REFUSING: server would be protocol $NEW_PROTOCOL but the published"
+        say "          client ($LIVE_CLIENT_TAG, $(git rev-parse --short "$LIVE_CLIENT_TAG" 2>/dev/null))"
         say "          speaks $LIVE_PROTOCOL. Every connection would be rejected."
         say "          Publish the matching client first."
         exit 2
     else
-        say "live client speaks $LIVE_PROTOCOL; matched"
+        say "published client speaks $LIVE_PROTOCOL; matched"
     fi
 fi
 

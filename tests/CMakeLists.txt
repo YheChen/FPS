@@ -37,13 +37,25 @@ add_executable(engine_tests
     rendering/particle_tests.cpp
     rendering/postfx_tests.cpp
     scene/scene_tests.cpp
-    server/stats_store_tests.cpp
-    # Compiled in directly rather than linked: the dedicated server is an
-    # executable, and this is a leaf module with no dependency on the rest of
-    # it. A persistence format nobody round-trips in a test is one that gets
-    # discovered to be wrong by losing somebody's stats.
-    ../game/server/stats_store.cpp
 )
+
+# The server library is native-only (see game/CMakeLists.txt), so anything
+# testing it has to be too. stats_store.cpp used to be compiled in here
+# directly as a one-off because the server was an executable; now that it is
+# a library, it links like anything else.
+#
+# game_server pulls in fps::engine and fps::game_shared PUBLICly, so naming
+# them again here would put each archive on the link line twice (ld warns).
+# Under Emscripten there is no game_server, so they are named directly.
+if(NOT EMSCRIPTEN)
+    target_sources(engine_tests PRIVATE
+        server/server_game_tests.cpp
+        server/stats_store_tests.cpp
+    )
+    target_link_libraries(engine_tests PRIVATE fps::game_server)
+else()
+    target_link_libraries(engine_tests PRIVATE fps::engine fps::game_shared)
+endif()
 # The WebRTC tests drive libdatachannel directly as the client half, so they
 # only exist when the transport is built.
 if(FPS_ENABLE_WEBRTC)
@@ -51,7 +63,7 @@ if(FPS_ENABLE_WEBRTC)
     target_link_libraries(engine_tests PRIVATE LibDataChannel::LibDataChannelStatic)
 endif()
 
-target_link_libraries(engine_tests PRIVATE fps::engine fps::game_shared Catch2::Catch2WithMain)
+target_link_libraries(engine_tests PRIVATE Catch2::Catch2WithMain)
 fps_set_warnings(engine_tests)
 fps_enable_sanitizers(engine_tests)
 

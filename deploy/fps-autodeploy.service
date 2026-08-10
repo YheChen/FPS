@@ -31,14 +31,21 @@ Type=oneshot
 User=yanzhen
 WorkingDirectory=/home/yanzhen/GitHub/FPS
 Environment=FPS_REPO=/home/yanzhen/GitHub/FPS
+# Spelled out rather than left to the script's ~/.local/state default, so that
+# this unit and a hand-run of the same script read the SAME deploy stamp. If
+# they disagreed, running it by hand would report a different idea of what is
+# deployed than the timer has -- which is the class of bug this file exists to
+# stop.
+Environment=FPS_STATE_DIR=/home/yanzhen/.local/state/fps
 ExecStart=/opt/fps/tools/server_autodeploy.sh
 
-# Exit 2 is the protocol guard declining to ship a server that no published
-# client could join. That is a correct, expected and RECURRING outcome -- it
-# is the answer every ten minutes for as long as the client lags behind -- so
-# it must not leave the unit sitting in "failed", where it would be permanent
-# red in systemctl and a page for anything watching. Exit 1 stays a real
-# failure.
+# Exit 2 is the script DECLINING to act: the protocol guard refusing to ship a
+# server no published client could join, or the backoff after five failed
+# recovery attempts. Both are correct, expected and RECURRING outcomes -- the
+# guard is the answer every ten minutes for as long as the client lags behind
+# -- so they must not leave the unit sitting in "failed", where it would be
+# permanent red in systemctl and a page for anything watching. Exit 1 stays a
+# real failure.
 SuccessExitStatus=2
 
 # A build is minutes, not seconds, and the timer must not stack another run on

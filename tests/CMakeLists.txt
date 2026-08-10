@@ -19,6 +19,7 @@ add_executable(engine_tests
     core/version_tests.cpp
     game/arsenal_tests.cpp
     game/bot_tests.cpp
+    game/footsteps_tests.cpp
     game/hitscan_tests.cpp
     game/interpolation_tests.cpp
     game/kill_cam_tests.cpp

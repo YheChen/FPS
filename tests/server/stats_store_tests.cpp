@@ -2,33 +2,17 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
+
+#include "tests/server/temp_dir.h"
 
 namespace {
 
-// A directory that cleans up after itself, so a failing assertion cannot
-// leave files behind that make the NEXT run fail for a different reason.
-class TempDir {
-public:
-    TempDir() {
-        base_ = std::filesystem::temp_directory_path() /
-                ("fps_stats_" + std::to_string(reinterpret_cast<std::uintptr_t>(this)));
-        std::filesystem::create_directories(base_);
-    }
-    ~TempDir() {
-        std::error_code ec;
-        std::filesystem::remove_all(base_, ec);
-    }
-    TempDir(const TempDir&) = delete;
-    TempDir& operator=(const TempDir&) = delete;
-
-    std::filesystem::path file(const char* name) const { return base_ / name; }
-
-private:
-    std::filesystem::path base_;
-};
+using test::TempDir;
 
 void write_bytes(const std::filesystem::path& path, const std::vector<std::uint8_t>& bytes) {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);

@@ -79,14 +79,31 @@ endif()  # FPS_BUILD_CLIENT
 
 # The dedicated server is native-only (no browser build).
 if(NOT EMSCRIPTEN)
-    add_executable(fps_server
-        server/main.cpp
+    # The server's authoritative game logic, as a library so tests can reach
+    # it. It used to be compiled straight into the executable, which meant
+    # nothing in tests/ could construct a ServerGame: the combat, scoring and
+    # match-phase rules were the least tested code in the project despite
+    # being the rules everyone actually plays by.
+    add_library(game_server STATIC
         server/server_game.cpp
         server/server_game.h
         server/stats_store.cpp
         server/stats_store.h
     )
-    target_link_libraries(fps_server PRIVATE fps::engine fps::game_shared)
+    add_library(fps::game_server ALIAS game_server)
+    # PUBLIC: ServerGame's headers expose engine and shared-game types, so
+    # anything linking game_server needs both anyway -- and must NOT name
+    # them again itself, or each archive lands on the link line twice.
+    target_link_libraries(game_server PUBLIC fps::engine fps::game_shared)
+    fps_set_warnings(game_server)
+    fps_enable_sanitizers(game_server)
+
+    # The executable is now only the parts that are inherently untestable:
+    # argument parsing, asset loading off disk, and the run loop.
+    add_executable(fps_server
+        server/main.cpp
+    )
+    target_link_libraries(fps_server PRIVATE fps::game_server)
     fps_set_warnings(fps_server)
     fps_enable_sanitizers(fps_server)
 endif()

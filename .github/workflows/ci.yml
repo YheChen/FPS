@@ -251,6 +251,17 @@ jobs:
             echo "::notice::Vercel secrets not set; skipping the deploy (docs/deploy.md section 5)."
           fi
 
+      # This job deploys a downloaded ARTIFACT, so it never needed the source
+      # and never checked it out. Then M32c added a `git tag` at the end of
+      # it, which cannot work in a directory that is not a repository -- the
+      # deploy succeeded and the job failed, every time, on that last step.
+      #
+      # Must come BEFORE the artifact download: checkout cleans its working
+      # directory, and would delete a `dist` fetched ahead of it.
+      - name: Check out the repository
+        if: steps.gate.outputs.ready == 'true'
+        uses: actions/checkout@v4
+
       - name: Download the smoke-tested client
         if: steps.gate.outputs.ready == 'true'
         uses: actions/download-artifact@v4
@@ -319,11 +330,16 @@ jobs:
 
       # Records WHICH COMMIT's client is live, as a git tag.
       #
-      # version.json says the same thing over HTTP, and that turned out to be
-      # unreadable by anything that is not a browser: Vercel's bot mitigation
-      # answers `curl` with a JavaScript challenge page and a 403. A guard
-      # whose source of truth sits behind a WAF is a guard that fails closed
-      # forever, which is what happened.
+      # version.json says the same thing over HTTP, and the autodeploy guard
+      # used to read it there. It refused four runs in a row saying the file
+      # "could not be read".
+      #
+      # The original diagnosis here was that Vercel's bot mitigation answers
+      # `curl` with a 403 challenge page. That does NOT reproduce: curl from
+      # the T14 and from a laptop both get HTTP 200. What is true is that the
+      # refusals all landed within ~30 s of a deploy finishing, so the likelier
+      # cause was reading it before it was live. Treat the WAF story as
+      # unproven.
       #
       # A tag has none of that. The consumer is a host that already does a
       # `git fetch` against this repo, needs no new credential, and gets an

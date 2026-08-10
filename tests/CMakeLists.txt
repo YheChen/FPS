@@ -22,6 +22,7 @@ add_executable(engine_tests
     game/interpolation_tests.cpp
     game/kill_cam_tests.cpp
     game/lag_comp_tests.cpp
+    game/player_color_tests.cpp
     game/player_movement_tests.cpp
     game/prediction_tests.cpp
     game/replay_tests.cpp

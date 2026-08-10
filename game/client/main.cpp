@@ -57,6 +57,7 @@
 #include "game/shared/hitscan.h"
 #include "game/shared/input_command.h"
 #include "game/shared/interpolation.h"
+#include "game/shared/player_color.h"
 #include "game/shared/player_movement.h"
 #include "game/shared/prediction.h"
 #include "game/shared/replay.h"
@@ -646,10 +647,39 @@ struct Tracer {
     float ttl;
 };
 
+// Killer and victim are kept as ids as well as names so the feed can show who
+// each one is in the colour they are wearing out in the arena.
 struct KillFeedEntry {
-    std::string text;
+    std::uint8_t killer;
+    std::uint8_t victim;
+    std::string killer_name;
+    std::string victim_name;
     float ttl;
 };
+
+// Draws a player's identity colour as a chip in front of their name, and
+// leaves the cursor on the same line for it.
+//
+// A chip rather than colouring the name itself: half the palette is dark on
+// purpose (see player_color.h), and dark text over a transparent HUD is
+// exactly what a name must never be. The chip shows the raw albedo without the
+// scene's tonemap -- at this size it needs the full strength, and the hue is
+// what carries the match to the figure anyway.
+void player_chip(std::uint8_t id, float alpha) {
+    const glm::vec3 color = game::player_color(id);
+    const float size = ImGui::GetTextLineHeight();
+    const ImVec2 top_left = ImGui::GetCursorScreenPos();
+    const ImVec2 bottom_right{top_left.x + size, top_left.y + size};
+    ImDrawList* list = ImGui::GetWindowDrawList();
+    list->AddRectFilled(top_left, bottom_right,
+                        ImGui::GetColorU32(ImVec4{color.r, color.g, color.b, alpha}), 2.0f);
+    // Outlined both ways: a dark chip needs an edge against the scoreboard's
+    // dark panel, a bright one needs one against the sky behind the kill feed.
+    list->AddRect(top_left, bottom_right, ImGui::GetColorU32(ImVec4{0.0f, 0.0f, 0.0f, alpha}),
+                  2.0f);
+    ImGui::Dummy({size, size});
+    ImGui::SameLine();
+}
 
 // User preferences persisted next to the executable's working directory.
 struct Settings {
@@ -1512,8 +1542,8 @@ int main(int argc, char** argv) {
                 }
             }
             for (const auto& death : net->take_death_events()) {
-                kill_feed.push_back(
-                    {player_name(death.killer) + " killed " + player_name(death.victim), 5.0f});
+                kill_feed.push_back({death.killer, death.victim, player_name(death.killer),
+                                     player_name(death.victim), 5.0f});
                 if (kill_feed.size() > 5) {
                     kill_feed.pop_front();
                 }
@@ -1660,8 +1690,11 @@ int main(int argc, char** argv) {
             update_character_animation(dummy_animation, fake_velocity, true, game::kMove.max_speed,
                                        static_cast<float>(dt));
             const int offset = append_character_pose(dummy_animation, joint_pool);
+            // Offline has no player ids, so the mannequin borrows slot 0's
+            // colour: the practice range should look like the game, and there
+            // is nobody else here for it to be confused with.
             draw_items.push_back({glm::translate(glm::mat4{1.0f}, dummy_position),
-                                  DrawKind::Character, -1, glm::vec3{0.85f, 0.86f, 0.92f}, offset,
+                                  DrawKind::Character, -1, game::player_color(0), offset,
                                   static_cast<int>(character_skeleton->joint_count())});
         }
 
@@ -1680,13 +1713,8 @@ int main(int argc, char** argv) {
                 update_character_animation(animation, actor.state.velocity, actor.state.on_ground,
                                            game::kMove.max_speed, static_cast<float>(dt));
                 const int offset = append_character_pose(animation, joint_pool);
-                draw_items.push_back({model,
-                                      DrawKind::Character,
-                                      -1,
-                                      {0.3f + 0.2f * static_cast<float>(id % 4), 0.4f,
-                                       0.9f - 0.2f * static_cast<float>(id % 4)},
-                                      offset,
-                                      static_cast<int>(character_skeleton->joint_count())});
+                draw_items.push_back({model, DrawKind::Character, -1, game::player_color(id),
+                                      offset, static_cast<int>(character_skeleton->joint_count())});
             }
         }
 
@@ -1720,13 +1748,8 @@ int main(int argc, char** argv) {
                                            game::kMove.max_speed, static_cast<float>(dt));
 
                 const int offset = append_character_pose(animation, joint_pool);
-                draw_items.push_back({model,
-                                      DrawKind::Character,
-                                      -1,
-                                      {0.3f + 0.2f * static_cast<float>(id % 4), 0.4f,
-                                       0.9f - 0.2f * static_cast<float>(id % 4)},
-                                      offset,
-                                      static_cast<int>(character_skeleton->joint_count())});
+                draw_items.push_back({model, DrawKind::Character, -1, game::player_color(id),
+                                      offset, static_cast<int>(character_skeleton->joint_count())});
             }
         }
 
@@ -2104,8 +2127,13 @@ int main(int argc, char** argv) {
                              ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                  ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBackground);
                 for (const KillFeedEntry& entry : kill_feed) {
-                    ImGui::TextColored({1.0f, 0.85f, 0.4f, std::min(1.0f, entry.ttl)}, "%s",
-                                       entry.text.c_str());
+                    const float alpha = std::min(1.0f, entry.ttl);
+                    const ImVec4 text_color{1.0f, 0.85f, 0.4f, alpha};
+                    player_chip(entry.killer, alpha);
+                    ImGui::TextColored(text_color, "%s killed", entry.killer_name.c_str());
+                    ImGui::SameLine();
+                    player_chip(entry.victim, alpha);
+                    ImGui::TextColored(text_color, "%s", entry.victim_name.c_str());
                 }
                 ImGui::End();
             }
@@ -2138,6 +2166,7 @@ int main(int argc, char** argv) {
                     for (const auto& [id, score] : rows) {
                         ImGui::TableNextRow();
                         ImGui::TableSetColumnIndex(0);
+                        player_chip(id, 1.0f);
                         ImGui::Text("%s%s", player_name(id).c_str(),
                                     id == net->my_id() ? " (you)" : "");
                         ImGui::TableSetColumnIndex(1);
@@ -2197,6 +2226,7 @@ int main(int argc, char** argv) {
                 // makes it legible as a killcam.
                 if (!net->kill_cam().empty()) {
                     ImGui::SetWindowFontScale(1.0f);
+                    player_chip(net->kill_cam_killer(), 1.0f);
                     ImGui::TextColored({0.85f, 0.85f, 0.85f, 1.0f}, "killed by %s",
                                        player_name(net->kill_cam_killer()).c_str());
                 }

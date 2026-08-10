@@ -3,7 +3,13 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
+#include <limits>
+#include <string>
+
 namespace {
+
+using Catch::Approx;
 
 constexpr float kTick = 1.0f / 60.0f;
 
@@ -162,6 +168,96 @@ TEST_CASE("magazine_size 0 is allowed only with melee", "[weapon]") {
     CHECK_FALSE(game::parse_weapon_config(body + "magazine_size=-1\nmelee=true\n").has_value());
     // And a non-boolean melee value fails the parse rather than defaulting.
     CHECK_FALSE(game::parse_weapon_config(body + "magazine_size=1\nmelee=maybe\n").has_value());
+}
+
+// A weapon with a falloff band from 10 m to 30 m keeping half its damage.
+game::WeaponConfig falloff_config() {
+    game::WeaponConfig config = test_config();
+    config.damage = 100.0f;
+    config.falloff_start_meters = 10.0f;
+    config.falloff_end_meters = 30.0f;
+    config.falloff_min_fraction = 0.5f;
+    return config;
+}
+
+TEST_CASE("damage falls off linearly between the falloff bounds", "[weapon]") {
+    const game::WeaponConfig config = falloff_config();
+
+    // Full damage right up to the start of the band...
+    CHECK(game::damage_at_distance(config, 0.0f) == Approx(100.0f));
+    CHECK(game::damage_at_distance(config, 10.0f) == Approx(100.0f));
+    // ...linear across it...
+    CHECK(game::damage_at_distance(config, 20.0f) == Approx(75.0f));
+    CHECK(game::damage_at_distance(config, 25.0f) == Approx(62.5f));
+    // ...and flat at the floor from the end onwards, never below it.
+    CHECK(game::damage_at_distance(config, 30.0f) == Approx(50.0f));
+    CHECK(game::damage_at_distance(config, 100.0f) == Approx(50.0f));
+    CHECK(game::damage_at_distance(config, 10000.0f) == Approx(50.0f));
+}
+
+TEST_CASE("a weapon that says nothing about falloff does not have any", "[weapon]") {
+    // The compatibility guarantee: the four configs that shipped before
+    // falloff existed must keep doing exactly what they say at every range.
+    const game::WeaponConfig config = test_config();
+    REQUIRE(config.falloff_min_fraction == 1.0f);
+    CHECK(game::damage_at_distance(config, 0.0f) == Approx(config.damage));
+    CHECK(game::damage_at_distance(config, 50.0f) == Approx(config.damage));
+    CHECK(game::damage_at_distance(config, 1000.0f) == Approx(config.damage));
+}
+
+TEST_CASE("damage falloff never produces a negative or NaN result", "[weapon]") {
+    game::WeaponConfig config = falloff_config();
+
+    // A floor outside 0..1 is clamped rather than inverted or amplified.
+    config.falloff_min_fraction = -3.0f;
+    CHECK(game::damage_at_distance(config, 1000.0f) == Approx(0.0f));
+    config.falloff_min_fraction = 4.0f;
+    CHECK(game::damage_at_distance(config, 1000.0f) == Approx(100.0f));
+
+    // A band that runs backwards is treated as no band at all.
+    config = falloff_config();
+    config.falloff_start_meters = 50.0f;
+    config.falloff_end_meters = 10.0f;
+    CHECK(game::damage_at_distance(config, 100.0f) == Approx(100.0f));
+
+    // A zero-width band cannot divide by its own width.
+    config = falloff_config();
+    config.falloff_start_meters = 20.0f;
+    config.falloff_end_meters = 20.0f;
+    const float at_band = game::damage_at_distance(config, 20.0f);
+    CHECK(std::isfinite(at_band));
+
+    // A NaN distance falls through to full damage rather than spreading.
+    CHECK(std::isfinite(
+        game::damage_at_distance(falloff_config(), std::numeric_limits<float>::quiet_NaN())));
+}
+
+TEST_CASE("falloff and hit zones compose without either being lost", "[weapon]") {
+    const game::WeaponConfig config = falloff_config();
+
+    // Halfway down the band is 75; a head shot doubles what the range left
+    // rather than doubling the muzzle damage and attenuating that.
+    const float base = game::damage_at_distance(config, 20.0f);
+    CHECK(base == Approx(75.0f));
+    CHECK(base * game::zone_damage_multiplier(config, game::HitZone::Head) == Approx(150.0f));
+    CHECK(base * game::zone_damage_multiplier(config, game::HitZone::Torso) == Approx(75.0f));
+    CHECK(base * game::zone_damage_multiplier(config, game::HitZone::Leg) == Approx(56.25f));
+}
+
+TEST_CASE("a falloff band that runs backwards is rejected at parse", "[weapon]") {
+    const std::string body =
+        "name=x\ndamage=10\nrounds_per_minute=60\nreload_seconds=1\nrange=10\nmagazine_size=1\n";
+    // The good case, so the rejections below are about the band and not the
+    // rest of the file.
+    CHECK(game::parse_weapon_config(body + "falloff_start_meters=5\nfalloff_end_meters=9\n"
+                                           "falloff_min_fraction=0.5\n")
+              .has_value());
+    CHECK_FALSE(game::parse_weapon_config(body + "falloff_start_meters=9\nfalloff_end_meters=5\n")
+                    .has_value());
+    CHECK_FALSE(game::parse_weapon_config(body + "falloff_min_fraction=1.5\n").has_value());
+    CHECK_FALSE(game::parse_weapon_config(body + "falloff_min_fraction=-0.1\n").has_value());
+    CHECK_FALSE(game::parse_weapon_config(body + "falloff_start_meters=-1\n").has_value());
+    CHECK_FALSE(game::parse_weapon_config(body + "falloff_min_fraction=half\n").has_value());
 }
 
 }  // namespace

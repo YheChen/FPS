@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <optional>
@@ -35,6 +36,17 @@ struct WeaponConfig {
     float head_multiplier = 2.0f;
     float limb_multiplier = 0.75f;
 
+    // Damage falloff with distance. Full damage out to falloff_start_meters,
+    // then linear down to falloff_min_fraction at falloff_end_meters and
+    // beyond (still bounded by `range`, past which nothing is hit at all).
+    //
+    // The defaults are deliberately inert -- min_fraction 1.0 means no
+    // falloff at any distance -- so a config that says nothing about falloff
+    // behaves exactly as it did before this existed.
+    float falloff_start_meters = 0.0f;
+    float falloff_end_meters = 0.0f;
+    float falloff_min_fraction = 1.0f;
+
     // Automatic weapons keep firing while held; semi-automatic ones require
     // a fresh trigger pull per shot.
     bool automatic = true;
@@ -48,6 +60,33 @@ struct WeaponConfig {
 
     float shot_interval_seconds() const { return 60.0f / rounds_per_minute; }
 };
+
+// Fraction of full damage a hit at `distance` metres keeps: 1.0 inside the
+// falloff start, falling linearly to falloff_min_fraction at the end and
+// staying there.
+//
+// Every comparison is written so that a NaN distance or a nonsense config
+// falls through to 1.0 rather than propagating into a damage number.
+inline float damage_falloff_scale(const WeaponConfig& config, float distance) {
+    const float floor_fraction = std::clamp(config.falloff_min_fraction, 0.0f, 1.0f);
+    if (!(config.falloff_end_meters > config.falloff_start_meters) || floor_fraction >= 1.0f) {
+        return 1.0f;  // falloff disabled, which is the default
+    }
+    if (!(distance > config.falloff_start_meters)) {
+        return 1.0f;  // inside the full-damage band (and the NaN case)
+    }
+    if (distance >= config.falloff_end_meters) {
+        return floor_fraction;
+    }
+    const float t = (distance - config.falloff_start_meters) /
+                    (config.falloff_end_meters - config.falloff_start_meters);
+    return 1.0f - t * (1.0f - floor_fraction);
+}
+
+// Base damage for one hit at `distance`, before any hit-zone multiplier.
+inline float damage_at_distance(const WeaponConfig& config, float distance) {
+    return config.damage * damage_falloff_scale(config, distance);
+}
 
 // Damage scale for a hit in `zone`. Pure; the server applies it per pellet
 // so a shotgun spray that catches a head and two legs is scored honestly.

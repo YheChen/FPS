@@ -82,6 +82,12 @@ std::optional<WeaponConfig> parse_weapon_config(std::string_view text) {
             ok = parse_float(value, config.head_multiplier);
         } else if (key == "limb_multiplier") {
             ok = parse_float(value, config.limb_multiplier);
+        } else if (key == "falloff_start_meters") {
+            ok = parse_float(value, config.falloff_start_meters);
+        } else if (key == "falloff_end_meters") {
+            ok = parse_float(value, config.falloff_end_meters);
+        } else if (key == "falloff_min_fraction") {
+            ok = parse_float(value, config.falloff_min_fraction);
         } else if (key == "switch_seconds") {
             ok = parse_float(value, config.switch_seconds);
         } else if (key == "automatic") {
@@ -106,6 +112,16 @@ std::optional<WeaponConfig> parse_weapon_config(std::string_view text) {
     // would reject the one config that means it.
     if (config.magazine_size < 0 || (!config.melee && config.magazine_size <= 0)) {
         eng::log::error("weapon config: magazine_size must be > 0 unless melee=true");
+        return std::nullopt;
+    }
+    // A falloff band that runs backwards, or a floor outside [0, 1], is a
+    // typo rather than an intent -- and silently ignoring it would ship a
+    // weapon doing the wrong damage at every range.
+    if (config.falloff_start_meters < 0.0f || config.falloff_end_meters < 0.0f ||
+        config.falloff_min_fraction < 0.0f || config.falloff_min_fraction > 1.0f ||
+        (config.falloff_end_meters > 0.0f &&
+         config.falloff_end_meters <= config.falloff_start_meters)) {
+        eng::log::error("weapon config: falloff band must run forwards and keep a 0..1 fraction");
         return std::nullopt;
     }
     if (config.rounds_per_minute <= 0.0f || config.damage <= 0.0f || config.range <= 0.0f ||

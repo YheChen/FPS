@@ -596,7 +596,12 @@ void ServerGame::fire_hitscan(std::uint8_t shooter_id, const InputCommand& comma
         if (hit_id != kNoPlayer) {
             const HitZone zone =
                 classify_hit_zone(impact, eye, dir, hit_feet, hit_radius, hit_height);
-            damage_by_victim[hit_id] += weapon.damage * zone_damage_multiplier(weapon, zone);
+            // Falloff first, then the zone multiplier: a head shot doubles
+            // whatever the range left of the bullet, rather than doubling the
+            // muzzle damage and then attenuating it. Per pellet at that
+            // pellet's OWN distance, which is the whole point for a shotgun.
+            damage_by_victim[hit_id] +=
+                damage_at_distance(weapon, hit_t) * zone_damage_multiplier(weapon, zone);
             // First pellet to reach this victim sets the zone outright; later
             // ones only raise it. Without the `!hit_any` term the array's
             // value-initialised Torso would outrank a limb, and every leg

@@ -128,6 +128,7 @@ void write(eng::ByteWriter& w, const PlayerDamagedMsg& m) {
     w.u8(m.attacker);
     w.f32(m.health);
     w.f32(m.amount);
+    w.u8(static_cast<std::uint8_t>(m.zone));
 }
 
 void write(eng::ByteWriter& w, const PlayerDiedMsg& m) {
@@ -376,12 +377,14 @@ std::optional<PlayerDamagedMsg> read_player_damaged(eng::ByteReader& r) {
     const auto attacker = r.u8();
     const auto health = r.f32();
     const auto amount = r.f32();
+    const auto zone = r.u8();
     if (!victim || *victim >= kMaxPlayers || !attacker || !valid_player_or_none(*attacker) ||
         !health || *health < 0.0f || *health > 1000.0f || !amount || *amount < 0.0f ||
-        *amount > 1000.0f || !r.finished()) {
+        *amount > 1000.0f || !zone || *zone > static_cast<std::uint8_t>(HitZone::Leg) ||
+        !r.finished()) {
         return std::nullopt;
     }
-    return PlayerDamagedMsg{*victim, *attacker, *health, *amount};
+    return PlayerDamagedMsg{*victim, *attacker, *health, *amount, static_cast<HitZone>(*zone)};
 }
 
 std::optional<PlayerDiedMsg> read_player_died(eng::ByteReader& r) {

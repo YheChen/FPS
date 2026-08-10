@@ -1,6 +1,6 @@
 # Packet format
 
-Status: **implemented** (protocol version 6, `game/shared/protocol.*`).
+Status: **implemented** (protocol version 7, `game/shared/protocol.*`).
 Update this document in the same commit as any protocol change.
 
 ## Encoding rules
@@ -33,7 +33,7 @@ Channel R = ENet reliable ordered (ch 0), U = unreliable sequenced (ch 1).
 | 7    | Snapshot         | S→C  | U  | 20/s             | 16 + 26·players B | full state |
 | 8    | Ping / 9 Pong    | both | U  | 4/s              | 12 B     | RTT + clock offset |
 | 10   | FireEvent        | S→C  | R  | on shot (M8)     | 16 + 13·pellets B | shooter, weapon slot, origin, one ray (endpoint + victim) per pellet: a shotgun draws 8 tracers but plays one bang |
-| 11   | HealthUpdate     | S→C  | R  | on change (M8)   | 8 B      | |
+| 11   | HealthUpdate     | S→C  | R  | on change (M8)   | 9 B      | victim, attacker, health after, damage dealt, and **hit zone** (M35): 0 torso, 1 head, 2 arm, 3 leg. One shot reports one zone — for a shotgun, the best any pellet reached. A zone byte above 3 rejects the message. |
 | 12   | PlayerDied       | S→C  | R  | on death (M8)    | 8 B      | victim, killer |
 | 13   | PlayerRespawned  | S→C  | R  | on respawn (M8)  | 20 B     | |
 | 14   | ScoreUpdate      | S→C  | R  | on change (M8)   | 8 B/row  | |

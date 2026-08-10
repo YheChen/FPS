@@ -18,6 +18,22 @@ constexpr int kMaxInputPacketsPerSecond = 200;
 constexpr int kMaxBadMessages = 10;
 constexpr int kStarvationJumpTicks = 6;
 
+// One shot reports one zone, but a shotgun's pellets can land in several.
+// Head beats body beats limb, so a spray that catches a head still reads as
+// a headshot -- which is what the shooter saw and what the damage reflects.
+int zone_rank(HitZone zone) {
+    switch (zone) {
+        case HitZone::Head:
+            return 2;
+        case HitZone::Torso:
+            return 1;
+        case HitZone::Arm:
+        case HitZone::Leg:
+            break;
+    }
+    return 0;
+}
+
 template <typename Message>
 std::vector<std::uint8_t> encode(const Message& message) {
     eng::ByteWriter writer;
@@ -528,6 +544,9 @@ void ServerGame::fire_hitscan(std::uint8_t shooter_id, const InputCommand& comma
     // Damage is accumulated per victim so a shotgun applies one combined hit
     // (and can only kill a player once, no matter how many pellets land).
     std::array<float, kMaxPlayers> damage_by_victim{};
+    // The best zone any pellet of this shot reached, per victim.
+    std::array<HitZone, kMaxPlayers> zone_by_victim{};
+    std::array<bool, kMaxPlayers> hit_any{};
 
     const float spread = glm::radians(weapon.spread_degrees);
     for (int pellet = 0; pellet < weapon.pellets; ++pellet) {
@@ -545,6 +564,13 @@ void ServerGame::fire_hitscan(std::uint8_t shooter_id, const InputCommand& comma
 
         std::uint8_t hit_id = kNoPlayer;
         float hit_t = max_t;
+        // The capsule that won, kept so the impact point can be turned into a
+        // hit zone below. Recomputing it from players_[hit_id] afterwards
+        // would silently use the player's CURRENT position rather than the
+        // rewound one the ray was actually tested against.
+        glm::vec3 hit_feet{0.0f};
+        float hit_radius = 0.0f;
+        float hit_height = 0.0f;
         for (std::uint8_t id = 0; id < kMaxPlayers; ++id) {
             if (id == shooter_id || !players_[id] || !players_[id]->alive) {
                 continue;
@@ -559,12 +585,26 @@ void ServerGame::fire_hitscan(std::uint8_t shooter_id, const InputCommand& comma
             if (t && *t < hit_t) {
                 hit_t = *t;
                 hit_id = id;
+                hit_feet = victim_position;
+                hit_radius = config.radius;
+                hit_height = height;
             }
         }
 
-        event.rays.push_back(FireRay{eye + dir * hit_t, hit_id});
+        const glm::vec3 impact = eye + dir * hit_t;
+        event.rays.push_back(FireRay{impact, hit_id});
         if (hit_id != kNoPlayer) {
-            damage_by_victim[hit_id] += weapon.damage;
+            const HitZone zone =
+                classify_hit_zone(impact, eye, dir, hit_feet, hit_radius, hit_height);
+            damage_by_victim[hit_id] += weapon.damage * zone_damage_multiplier(weapon, zone);
+            // First pellet to reach this victim sets the zone outright; later
+            // ones only raise it. Without the `!hit_any` term the array's
+            // value-initialised Torso would outrank a limb, and every leg
+            // shot would be reported to the client as a body shot.
+            if (!hit_any[hit_id] || zone_rank(zone) > zone_rank(zone_by_victim[hit_id])) {
+                zone_by_victim[hit_id] = zone;
+            }
+            hit_any[hit_id] = true;
         }
     }
 
@@ -579,9 +619,9 @@ void ServerGame::fire_hitscan(std::uint8_t shooter_id, const InputCommand& comma
         }
         Player& victim = *players_[id];
         const bool died = apply_damage(victim.health, damage_by_victim[id]);
-        broadcast_reliable(
-            encode(PlayerDamagedMsg{id, shooter_id, victim.health.current, damage_by_victim[id]}),
-            net);
+        broadcast_reliable(encode(PlayerDamagedMsg{id, shooter_id, victim.health.current,
+                                                   damage_by_victim[id], zone_by_victim[id]}),
+                           net);
         if (died) {
             kill_player(id, shooter_id, net);
         }

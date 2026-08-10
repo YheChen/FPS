@@ -137,11 +137,13 @@ std::vector<glm::vec3> default_spawns() {
     return {{0.0f, 1.0f, 0.0f}, {8.0f, 1.0f, 0.0f}};
 }
 
-// A command that looks from `shooter_feet` at the chest of a player standing
-// at `target_feet`, in the server's own yaw/pitch convention.
-game::InputCommand aim_at(const glm::vec3& shooter_feet, const glm::vec3& target_feet, bool fire) {
+// A command that looks from `shooter_feet` at a point `aim_height` above the
+// feet of a player standing at `target_feet`, in the server's own yaw/pitch
+// convention. The default is chest height.
+game::InputCommand aim_at(const glm::vec3& shooter_feet, const glm::vec3& target_feet, bool fire,
+                          float aim_height = 1.0f) {
     const glm::vec3 eye = shooter_feet + glm::vec3{0.0f, game::kMove.eye_height, 0.0f};
-    const glm::vec3 chest = target_feet + glm::vec3{0.0f, 1.0f, 0.0f};
+    const glm::vec3 chest = target_feet + glm::vec3{0.0f, aim_height, 0.0f};
     const glm::vec3 delta = chest - eye;
     const float horizontal = glm::length(glm::vec2{delta.x, delta.z});
 
@@ -784,6 +786,67 @@ TEST_CASE("a shotgun's pellets land as one hit and one death", "[server]") {
     REQUIRE_FALSE(scores.empty());
     CHECK(scores[0].player == duel.shooter_id);
     CHECK(scores[0].kills == 1);
+}
+
+TEST_CASE("where a shot lands decides what it costs", "[server]") {
+    // The test rifle does 25 to the body, x2.0 to the head, x0.75 to a limb.
+    struct Case {
+        const char* what;
+        float aim_height;
+        game::HitZone zone;
+        float damage;
+    };
+    const Case cases[] = {
+        {"head", 1.70f, game::HitZone::Head, 50.0f},
+        {"torso", 1.20f, game::HitZone::Torso, 25.0f},
+        {"leg", 0.50f, game::HitZone::Leg, 18.75f},
+    };
+
+    for (const Case& shot : cases) {
+        INFO("aiming at the " << shot.what);
+        // A fresh match per case: the victim starts every one at full health,
+        // and the weapon is off cooldown.
+        Harness fresh;
+        const Duel d = set_up_duel(fresh);
+        const auto from = fresh.observed(d.shooter_peer, d.shooter_id);
+        const auto at = fresh.observed(d.shooter_peer, d.victim_id);
+        REQUIRE(from);
+        REQUIRE(at);
+
+        fresh.net.clear();
+        fresh.drive_tick(d.shooter_peer,
+                         aim_at(from->position, at->position, true, shot.aim_height));
+
+        const auto hits = decode_to(fresh.net.sent, d.shooter_peer, MsgType::PlayerDamaged,
+                                    game::read_player_damaged);
+        REQUIRE(hits.size() == 1);
+        CHECK(hits[0].zone == shot.zone);
+        CHECK(hits[0].amount == shot.damage);
+        CHECK(hits[0].health == 100.0f - shot.damage);
+    }
+}
+
+TEST_CASE("a head shot kills in half the shots a body shot needs", "[server]") {
+    // The point of the whole feature, stated as the thing a player would
+    // notice: 100 health, 25 a shot to the body is four, 50 to the head is two.
+    const auto deaths_for_aim = [](float aim_height) {
+        Harness h;
+        const Duel duel = set_up_duel(h);
+        const auto shooter = h.observed(duel.shooter_peer, duel.shooter_id);
+        const auto victim = h.observed(duel.shooter_peer, duel.victim_id);
+        REQUIRE(shooter);
+        REQUIRE(victim);
+        h.net.clear();
+        const game::InputCommand fire =
+            aim_at(shooter->position, victim->position, true, aim_height);
+        h.drive_until(duel.shooter_peer, fire, MsgType::PlayerDied, 120);
+        return decode_to(h.net.sent, duel.shooter_peer, MsgType::PlayerDamaged,
+                         game::read_player_damaged)
+            .size();
+    };
+
+    CHECK(deaths_for_aim(1.20f) == 4u);  // body
+    CHECK(deaths_for_aim(1.70f) == 2u);  // head
 }
 
 TEST_CASE("a shot is resolved where the shooter saw the victim", "[server]") {

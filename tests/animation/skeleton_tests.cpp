@@ -237,14 +237,14 @@ TEST_CASE("a malformed skin is rejected rather than silently posed", "[skeleton]
 
 // --- the real asset --------------------------------------------------------
 
-TEST_CASE("character.glb loads with a skin and three clips", "[skeleton]") {
+TEST_CASE("character.glb loads with a skin and its full clip set", "[skeleton]") {
     const eng::GltfModel* model = load_character();
     REQUIRE(model != nullptr);
 
     REQUIRE(model->skins.size() == 1);
     CHECK(model->skins[0].joints.size() == 12);
     CHECK(model->skins[0].inverse_bind_matrices.size() == 12);
-    REQUIRE(model->animations.size() == 3);
+    REQUIRE(model->animations.size() == 9);
 
     REQUIRE(model->meshes.size() == 1);
     REQUIRE(model->meshes[0].primitives.size() == 1);
@@ -304,14 +304,19 @@ TEST_CASE("the character's clips retarget onto the skeleton", "[skeleton]") {
     REQUIRE(skeleton.has_value());
 
     const std::vector<eng::AnimationClip> clips = eng::build_clips(*model, *skeleton);
-    REQUIRE(clips.size() == 3);
+    REQUIRE(clips.size() == 9);
 
     const eng::AnimationClip* run = eng::find_clip(clips, "run");
     REQUIRE(run != nullptr);
     CHECK(run->duration_seconds == Approx(0.8f));
     CHECK(run->channels.size() == 9);
-    CHECK(eng::find_clip(clips, "idle") != nullptr);
-    CHECK(eng::find_clip(clips, "jump") != nullptr);
+    // The client resolves all nine by name at startup and refuses to run
+    // without them, so a rename in the generator has to break here first.
+    for (const char* name : {"idle", "run", "strafe_right", "strafe_left", "crouch_idle",
+                             "crouch_move", "jump", "land", "death"}) {
+        INFO("clip " << name);
+        CHECK(eng::find_clip(clips, name) != nullptr);
+    }
     CHECK(eng::find_clip(clips, "cartwheel") == nullptr);
 
     for (const eng::AnimationClip::Channel& channel : run->channels) {
@@ -391,6 +396,168 @@ TEST_CASE("posing the character moves a foot but not the hips", "[skeleton]") {
     const glm::vec3 foot{0.11f, 0.22f, 0.0f};
     const glm::vec3 foot_moved = transform_point(matrices[static_cast<std::size_t>(shin)], foot);
     CHECK(glm::length(foot_moved - foot) > 0.05f);
+}
+
+TEST_CASE("the stances that lower the body keep it out of the floor", "[skeleton]") {
+    // The generator solves the hip height per keyframe by finding the lowest
+    // mesh corner. This is the same question asked of the skinned result, so
+    // a pose authored with the legs folded but the hips left standing --
+    // which is what the first crouch draft did, 7 cm underground -- fails
+    // here rather than in a screenshot nobody takes.
+    const eng::GltfModel* model = load_character();
+    REQUIRE(model != nullptr);
+    const auto skeleton = eng::Skeleton::from_gltf(*model, model->skins[0]);
+    REQUIRE(skeleton.has_value());
+    const std::vector<eng::AnimationClip> clips = eng::build_clips(*model, *skeleton);
+    const eng::MeshData& mesh = model->meshes[0].primitives[0].mesh;
+
+    for (const char* name :
+         {"crouch_idle", "crouch_move", "strafe_right", "strafe_left", "land", "death"}) {
+        const eng::AnimationClip* clip = eng::find_clip(clips, name);
+        REQUIRE(clip != nullptr);
+        eng::Pose pose;
+        std::vector<glm::mat4> matrices;
+        for (int step = 0; step <= 20; ++step) {
+            const float time = clip->duration_seconds * static_cast<float>(step) / 20.0f;
+            eng::sample_clip(*skeleton, *clip, time, false, pose);
+            eng::pose_to_joint_matrices(*skeleton, pose, matrices);
+            float lowest = 1.0e9f;
+            for (const eng::Vertex& vertex : mesh.vertices) {
+                glm::vec3 skinned{0.0f};
+                for (int influence = 0; influence < 4; ++influence) {
+                    const float weight = vertex.weights[influence];
+                    if (weight <= 0.0f) {
+                        continue;
+                    }
+                    const auto joint = static_cast<std::size_t>(vertex.joints[influence]);
+                    skinned += weight * transform_point(matrices[joint], vertex.position);
+                }
+                lowest = std::min(lowest, skinned.y);
+            }
+            INFO("clip " << name << " at t=" << time << " reaches y=" << lowest);
+            // A centimetre of slack: only the keyframes are solved, so a
+            // sample between two of them can dip slightly.
+            CHECK(lowest > -0.01f);
+        }
+    }
+}
+
+TEST_CASE("the death clip is a one-shot that settles", "[skeleton]") {
+    const eng::GltfModel* model = load_character();
+    REQUIRE(model != nullptr);
+    const auto skeleton = eng::Skeleton::from_gltf(*model, model->skins[0]);
+    REQUIRE(skeleton.has_value());
+    const std::vector<eng::AnimationClip> clips = eng::build_clips(*model, *skeleton);
+    const eng::AnimationClip* death = eng::find_clip(clips, "death");
+    REQUIRE(death != nullptr);
+
+    const int hips = skeleton->find("hips");
+    REQUIRE(hips >= 0);
+    const auto hips_index = static_cast<std::size_t>(hips);
+
+    eng::Pose pose;
+    eng::sample_clip(*skeleton, *death, 0.0f, false, pose);
+    const glm::vec3 upright = pose.translations[hips_index];
+    eng::sample_clip(*skeleton, *death, death->duration_seconds, false, pose);
+    const glm::vec3 fallen = pose.translations[hips_index];
+
+    // Unlike every looping clip, the end must NOT match the start: a death
+    // that returns to its first frame plays on repeat.
+    CHECK(fallen.y < upright.y - 0.5f);
+    CHECK(fallen.z > upright.z + 0.1f);
+
+    // Sampled unlooped past the end it holds, which is what lets the client
+    // leave a corpse on the ground until the server respawns it.
+    eng::sample_clip(*skeleton, *death, death->duration_seconds * 10.0f, false, pose);
+    CHECK(glm::length(pose.translations[hips_index] - fallen) == Approx(0.0f).margin(1e-5f));
+
+    // The last quarter of the clip covers far less ground than the middle,
+    // so the body arrives rather than stops dead.
+    eng::sample_clip(*skeleton, *death, death->duration_seconds * 0.5f, false, pose);
+    const glm::vec3 midway = pose.translations[hips_index];
+    eng::sample_clip(*skeleton, *death, death->duration_seconds * 0.75f, false, pose);
+    const glm::vec3 late = pose.translations[hips_index];
+    CHECK(glm::length(fallen - late) < glm::length(late - midway));
+}
+
+TEST_CASE("the two side-steps are mirror images", "[skeleton]") {
+    // The whole point of having two is that they disagree about which way the
+    // body is going. If they ever became the same clip, a strafe would be as
+    // uninformative as the forward run it replaced.
+    const eng::GltfModel* model = load_character();
+    REQUIRE(model != nullptr);
+    const auto skeleton = eng::Skeleton::from_gltf(*model, model->skins[0]);
+    REQUIRE(skeleton.has_value());
+    const std::vector<eng::AnimationClip> clips = eng::build_clips(*model, *skeleton);
+    const eng::AnimationClip* right = eng::find_clip(clips, "strafe_right");
+    const eng::AnimationClip* left = eng::find_clip(clips, "strafe_left");
+    REQUIRE(right != nullptr);
+    REQUIRE(left != nullptr);
+    CHECK(right->duration_seconds == Approx(left->duration_seconds));
+
+    const int chest = skeleton->find("chest");
+    REQUIRE(chest >= 0);
+    const auto chest_index = static_cast<std::size_t>(chest);
+
+    eng::Pose stepping_right;
+    eng::Pose stepping_left;
+    eng::sample_clip(*skeleton, *right, 0.2f, true, stepping_right);
+    eng::sample_clip(*skeleton, *left, 0.2f, true, stepping_left);
+
+    // The chest leans into the step, so the two lean opposite ways: the same
+    // point on the chest ends up on opposite sides of the body's midline.
+    const glm::vec3 shoulder{0.0f, 0.30f, 0.0f};
+    const float lean_right = (stepping_right.rotations[chest_index] * shoulder).x;
+    const float lean_left = (stepping_left.rotations[chest_index] * shoulder).x;
+    CHECK(lean_right > 0.01f);
+    CHECK(lean_left == Approx(-lean_right).margin(1e-5f));
+}
+
+TEST_CASE("the rig carries a right-hand attachment joint", "[skeleton]") {
+    // A weapon gets parented here next. It has to exist, hang off the right
+    // arm, and sit on the +X side -- which is the character's right, given
+    // the model faces -Z.
+    const eng::GltfModel* model = load_character();
+    REQUIRE(model != nullptr);
+    const auto skeleton = eng::Skeleton::from_gltf(*model, model->skins[0]);
+    REQUIRE(skeleton.has_value());
+
+    const int hand = skeleton->find("hand_r");
+    REQUIRE(hand >= 0);
+    const int forearm = skeleton->joints()[static_cast<std::size_t>(hand)].parent;
+    REQUIRE(forearm >= 0);
+    CHECK(skeleton->joints()[static_cast<std::size_t>(forearm)].name == "arm_r_lower");
+
+    // The rest pose has no rotations, so the joint's bind position is just the
+    // inverse of its inverse bind matrix.
+    const auto hand_index = static_cast<std::size_t>(hand);
+    const glm::mat4 bind = glm::inverse(skeleton->joints()[hand_index].inverse_bind);
+    const glm::vec3 bind_origin{bind[3]};
+    CHECK(bind_origin.x > 0.1f);  // on the +X side of the body
+    CHECK(bind_origin.y > 0.5f);  // and at hand height, not on the floor
+
+    // The grip transform a weapon will hang off is joint_matrix * bind, which
+    // has to actually RIDE the animation -- an attachment point that stayed
+    // put while the arm swung would leave the gun floating beside the body.
+    const std::vector<eng::AnimationClip> clips = eng::build_clips(*model, *skeleton);
+    const eng::AnimationClip* run = eng::find_clip(clips, "run");
+    REQUIRE(run != nullptr);
+
+    eng::Pose pose;
+    std::vector<glm::mat4> matrices;
+    eng::sample_clip(*skeleton, *run, 0.0f, true, pose);
+    eng::pose_to_joint_matrices(*skeleton, pose, matrices);
+    const glm::vec3 forward_swing = transform_point(matrices[hand_index], bind_origin);
+    eng::sample_clip(*skeleton, *run, run->duration_seconds * 0.5f, true, pose);
+    eng::pose_to_joint_matrices(*skeleton, pose, matrices);
+    const glm::vec3 back_swing = transform_point(matrices[hand_index], bind_origin);
+    CHECK(glm::length(forward_swing - back_swing) > 0.1f);
+
+    // And it stays a hand, not a shoulder: it tracks the forearm it hangs off.
+    const auto forearm_index = static_cast<std::size_t>(forearm);
+    const glm::mat4 forearm_bind = glm::inverse(skeleton->joints()[forearm_index].inverse_bind);
+    const glm::vec3 elbow = transform_point(matrices[forearm_index], glm::vec3{forearm_bind[3]});
+    CHECK(glm::length(back_swing - elbow) == Approx(0.26f).margin(1e-3f));
 }
 
 }  // namespace

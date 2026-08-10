@@ -12,6 +12,7 @@ add_executable(engine_tests
     animation/skeleton_tests.cpp
     assets/gltf_loader_tests.cpp
     assets/paths_tests.cpp
+    audio/audio_listener_tests.cpp
     core/input_tests.cpp
     core/log_tests.cpp
     core/time_tests.cpp

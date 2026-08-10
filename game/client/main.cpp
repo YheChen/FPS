@@ -260,6 +260,7 @@ struct ClientArgs {
     std::optional<float> fixed_pitch;        // lock the view pitch (radians, + is up)
     std::optional<std::string> screenshot;   // PNG written on the final frame
     std::optional<std::string> replay_path;  // --replay: watch a recording
+    bool audio_trace = false;                // dump every spatialized sound
     // Geometry is loaded once, before the menu, because the menu orbits it.
     // So the map has to be chosen before the server can be asked which one it
     // is running; a mismatch is caught at the welcome instead.
@@ -316,6 +317,8 @@ ClientArgs parse_args(int argc, char** argv) {
             }
         } else if (arg == "--auto-fire") {
             args.auto_fire = true;
+        } else if (arg == "--audio-trace") {
+            args.audio_trace = true;
         } else if (arg == "--fixed-yaw") {
             if (const auto value = next_value()) {
                 float yaw = 0.0f;
@@ -785,10 +788,14 @@ struct DamageNumber {
 }  // namespace
 
 int main(int argc, char** argv) {
-    eng::log::set_level(eng::log::Level::Debug);
-    eng::log::info("FPS client starting (engine v{})", eng::version_string());
-
     const ClientArgs args = parse_args(argc, argv);
+    // Nothing else in the tree logs at Trace, so --audio-trace is in practice
+    // an audio-only dump: one line per spatialized sound, giving the emitter,
+    // the listener and the emitter's coordinates in the listener's own frame.
+    // Far too noisy to leave on, and the only way to check the left/right
+    // sign of a running client from the outside.
+    eng::log::set_level(args.audio_trace ? eng::log::Level::Trace : eng::log::Level::Debug);
+    eng::log::info("FPS client starting (engine v{})", eng::version_string());
 
     auto window =
         eng::Window::create({.title = "FPS", .width = 1280, .height = 720, .vsync = args.vsync});
@@ -1007,9 +1014,20 @@ int main(int argc, char** argv) {
 
     // --- gameplay: weapon, targets, audio ---------------------------------
     auto audio = eng::AudioEngine::create();  // optional: game runs silent if it fails
+    // Two deliberately separate paths. sound() is head-relative: it is for
+    // things that happen TO this player -- their own weapon, their own death,
+    // the hit confirmation -- which have no location in the arena, and which
+    // panning would place somewhere outside their own head. sound_at() is for
+    // things that happen ELSEWHERE, where knowing the direction is the whole
+    // value of hearing it at all.
     const auto sound = [&](const char* name, float volume = 1.0f) {
         if (audio) {
             audio->play(*assets_root / "sounds" / name, volume);
+        }
+    };
+    const auto sound_at = [&](const char* name, const glm::vec3& position, float volume = 1.0f) {
+        if (audio) {
+            audio->play_at(*assets_root / "sounds" / name, position, volume);
         }
     };
 
@@ -1438,13 +1456,18 @@ int main(int argc, char** argv) {
                         emit_impact(particles, eye + dir * hit_t, wall->normal, seed);
                     }
                     if (hit_target != nullptr) {
-                        const float volume = std::clamp(1.2f - hit_t / 40.0f, 0.2f, 1.0f);
                         const bool killed =
                             game::apply_damage(hit_target->health, weapon_config.damage);
                         damage_numbers.push_back(
                             {hit_target->position + glm::vec3{0.0f, kTargetHeight * 0.7f, 0.0f},
                              weapon_config.damage, 1.1f});
                         hitmarker = {0.18f, killed};
+                        // The two sounds below are the hitmarker in audio
+                        // form -- confirmation that YOUR shot landed, not a
+                        // noise the target made -- so they stay head-relative
+                        // and at a fixed volume. The distance ramp they used
+                        // to carry only made far hits, the ones hardest to
+                        // see land, the hardest to hear land too.
                         if (killed) {
                             hit_target->respawn_remaining = kTargetRespawnSeconds;
                             ++kills;
@@ -1452,9 +1475,9 @@ int main(int argc, char** argv) {
                                 particles,
                                 hit_target->position + glm::vec3{0.0f, kTargetHeight * 0.5f, 0.0f},
                                 seed);
-                            sound("kill.wav", volume);
+                            sound("kill.wav", 0.8f);
                         } else {
-                            sound("hit.wav", volume);
+                            sound("hit.wav", 0.8f);
                         }
                     }
                 }
@@ -1497,8 +1520,6 @@ int main(int argc, char** argv) {
 
         if (online) {
             // Combat events -> visuals and audio.
-            const glm::vec3 listener =
-                player.position + glm::vec3{0.0f, game::kMove.eye_height, 0.0f};
             for (const auto& fire : net->take_fire_events()) {
                 // One trigger pull = one event with N pellet rays: N tracers,
                 // a single bang.
@@ -1528,9 +1549,24 @@ int main(int argc, char** argv) {
                     }
                     ++ray_index;
                 }
-                const float distance = glm::length(fire.from - listener);
-                sound("fire.wav", std::clamp(1.1f - distance / 40.0f, 0.15f, 0.9f));
-                if (fire.shooter == net->my_id() && any_hit) {
+                const bool own_shot = fire.shooter == net->my_id();
+                if (own_shot) {
+                    // Your own rifle is in your hands, not out in the arena.
+                    // Being at zero distance would not save it either:
+                    // fire.from is the SERVER's copy of your eye, which
+                    // prediction leaves tens of centimetres from your camera,
+                    // and panning works off the normalized direction -- so a
+                    // 20 cm error pans as hard as a 20 m one, and your own
+                    // gun would wander between your ears as you moved.
+                    sound("fire.wav", 0.9f);
+                } else {
+                    // The one that matters. Distance used to be faked here
+                    // with a hand-rolled volume ramp, which told you a shot
+                    // was far away but never which way to turn; the muzzle
+                    // position now drives real panning and attenuation.
+                    sound_at("fire.wav", fire.from, 0.9f);
+                }
+                if (own_shot && any_hit) {
                     sound("hit.wav", 0.8f);  // hit confirm
                     hitmarker = {0.18f, false};
                 }
@@ -1680,6 +1716,17 @@ int main(int argc, char** argv) {
         }
         camera.aspect = window->aspect();
         camera.fov_y_degrees = settings.fov_degrees;
+
+        // The ears ride the camera rather than the player, so what you hear
+        // always agrees with what you see -- in the killcam and the replay
+        // chase cam the view is nowhere near the local player, and hearing
+        // the fight from your own corpse would be worse than hearing nothing.
+        // Sounds triggered earlier in this frame used the previous frame's
+        // listener: one frame of head rotation, well under the ~10 degrees it
+        // takes to notice a panning error.
+        if (audio) {
+            audio->set_listener(camera.position, camera.forward(), glm::vec3{0.0f, 1.0f, 0.0f});
+        }
 
         // --- render -----------------------------------------------------
         // Everything drawable is collected once, then submitted twice: from

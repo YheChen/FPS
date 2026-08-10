@@ -655,6 +655,7 @@ struct KillFeedEntry {
     std::string killer_name;
     std::string victim_name;
     float ttl;
+    bool headshot = false;
 };
 
 // Draws a player's identity colour as a chip in front of their name, and
@@ -771,6 +772,7 @@ game::InputCommand make_command(const eng::InputState& input, float yaw, float p
 struct Hitmarker {
     float ttl = 0.0f;
     bool kill = false;
+    bool headshot = false;
 };
 
 // Damage dealt, floated in world space above where it landed.
@@ -1155,6 +1157,8 @@ int main(int argc, char** argv) {
     eng::NetSimConfig sim_config = args.net_sim;
     std::deque<KillFeedEntry> kill_feed;
     Hitmarker hitmarker;
+    // Where each player was last hit, so a death can be reported as a headshot.
+    std::array<game::HitZone, game::kMaxPlayers> last_damage_zone{};
     std::vector<DamageNumber> damage_numbers;
     const auto player_name = [&](std::uint8_t id) -> std::string {
         if (!online) {
@@ -1532,6 +1536,13 @@ int main(int argc, char** argv) {
                 }
             }
             for (const auto& damage : net->take_damage_events()) {
+                // Remembered so the kill feed can call a killing blow a
+                // headshot: PlayerDied carries who, not where, and the damage
+                // that caused it always arrives first on the same reliable
+                // channel.
+                if (damage.victim < game::kMaxPlayers) {
+                    last_damage_zone[damage.victim] = damage.zone;
+                }
                 if (damage.attacker == net->my_id() && damage.victim != net->my_id()) {
                     const auto victim = net->players().find(damage.victim);
                     if (victim != net->players().end()) {
@@ -1539,11 +1550,16 @@ int main(int argc, char** argv) {
                             {victim->second.position + glm::vec3{0.0f, 1.4f, 0.0f}, damage.amount,
                              1.1f});
                     }
+                    if (damage.zone == game::HitZone::Head) {
+                        hitmarker.headshot = true;  // upgrades the flash the fire event started
+                    }
                 }
             }
             for (const auto& death : net->take_death_events()) {
+                const bool headshot = death.victim < game::kMaxPlayers &&
+                                      last_damage_zone[death.victim] == game::HitZone::Head;
                 kill_feed.push_back({death.killer, death.victim, player_name(death.killer),
-                                     player_name(death.victim), 5.0f});
+                                     player_name(death.victim), 5.0f, headshot});
                 if (kill_feed.size() > 5) {
                     kill_feed.pop_front();
                 }
@@ -1551,7 +1567,7 @@ int main(int argc, char** argv) {
                     sound("death.wav", 0.9f);
                 } else if (death.killer == net->my_id()) {
                     sound("kill.wav", 0.8f);
-                    hitmarker = {0.35f, true};
+                    hitmarker = {0.35f, true, headshot};
                 }
             }
             for (const auto& respawn : net->take_respawn_events()) {
@@ -2134,6 +2150,10 @@ int main(int argc, char** argv) {
                     ImGui::SameLine();
                     player_chip(entry.victim, alpha);
                     ImGui::TextColored(text_color, "%s", entry.victim_name.c_str());
+                    if (entry.headshot) {
+                        ImGui::SameLine();
+                        ImGui::TextColored({1.0f, 0.77f, 0.25f, alpha}, "(headshot)");
+                    }
                 }
                 ImGui::End();
             }
@@ -2265,19 +2285,30 @@ int main(int argc, char** argv) {
             overlay->AddLine({center.x, center.y + gap}, {center.x, center.y + gap + kArm},
                              cross_color, 2.0f);
 
-            // Hitmarker: a short X over the crosshair, red for a kill.
+            // Hitmarker: a short X over the crosshair. Red for a kill, amber
+            // and heavier for a headshot -- the shot worth learning to repeat
+            // has to be distinguishable at a glance from an ordinary hit.
             if (hitmarker.ttl > 0.0f) {
                 const float fade = std::clamp(hitmarker.ttl / 0.18f, 0.0f, 1.0f);
-                const ImU32 color = hitmarker.kill
-                                        ? IM_COL32(255, 70, 70, static_cast<int>(255 * fade))
-                                        : IM_COL32(255, 255, 255, static_cast<int>(230 * fade));
-                constexpr float kInner = 5.0f;
-                constexpr float kOuter = 12.0f;
+                const int alpha = static_cast<int>((hitmarker.kill ? 255 : 230) * fade);
+                ImU32 color =
+                    hitmarker.kill ? IM_COL32(255, 70, 70, alpha) : IM_COL32(255, 255, 255, alpha);
+                float thickness = 2.0f;
+                float inner = 5.0f;
+                float outer = 12.0f;
+                if (hitmarker.headshot) {
+                    color = IM_COL32(255, 196, 64, alpha);
+                    thickness = 3.0f;
+                    inner = 6.0f;
+                    outer = 15.0f;
+                }
                 for (const auto& [sx, sy] : {std::pair{1.0f, 1.0f}, std::pair{-1.0f, 1.0f}}) {
-                    overlay->AddLine({center.x + sx * kInner, center.y + sy * kInner},
-                                     {center.x + sx * kOuter, center.y + sy * kOuter}, color, 2.0f);
-                    overlay->AddLine({center.x - sx * kInner, center.y - sy * kInner},
-                                     {center.x - sx * kOuter, center.y - sy * kOuter}, color, 2.0f);
+                    overlay->AddLine({center.x + sx * inner, center.y + sy * inner},
+                                     {center.x + sx * outer, center.y + sy * outer}, color,
+                                     thickness);
+                    overlay->AddLine({center.x - sx * inner, center.y - sy * inner},
+                                     {center.x - sx * outer, center.y - sy * outer}, color,
+                                     thickness);
                 }
             }
 

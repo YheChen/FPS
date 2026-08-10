@@ -7,6 +7,8 @@
 #include <string_view>
 #include <vector>
 
+#include "game/shared/hitscan.h"
+
 // Data-driven hitscan weapons: config parsed from key=value text assets, plus
 // a deterministic tick-based state machine shared by client (prediction /
 // offline) and the authoritative server.
@@ -25,6 +27,14 @@ struct WeaponConfig {
     // Projectiles per trigger pull (shotguns > 1). Each pellet is an
     // independent hitscan ray and can damage a different target.
     int pellets = 1;
+    // Damage multipliers by hit zone (game/shared/hitscan.h). Torso is always
+    // 1.0: it is the baseline `damage` is quoted in, so a weapon that says
+    // nothing about zones still does exactly what its config says on a body
+    // shot. Per-weapon rather than global so a sniper can reward a head shot
+    // more than an SMG does.
+    float head_multiplier = 2.0f;
+    float limb_multiplier = 0.75f;
+
     // Automatic weapons keep firing while held; semi-automatic ones require
     // a fresh trigger pull per shot.
     bool automatic = true;
@@ -38,6 +48,21 @@ struct WeaponConfig {
 
     float shot_interval_seconds() const { return 60.0f / rounds_per_minute; }
 };
+
+// Damage scale for a hit in `zone`. Pure; the server applies it per pellet
+// so a shotgun spray that catches a head and two legs is scored honestly.
+inline float zone_damage_multiplier(const WeaponConfig& config, HitZone zone) {
+    switch (zone) {
+        case HitZone::Head:
+            return config.head_multiplier;
+        case HitZone::Arm:
+        case HitZone::Leg:
+            return config.limb_multiplier;
+        case HitZone::Torso:
+            break;
+    }
+    return 1.0f;
+}
 
 // Parses "key=value" lines ('#' comments, blank lines ok). Unknown keys are
 // logged and skipped; malformed values fail the whole parse (nullopt).

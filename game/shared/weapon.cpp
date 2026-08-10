@@ -78,6 +78,10 @@ std::optional<WeaponConfig> parse_weapon_config(std::string_view text) {
             ok = parse_float(value, config.spread_degrees);
         } else if (key == "pellets") {
             ok = parse_int(value, config.pellets);
+        } else if (key == "head_multiplier") {
+            ok = parse_float(value, config.head_multiplier);
+        } else if (key == "limb_multiplier") {
+            ok = parse_float(value, config.limb_multiplier);
         } else if (key == "switch_seconds") {
             ok = parse_float(value, config.switch_seconds);
         } else if (key == "automatic") {

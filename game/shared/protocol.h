@@ -8,6 +8,7 @@
 #include <glm/glm.hpp>
 
 #include "engine/net/byte_buffer.h"
+#include "game/shared/hitscan.h"
 #include "game/shared/input_command.h"
 #include "game/shared/kill_cam.h"
 #include "game/shared/weapon.h"
@@ -18,7 +19,7 @@
 // returning nullopt means "hostile or corrupt packet - drop it".
 namespace game {
 
-inline constexpr std::uint16_t kProtocolVersion = 6;
+inline constexpr std::uint16_t kProtocolVersion = 7;
 inline constexpr std::uint8_t kMaxPlayers = 8;
 inline constexpr std::size_t kMaxNameLength = 16;
 inline constexpr int kSnapshotDivisor = 3;  // 60 Hz ticks -> 20 Hz snapshots
@@ -171,6 +172,10 @@ struct PlayerDamagedMsg {
     std::uint8_t attacker = 0;
     float health = 0.0f;  // victim's health after the hit
     float amount = 0.0f;  // damage dealt, for the attacker's damage numbers
+    // Where it landed, so the shooter's hitmarker can say "head" and the kill
+    // feed can too. For a shotgun this is the best zone any pellet reached,
+    // not a per-pellet list: one trigger pull is one damage event.
+    HitZone zone = HitZone::Torso;
 };
 
 struct PlayerDiedMsg {

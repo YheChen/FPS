@@ -99,8 +99,9 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
         }
         case MessageType::ServerReject: {
             if (const auto reject = read_server_reject(reader)) {
-                eng::log::error("Server rejected connection (reason {})",
-                                static_cast<int>(reject->reason));
+                eng::log::error("Server rejected connection: {}",
+                                reject_reason_name(reject->reason));
+                reject_reason_ = reject->reason;
                 state_ = State::Rejected;
             }
             break;

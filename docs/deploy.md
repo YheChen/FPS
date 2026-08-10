@@ -800,6 +800,61 @@ Other refusals, both deliberate:
   `compose up --wait` blocks on the container's own healthcheck, which is
   `ws_smoke.py` speaking the real protocol to itself.
 
+### The guard points both ways now
+
+The server guard stops a server outrunning the published client. Nothing
+stopped the reverse — and on 2026-08-09 that is what happened: CI published a
+protocol 6 client against a protocol 4 server, and every connection was
+rejected until someone noticed and ran `--force` on the host.
+
+So `deploy-web` asks the live server whether it can talk to the client it is
+about to publish, using `tools/ws_smoke.py` — the same tool the container's
+own healthcheck runs, over the real TLS proxy. No credential, no new endpoint,
+and not a record of what somebody believes is deployed: the answer comes from
+the process that would be doing the rejecting.
+
+`ws_smoke.py` exits **3** when the server is up and speaking a different
+version, and **1** when it could not be reached. Those need opposite responses
+and both look like failure to a caller that only checks for zero.
+
+| This client vs the published one | Probe | What happens |
+|---|---|---|
+| Unchanged (almost every commit) | any | **Publish.** A warning if the probe failed — an identical protocol cannot make anything worse. |
+| Changed | speaks it (0) | **Publish.** The server already moved; this is step 2 below. |
+| Changed | mismatch (3) or unreachable (1) | **Refuse.** |
+
+The gate is only *enforced* on a protocol change. Blocking every routine
+client deploy on whether a laptop at the end of a home connection is reachable
+from a GitHub runner would fail far more often, and for reasons that have
+nothing to do with whether the client is safe to publish.
+
+### A protocol bump is a deliberate two-step
+
+With both guards in place a protocol bump **holds** — the server will not go
+first, the client will not go first, and neither will move until you say so.
+That is not a deadlock; it is the game staying up on the old protocol, on both
+sides, while nothing ships. Everything else deploys normally in the meantime.
+
+Break the tie **server first**:
+
+```bash
+# 1. On the server host, once you have decided:
+~/GitHub/FPS/tools/server_autodeploy.sh --force
+```
+
+Then re-run the `deploy-web` job (Actions → the run → *Re-run failed jobs*).
+Its probe now succeeds, and the client publishes.
+
+Server first because the operator is already at the keyboard on the host and
+can trigger the client immediately; client first would leave the fix waiting
+on a ten-minute timer. Between the two steps **there is an outage window** —
+the live client cannot join the new server, and no ordering avoids that, since
+there is no in-protocol compatibility to fall back on. What the client does
+with that window is the other half of this: a `ServerReject(VersionMismatch)`
+puts it in "Server is updating — retrying…" with a countdown, and on the web
+build a **Reload for the updated client** button, rather than a dead end that
+says the server refused it.
+
 ## 6. End-to-end check
 
 Before sharing the URL, prove the whole chain rather than each piece:

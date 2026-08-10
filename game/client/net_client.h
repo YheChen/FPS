@@ -64,6 +64,10 @@ public:
 
     State state() const { return state_; }
     const char* state_name() const;
+    // Why the server said no. Only meaningful in State::Rejected, and the
+    // caller needs it: VersionMismatch is a client that will work again once
+    // one side of the deploy catches up, and the other reasons are not.
+    RejectReason reject_reason() const { return reject_reason_; }
     std::uint8_t my_id() const { return my_id_; }
     std::uint32_t server_tick() const { return latest_server_tick_; }
     // The map the server says it is running, from ServerWelcome. Empty until
@@ -127,6 +131,7 @@ private:
     std::unique_ptr<eng::IClientTransport> transport_;
     std::string player_name_;
     State state_ = State::Connecting;
+    RejectReason reject_reason_ = RejectReason::VersionMismatch;
     std::uint8_t my_id_ = 0;
     std::uint32_t latest_server_tick_ = 0;
     std::string server_map_;

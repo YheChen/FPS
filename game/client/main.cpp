@@ -1103,6 +1103,31 @@ int main(int argc, char** argv) {
     std::unordered_map<std::uint8_t, CharacterAnimation> replay_animations;
     Mode mode = Mode::Menu;
     std::string menu_error;
+
+    // A ServerReject(VersionMismatch) is not a dead end, it is a race. Client
+    // and server ship separately and there is no in-protocol compatibility,
+    // so a protocol bump has a window -- minutes, while the other half
+    // deploys -- in which one of them is ahead. Dropping the player into the
+    // menu with "server rejected the connection" during that window is
+    // accurate and useless: nothing they can do from there helps, and the
+    // thing that WILL fix it is already happening. So wait it out and say so.
+    // docs/deploy.md, "a protocol bump is a deliberate two-step".
+    struct Reconnect {
+        std::string host;  // the address to go back to; outlives the waiting
+        int attempts = 0;
+        float seconds_until = 0.0f;
+        bool waiting() const { return attempts > 0; }
+        void stop_waiting() {
+            attempts = 0;
+            seconds_until = 0.0f;
+        }
+    };
+    Reconnect reconnect;
+    // Linear, capped. The window is bounded by a CI run, so backing off past
+    // a few seconds only adds dead time to the recovery it is waiting for.
+    const auto retry_delay = [](int attempts) {
+        return std::min(15.0f, 1.5f * static_cast<float>(attempts));
+    };
     char menu_name[17]{};
     char menu_ip[64]{};
     std::snprintf(menu_name, sizeof(menu_name), "%s", settings.name.c_str());
@@ -1127,6 +1152,7 @@ int main(int argc, char** argv) {
             eng::log::error("Failed to start network client");
             return 1;
         }
+        reconnect.host = *args.connect_host;
         // The client predicts on its OWN physics world with the shared
         // movement code; the server remains authoritative.
         prediction.emplace(world, spawn);
@@ -1290,18 +1316,40 @@ int main(int argc, char** argv) {
             // the game is behaving impossibly.
             const bool wrong_map = net->state() == game::NetClient::State::InGame &&
                                    !net->server_map().empty() && net->server_map() != map_path;
+            // Made it in: whatever we were waiting out is over.
+            if (net->state() == game::NetClient::State::InGame && reconnect.waiting()) {
+                eng::log::info("Reconnected after {} attempt(s)", reconnect.attempts);
+                reconnect.stop_waiting();
+            }
+            const bool version_mismatch =
+                net->state() == game::NetClient::State::Rejected &&
+                net->reject_reason() == game::RejectReason::VersionMismatch;
             // Server gone or refused us: back to the menu.
             if (wrong_map || net->state() == game::NetClient::State::Disconnected ||
                 net->state() == game::NetClient::State::Rejected) {
                 if (wrong_map) {
+                    reconnect.stop_waiting();
                     eng::log::error("Server runs '{}' but this client loaded '{}'",
                                     net->server_map(), map_path);
                     menu_error = "server is on " + net->server_map() + "; relaunch with --map " +
                                  net->server_map();
+                } else if (net->state() == game::NetClient::State::Rejected && !version_mismatch) {
+                    // Full, or a bad name. Neither gets better by waiting.
+                    reconnect.stop_waiting();
+                    menu_error = std::string("server rejected the connection: ") +
+                                 game::reject_reason_name(net->reject_reason());
+                } else if (version_mismatch || reconnect.waiting()) {
+                    // A fresh mismatch, or a connection that dropped while we
+                    // were already waiting one out -- a server mid-restart
+                    // refuses the socket before it can refuse the hello, and
+                    // reporting that as its own error would stack a red
+                    // "disconnected" line on top of the countdown explaining
+                    // it. Same story, same wait, one attempt further along.
+                    menu_error.clear();
+                    ++reconnect.attempts;
+                    reconnect.seconds_until = retry_delay(reconnect.attempts);
                 } else {
-                    menu_error = net->state() == game::NetClient::State::Rejected
-                                     ? "server rejected the connection"
-                                     : "disconnected from server";
+                    menu_error = "disconnected from server";
                 }
                 net.reset();
                 prediction.reset();
@@ -2041,6 +2089,8 @@ int main(int argc, char** argv) {
             // Native: ENet/UDP to host:port. Browser: WebSocket to the
             // address (a ws://host:port or wss://domain URL).
             if (ImGui::Button("Connect", {200, 0})) {
+                reconnect.stop_waiting();  // a manual connect overrides the wait
+                reconnect.host = menu_ip;
                 net = game::NetClient::connect(menu_ip, args.port, menu_name);
                 if (net) {
                     prediction.emplace(world, spawn);
@@ -2051,10 +2101,48 @@ int main(int argc, char** argv) {
             }
             ImGui::SameLine();
             if (ImGui::Button("Practice offline", {200, 0})) {
+                reconnect.stop_waiting();
                 start_session(Mode::Offline);
             }
             if (!menu_error.empty()) {
                 ImGui::TextColored({1.0f, 0.4f, 0.4f, 1.0f}, "%s", menu_error.c_str());
+            }
+
+            // Waiting out a protocol mismatch: count down, then try again.
+            if (reconnect.waiting()) {
+                reconnect.seconds_until -= static_cast<float>(dt);
+                ImGui::TextColored({1.0f, 0.8f, 0.3f, 1.0f},
+                                   "Server is updating - retrying in %.0fs (attempt %d)",
+                                   std::max(0.0f, reconnect.seconds_until), reconnect.attempts);
+#if defined(__EMSCRIPTEN__)
+                // Retrying alone cannot fix this half of it. The wasm this
+                // page is running was compiled against the older protocol and
+                // will keep being rejected no matter how many times it asks;
+                // only fetching the newly published client helps, and that
+                // means a page load. Offered as a button rather than done
+                // automatically: an auto-reload that races a deploy still in
+                // flight would just reload into the same client, repeatedly,
+                // and a page that reloads itself under a player is worse than
+                // one that asks.
+                ImGui::TextWrapped(
+                    "This page is running an older client than the server. Reload to fetch "
+                    "the updated one.");
+                if (ImGui::Button("Reload for the updated client", {260, 0})) {
+                    emscripten_run_script("location.reload()");
+                }
+#endif
+                if (reconnect.seconds_until <= 0.0f) {
+                    net = game::NetClient::connect(reconnect.host, args.port, menu_name);
+                    if (net) {
+                        prediction.emplace(world, spawn);
+                        start_session(Mode::Online);
+                    } else {
+                        // Could not even open a socket -- the server is
+                        // probably mid-restart. Same wait, same message.
+                        ++reconnect.attempts;
+                        reconnect.seconds_until = retry_delay(reconnect.attempts);
+                    }
+                }
             }
 
             ImGui::SeparatorText("settings");

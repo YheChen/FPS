@@ -423,6 +423,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # First, because it takes a second and the image build takes minutes.
+      #
+      # server_autodeploy.sh is the only thing here that has taken the live
+      # game down -- twice on 2026-08-09 -- and both times the bug was in its
+      # decision table, which no build could have caught. The test stubs
+      # `docker` and uses a temp repository as "GitHub", so it needs neither.
+      - name: The autodeploy decision table
+        run: |
+          shellcheck tools/*.sh tests/deploy/*.sh
+          tests/deploy/autodeploy_test.sh
+
       - name: Build the server image
         run: docker build -f deploy/Dockerfile -t fps-server:ci .
 

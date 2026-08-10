@@ -94,6 +94,7 @@ endif()
 add_library(engine_platform STATIC
     audio/audio_engine.cpp
     audio/audio_engine.h
+    audio/audio_listener.h
     debug/imgui_layer.cpp
     debug/imgui_layer.h
     platform/window.cpp

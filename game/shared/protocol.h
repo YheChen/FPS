@@ -70,6 +70,20 @@ enum class RejectReason : std::uint8_t {
     BadName = 3,
 };
 
+// For logs, and for the one refusal a player is actually shown. "reason 1" in
+// a log is a number someone has to go look up.
+constexpr const char* reject_reason_name(RejectReason reason) {
+    switch (reason) {
+        case RejectReason::VersionMismatch:
+            return "version mismatch";
+        case RejectReason::ServerFull:
+            return "server full";
+        case RejectReason::BadName:
+            return "bad name";
+    }
+    return "unknown";
+}
+
 struct ClientHello {
     std::string name;  // 1..16 bytes
 };

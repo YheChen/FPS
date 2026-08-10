@@ -1,5 +1,7 @@
 #include "game/shared/protocol.h"
 
+#include <string_view>
+
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
@@ -10,6 +12,36 @@ std::vector<std::uint8_t> encode(const Message& message) {
     eng::ByteWriter writer;
     game::write(writer, message);
     return {writer.data().begin(), writer.data().end()};
+}
+
+// The reason byte used to go nowhere: the client logged it as an integer and
+// showed every refusal as "server rejected the connection". It now decides
+// behaviour -- VersionMismatch means wait for the other half of the deploy and
+// retry, the others mean stop -- so the value has to survive the wire intact.
+TEST_CASE("ServerReject carries which refusal it was", "[protocol]") {
+    for (const game::RejectReason reason :
+         {game::RejectReason::VersionMismatch, game::RejectReason::ServerFull,
+          game::RejectReason::BadName}) {
+        const auto bytes = encode(game::ServerReject{reason});
+        eng::ByteReader r{{bytes.data(), bytes.size()}};
+        REQUIRE(game::read_message_type(r) == game::MessageType::ServerReject);
+        const auto m = game::read_server_reject(r);
+        REQUIRE(m.has_value());
+        CHECK(m->reason == reason);
+    }
+}
+
+TEST_CASE("every reject reason has a name a player could read", "[protocol]") {
+    CHECK(std::string_view{game::reject_reason_name(game::RejectReason::VersionMismatch)} ==
+          "version mismatch");
+    CHECK(std::string_view{game::reject_reason_name(game::RejectReason::ServerFull)} ==
+          "server full");
+    CHECK(std::string_view{game::reject_reason_name(game::RejectReason::BadName)} == "bad name");
+    // A value off the end of the enum must still produce a string: this is
+    // reached from a decoded packet, and the alternative is falling off the
+    // end of a function that returns a pointer someone then prints.
+    CHECK(std::string_view{game::reject_reason_name(static_cast<game::RejectReason>(200))} ==
+          "unknown");
 }
 
 TEST_CASE("hello/welcome/joined/left round-trip", "[protocol]") {

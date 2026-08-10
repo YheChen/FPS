@@ -14,7 +14,18 @@ Usage: python3 tools/ws_smoke.py [host] [port] [--tls|--no-tls]
 
 Point it at a deployed server to check the whole chain including the TLS
 proxy:  python3 tools/ws_smoke.py fps.example.com 443
-Exits 0 on success, 1 on failure.
+
+Exit codes:
+  0  the server accepted this protocol version
+  1  anything else went wrong (unreachable, TLS, wedged, rejected for a
+     reason other than the version)
+  3  the server is up and speaking a DIFFERENT protocol version
+
+3 exists because "the live server does not speak version N" and "I could not
+reach the live server" call for opposite responses in CI: the first must block
+a client deploy, the second must not block every routine one on whether a
+laptop at the end of a home connection happens to be reachable. Both look like
+exit 1 to a caller that only checks for zero.
 """
 
 import base64
@@ -32,6 +43,9 @@ MSG_SERVER_WELCOME = 2
 MSG_SERVER_REJECT = 3
 
 REJECT_REASONS = {1: "version mismatch", 2: "server full", 3: "bad name"}
+REJECT_VERSION_MISMATCH = 1
+
+EXIT_VERSION_MISMATCH = 3
 
 
 def protocol_version():
@@ -219,6 +233,17 @@ def main():
             if msg_type == MSG_SERVER_REJECT:
                 reason = payload[1]
                 name = REJECT_REASONS.get(reason, f"unknown ({reason})")
+                if reason == REJECT_VERSION_MISMATCH:
+                    # Its own exit code, not a failure: the server answered,
+                    # and what it answered is the useful part. The caller
+                    # wanted to know whether this version is speakable, and
+                    # now it does.
+                    print(
+                        f"server is up but does NOT speak protocol v{version} "
+                        f"(rejected: {name})",
+                        file=sys.stderr,
+                    )
+                    return EXIT_VERSION_MISMATCH
                 raise RuntimeError(f"server rejected the connection: {name}")
             # Skip anything else (e.g. later broadcasts) and keep looking.
         raise RuntimeError("no ServerWelcome received")

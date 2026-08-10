@@ -3,8 +3,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <set>
 
+#include "engine/assets/paths.h"
 #include "game/shared/rng.h"
 #include "game/shared/weapon.h"
 
@@ -53,6 +55,46 @@ switch_seconds=0.5
     CHECK(config->spread_degrees == Approx(5.0f));
     CHECK_FALSE(config->automatic);
     CHECK(config->switch_seconds == Approx(0.5f));
+}
+
+TEST_CASE("weapon config carries a per-weapon fire sound", "[weapon]") {
+    const auto named = game::parse_weapon_config("fire_sound=fire_shotgun.wav");
+    REQUIRE(named.has_value());
+    CHECK(named->fire_sound == "fire_shotgun.wav");
+
+    // A weapon that says nothing about sound still has one: the knife relies
+    // on this rather than shipping a gun report it has no business making.
+    const auto silent = game::parse_weapon_config("damage=10");
+    REQUIRE(silent.has_value());
+    CHECK(silent->fire_sound == "fire.wav");
+}
+
+TEST_CASE("weapon config rejects a fire sound that leaves assets/sounds", "[weapon]") {
+    // The value is joined onto assets/sounds/ at playback, so a separator or a
+    // parent hop would let a config name any file on disk. Rejected at parse
+    // time, where it fails the whole weapon loudly, rather than at playback,
+    // where a missing file is swallowed as "sound is never fatal".
+    CHECK_FALSE(game::parse_weapon_config("fire_sound=../../etc/passwd").has_value());
+    CHECK_FALSE(game::parse_weapon_config("fire_sound=sub/dir.wav").has_value());
+    CHECK_FALSE(game::parse_weapon_config("fire_sound=sub\\dir.wav").has_value());
+    CHECK_FALSE(game::parse_weapon_config("fire_sound=").has_value());
+}
+
+TEST_CASE("every shipped weapon names a fire sound that exists", "[weapon]") {
+    // Playback swallows a missing file (sound is never fatal), so a typo in a
+    // .cfg or a renamed .wav would cost a weapon its voice with nothing in the
+    // log to say so. This is the only place that mismatch gets caught.
+    const auto root = eng::find_assets_root();
+    REQUIRE(root.has_value());
+    for (const char* weapon_name : {"rifle", "smg", "shotgun", "sniper", "knife"}) {
+        const auto text =
+            eng::read_text_file(*root / "weapons" / (std::string(weapon_name) + ".cfg"));
+        REQUIRE(text.has_value());
+        const auto config = game::parse_weapon_config(*text);
+        REQUIRE(config.has_value());
+        INFO(weapon_name << " -> " << config->fire_sound);
+        CHECK(std::filesystem::is_regular_file(*root / "sounds" / config->fire_sound));
+    }
 }
 
 TEST_CASE("weapon config rejects out-of-range arsenal fields", "[weapon]") {

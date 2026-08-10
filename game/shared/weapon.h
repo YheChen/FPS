@@ -45,6 +45,13 @@ struct WeaponConfig {
     // stats, because "magazine_size = 999999" would still dry-fire, still
     // auto-reload, and still put a round counter on the HUD.
     bool melee = false;
+    // Fire sound, as a bare filename under assets/sounds/. Purely cosmetic:
+    // the client reads it, the server never does. It lives here rather than
+    // in a client-side slot->file table because the arsenal is already
+    // data-driven, and a table keyed by slot would silently point at the
+    // wrong gun the moment someone reorders the .cfg list. The default keeps
+    // a weapon that says nothing about sound (the knife) audible.
+    std::string fire_sound = "fire.wav";
 
     float shot_interval_seconds() const { return 60.0f / rounds_per_minute; }
 };

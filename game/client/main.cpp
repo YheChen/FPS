@@ -1050,6 +1050,14 @@ int main(int argc, char** argv) {
     game::reset_loadout(loadout, arsenal);
     std::uint8_t desired_slot = 0;
 
+    // The bang for a weapon slot, straight out of its config. Deliberately not
+    // arsenal.at(), whose out-of-range clamp to slot 0 would answer "what does
+    // slot 9 sound like?" with the rifle -- a confident wrong answer about a
+    // weapon this build does not have. The generic bang is the honest one.
+    const auto fire_sound_for = [&arsenal](std::uint8_t slot) -> const char* {
+        return slot < arsenal.size() ? arsenal.weapons[slot].fire_sound.c_str() : "fire.wav";
+    };
+
     constexpr float kTargetRadius = 0.4f;
     constexpr float kTargetHeight = 1.8f;
     constexpr float kTargetRespawnSeconds = 3.0f;
@@ -1405,7 +1413,7 @@ int main(int argc, char** argv) {
                 sound("dry.wav", 0.7f);
             }
             if (shot.fired) {
-                sound("fire.wav", 0.9f);
+                sound(weapon_config.fire_sound.c_str(), 0.9f);
                 const glm::vec3 eye =
                     player.position + glm::vec3{0.0f, game::eye_height_for(player), 0.0f};
                 const glm::vec3 aim = game::view_direction(command.yaw, command.pitch);
@@ -1558,13 +1566,13 @@ int main(int argc, char** argv) {
                     // and panning works off the normalized direction -- so a
                     // 20 cm error pans as hard as a 20 m one, and your own
                     // gun would wander between your ears as you moved.
-                    sound("fire.wav", 0.9f);
+                    sound(fire_sound_for(fire.slot), 0.9f);
                 } else {
                     // The one that matters. Distance used to be faked here
                     // with a hand-rolled volume ramp, which told you a shot
                     // was far away but never which way to turn; the muzzle
                     // position now drives real panning and attenuation.
-                    sound_at("fire.wav", fire.from, 0.9f);
+                    sound_at(fire_sound_for(fire.slot), fire.from, 0.9f);
                 }
                 if (own_shot && any_hit) {
                     sound("hit.wav", 0.8f);  // hit confirm

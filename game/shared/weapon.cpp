@@ -56,6 +56,16 @@ std::optional<WeaponConfig> parse_weapon_config(std::string_view text) {
         bool ok = true;
         if (key == "name") {
             config.name = std::string(value);
+        } else if (key == "fire_sound") {
+            // A bare filename, not a path: this is joined onto assets/sounds/
+            // at playback, so anything with a separator or a parent-directory
+            // hop would let a config reach outside the asset tree.
+            ok = !value.empty() && value.find('/') == std::string_view::npos &&
+                 value.find('\\') == std::string_view::npos &&
+                 value.find("..") == std::string_view::npos;
+            if (ok) {
+                config.fire_sound = std::string(value);
+            }
         } else if (key == "damage") {
             ok = parse_float(value, config.damage);
         } else if (key == "rounds_per_minute") {

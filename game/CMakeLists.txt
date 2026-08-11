@@ -52,6 +52,25 @@ if(EMSCRIPTEN)
         "SHELL:-s STACK_SIZE=4MB"
         "SHELL:-s EXIT_RUNTIME=0"
         "SHELL:-s DISABLE_EXCEPTION_CATCHING=0"
+        # miniaudio's JS glue reaches for `Module.HEAPF32.buffer` in its audio
+        # callback. Emscripten stopped putting the heap views on Module by
+        # default, so that read throws -- every callback, uncaught, inside the
+        # audio device. Verified in the browser: before this flag
+        # `Module.HEAPF32` is undefined and the console fills with
+        # "Cannot read properties of undefined (reading 'buffer')"; after it,
+        # the view is there and the errors stop.
+        #
+        # It shipped: the client live on Vercel has the same call, so the web
+        # build has had no working audio.
+        #
+        # The browser smoke test did NOT miss this by ignoring the console --
+        # it already fails on any uncaught page exception. It missed it
+        # because headless Chrome has no audio output device and no user
+        # gesture, so miniaudio's callback never runs there and never throws.
+        # Catching this in CI means giving that browser an audio device
+        # (--use-fake-device-for-media-stream and friends), not teaching the
+        # test to listen.
+        "SHELL:-s EXPORTED_RUNTIME_METHODS=HEAPF32"
         "SHELL:-l websocket.js"
         --preload-file "${CMAKE_SOURCE_DIR}/assets@/assets"
         --shell-file "${CMAKE_SOURCE_DIR}/web/shell.html"

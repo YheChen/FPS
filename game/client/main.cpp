@@ -304,7 +304,9 @@ struct ClientArgs {
                                 // block on swap (macOS throttles occluded windows)
     eng::NetSimConfig net_sim;  // --fake-latency/--fake-jitter/--fake-loss
     // Automated-verification hooks (harmless in normal play):
-    bool auto_fire = false;                  // hold the trigger every tick
+    bool auto_fire = false;                  // pull the trigger every other tick
+    bool auto_walk = false;                  // hold W: bob needs distance actually travelled
+    std::optional<std::uint8_t> weapon;      // start on this slot (1-based, as the keys are)
     std::optional<float> fixed_yaw;          // lock the view yaw (radians)
     std::optional<float> fixed_pitch;        // lock the view pitch (radians, + is up)
     std::optional<std::string> screenshot;   // PNG written on the final frame
@@ -392,6 +394,17 @@ ClientArgs parse_args(int argc, char** argv) {
             }
         } else if (arg == "--auto-fire") {
             args.auto_fire = true;
+        } else if (arg == "--auto-walk") {
+            args.auto_walk = true;
+        } else if (arg == "--weapon") {
+            if (const auto value = next_value()) {
+                std::uint8_t slot = 0;
+                if (std::from_chars(value->data(), value->data() + value->size(), slot).ec ==
+                        std::errc{} &&
+                    slot >= 1) {
+                    args.weapon = static_cast<std::uint8_t>(slot - 1);
+                }
+            }
         } else if (arg == "--audio-trace") {
             args.audio_trace = true;
         } else if (arg == "--fixed-yaw") {
@@ -699,6 +712,298 @@ void emit_death_burst(eng::ParticlePool& pool, const glm::vec3& position, std::u
 // Direction the sun's light travels.
 constexpr glm::vec3 kSunDirection{-0.4f, -1.0f, -0.3f};
 
+// --- first-person viewmodel ------------------------------------------------
+// The held weapon, drawn from the camera basis. Nothing here is in world
+// space and nothing here is simulated: like particles and the character
+// animation above, the viewmodel runs on the RENDER clock and must never
+// feed back into the fixed tick, or two clients would disagree about where a
+// shot went because one of them had a better frame rate.
+
+// One weapon's geometry as gen_weapons.py emits it: a handful of boxes, each
+// a node with its own grip-local transform, over one glTF mesh per material.
+struct WeaponModel {
+    // Which primitives to draw and where. `primitive` indexes `primitives`.
+    struct Box {
+        glm::mat4 local{1.0f};
+        int primitive = 0;
+    };
+    std::vector<RenderPrimitive> primitives;
+    std::vector<Box> boxes;
+    // Grip-local muzzle, from the asset's `muzzle` marker node. Absent on a
+    // melee weapon, and that absence is what stops a knife from spitting
+    // fire: the flash position is a property of the ASSET, so four weapons of
+    // four different lengths need no `if (weapon == ...)` in the client.
+    std::optional<glm::vec3> muzzle;
+    // How far the geometry reaches forward of the grip. The arm extends by
+    // whatever this leaves over, so every weapon presents its business end
+    // at the same distance -- see kViewmodelBusinessEnd.
+    float reach = 0.0f;
+
+    bool loaded() const { return !boxes.empty(); }
+};
+
+// Where the grip sits relative to the eye, in camera-basis meters. Right and
+// down are fixed for the whole arsenal -- the shoulder does not move when you
+// swap guns. The DROP is the one that was tuned hardest, because it is what
+// decides how much of the frame the weapon eats: it has to pay for the bore
+// sitting 0.105 above the grip on every gun AND for the sniper's scope, which
+// rides 0.250 above it. At a 0.25 drop the scope sat exactly on the eye line
+// and the optic covered the right half of the screenshot -- measured, not
+// guessed. 0.34 puts the tallest thing in the arsenal below the crosshair
+// with the barrel still climbing toward it.
+constexpr float kViewmodelRight = 0.20f;
+constexpr float kViewmodelDown = 0.34f;
+
+// Forward is NOT fixed, because the arm is not: a short weapon is presented
+// out in front and a long one is drawn back against the shoulder, which is
+// one rule for the arsenal rather than five numbers. The arm extends until
+// the weapon's business end is this far from the eye...
+constexpr float kViewmodelBusinessEnd = 0.76f;
+// ...but only as far as a shoulder and an elbow allow. The near clamp is
+// where all three long guns end up, so it is the load-bearing number here:
+// the rule alone would hold the 1.30 m sniper's grip 0.10 m from the eye, and
+// geometry that close subtends the frame no matter how modest it is in
+// meters. Only the knife (0.58 m) and the smg (0.43 m) come out above it.
+// Nothing about a weapon should make it bigger than the arena it is carried
+// through.
+constexpr float kViewmodelForwardMin = 0.42f;
+constexpr float kViewmodelForwardMax = 0.60f;
+
+// Near plane for the viewmodel's own projection. See the draw site: the gun
+// is closer than the world's 0.05 m near plane in places.
+constexpr float kViewmodelNear = 0.01f;
+constexpr float kViewmodelFar = 10.0f;
+
+// Bob. Distance ACTUALLY TRAVELLED, not a timer and not speed x dt: a timer
+// is a cadence that is right at exactly one speed, and speed x dt keeps
+// accumulating while you hold W against a wall, where the player is going
+// nowhere and the gun should be still. The stride is the same 2.4 m a
+// footstep uses, so the gun's dip lands ON the footfall rather than drifting
+// against it; the lateral swing runs at half that rate, so one left-right
+// cycle covers a pair of steps.
+constexpr float kBobStrideMeters = 2.4f;
+// A frame that moves the player further than this is a respawn or a
+// reconciliation snap, not a stride, and must not spin the accumulator.
+constexpr float kBobMaxStepMeters = 1.0f;
+constexpr float kBobLateral = 0.016f;
+constexpr float kBobVertical = 0.011f;
+
+// Recoil, as a spring: an impulse on fire and a decay that overshoots
+// slightly coming back, which is what reads as the gun settling rather than
+// sliding home. Stiffness/damping give zeta ~0.74 and a ~0.3 s settle.
+constexpr float kRecoilStiffness = 220.0f;
+constexpr float kRecoilDamping = 22.0f;
+constexpr float kRecoilImpulse = 26.0f;
+// Payload per trigger pull (damage x pellets) against the sniper's, which is
+// what makes the config's own numbers decide how hard a weapon kicks:
+// smg 0.19, rifle 0.33, sniper 1.00, shotgun 1.17. Nothing here is tuned per
+// weapon, so a new .cfg gets a kick that matches its stats for free.
+constexpr float kRecoilReferenceDamage = 75.0f;
+constexpr float kRecoilPitchRadians = 0.10f;  // muzzle rise about the grip
+constexpr float kRecoilBackMeters = 0.05f;    // and a shove toward the eye
+constexpr float kRecoilYawRadians = 0.022f;   // alternating, so bursts wander
+// A melee weapon has no muzzle to rise: the same impulse drives a slash
+// across the view instead.
+constexpr float kSwingYawRadians = 0.55f;
+constexpr float kSwingRollRadians = 0.50f;
+constexpr float kSwingLungeMeters = 0.10f;
+
+// Sway. The gun catches up to the aim over ~0.1 s; the leftover gap is the
+// lag, and it is clamped so a fast flick trails the view instead of leaving
+// the frame.
+constexpr float kSwayCatchup = 11.0f;
+constexpr float kSwayMaxRadians = 0.30f;
+constexpr float kSwayMeters = 0.16f;
+constexpr float kSwayRotate = 0.45f;
+
+// Reload: the weapon drops out of the aim and tips over so the magazine well
+// faces the camera, then comes back. Peaks halfway through reload_seconds.
+constexpr float kReloadDropMeters = 0.10f;
+constexpr float kReloadPitchRadians = 0.55f;
+constexpr float kReloadRollRadians = 0.35f;
+
+// Switch: the new weapon comes up from below over switch_seconds. Quadratic,
+// so it leaves fast and eases into the aim -- which is what makes the
+// knife's 0.15 s feel like a flick and the sniper's 0.7 s feel like work.
+constexpr float kRaiseDropMeters = 0.34f;
+constexpr float kRaisePitchRadians = 0.9f;
+
+// Everything the viewmodel remembers between frames.
+struct ViewmodelState {
+    // Which weapon is drawn. 0xFF means "nothing yet", so the first frame
+    // raises the starting weapon instead of silently skipping the animation.
+    std::uint8_t slot = 0xFF;
+    float raise_remaining = 0.0f;
+    float raise_seconds = 0.0f;
+    float reload_remaining = 0.0f;
+    float reload_seconds = 0.0f;
+    bool was_reloading = false;
+    float recoil = 0.0f;
+    float recoil_velocity = 0.0f;
+    int shots = 0;  // parity only, so consecutive kicks alternate sideways
+    float bob_distance = 0.0f;
+    float bob_weight = 0.0f;
+    glm::vec3 last_position{0.0f};
+    bool position_valid = false;
+    // The aim the gun has caught up to. The gap to the camera's is the lag.
+    float sway_yaw = 0.0f;
+    float sway_pitch = 0.0f;
+    bool sway_valid = false;
+};
+
+// Kicks the weapon on a shot. The impulse is the ONLY thing the weapon's
+// stats feed, and it deliberately does not touch the camera: aim punch would
+// change where bullets go, which is simulation, not decoration.
+void fire_viewmodel(ViewmodelState& state, const game::WeaponConfig& config) {
+    const float payload = config.damage * static_cast<float>(config.pellets);
+    state.recoil_velocity += kRecoilImpulse * payload / kRecoilReferenceDamage;
+    ++state.shots;
+}
+
+// Advances the viewmodel one render frame. `reloading` is a level rather than
+// an edge because that is all the online path has (NetClient reports a bool,
+// not a remaining time); taking the edge here and running the clip off the
+// config's own reload_seconds gives offline and online the same animation
+// from the same number.
+void update_viewmodel(ViewmodelState& state, const game::WeaponConfig& config, std::uint8_t slot,
+                      bool reloading, const glm::vec3& position, const glm::vec3& velocity,
+                      bool on_ground, float run_speed, float yaw, float pitch, float dt) {
+    if (slot != state.slot) {
+        state.slot = slot;
+        state.raise_seconds = std::max(config.switch_seconds, 1e-3f);
+        state.raise_remaining = state.raise_seconds;
+        // Switching interrupts a reload, exactly as update_loadout does; the
+        // level is latched so the new weapon does not inherit the old one's
+        // in-progress clip on its first frame.
+        state.reload_remaining = 0.0f;
+        state.was_reloading = reloading;
+        state.recoil = 0.0f;
+        state.recoil_velocity = 0.0f;
+    }
+    state.raise_remaining = std::max(0.0f, state.raise_remaining - dt);
+
+    // reload_seconds is 0 for a melee weapon, so the knife can never start a
+    // reload clip even if something upstream claimed it was reloading.
+    if (reloading && !state.was_reloading && config.reload_seconds > 0.0f) {
+        state.reload_seconds = config.reload_seconds;
+        state.reload_remaining = config.reload_seconds;
+    }
+    state.was_reloading = reloading;
+    state.reload_remaining = std::max(0.0f, state.reload_remaining - dt);
+
+    // Clamped so a frame spike cannot integrate the spring into a divergence;
+    // 20 Hz is still an order of magnitude inside its stability limit.
+    const float spring_dt = std::min(dt, 0.05f);
+    state.recoil_velocity +=
+        (-kRecoilStiffness * state.recoil - kRecoilDamping * state.recoil_velocity) * spring_dt;
+    state.recoil += state.recoil_velocity * spring_dt;
+
+    glm::vec3 step = position - state.last_position;
+    step.y = 0.0f;  // a fall is not a stride
+    float travelled = glm::length(step);
+    if (!state.position_valid || travelled > kBobMaxStepMeters) {
+        travelled = 0.0f;
+    }
+    state.last_position = position;
+    state.position_valid = true;
+    if (on_ground) {
+        state.bob_distance += travelled;
+    }
+    // Amplitude still comes from velocity rather than from that step: the
+    // simulation only moves on fixed ticks, so at 300 fps four frames in five
+    // travel exactly zero and a weight driven off them would flicker.
+    const float speed = glm::length(glm::vec2{velocity.x, velocity.z});
+    // Off the ground there is no stride to be in phase with, so the bob eases
+    // out rather than freezing mid-swing.
+    const float target =
+        on_ground ? glm::clamp(speed / std::max(run_speed, 0.01f), 0.0f, 1.0f) : 0.0f;
+    state.bob_weight += (target - state.bob_weight) * std::min(1.0f, dt * 8.0f);
+
+    if (!state.sway_valid) {
+        state.sway_yaw = yaw;
+        state.sway_pitch = pitch;
+        state.sway_valid = true;
+    }
+    // Shortest-way, or a turn across +-pi would send the gun the long way
+    // round the player's head.
+    state.sway_yaw += shortest_yaw_delta(state.sway_yaw, yaw) * std::min(1.0f, dt * kSwayCatchup);
+    state.sway_pitch += (pitch - state.sway_pitch) * std::min(1.0f, dt * kSwayCatchup);
+}
+
+// Builds the weapon's world transform from the camera basis: local +X is the
+// camera's right, +Y its up, -Z where it is looking, and the origin is the
+// grip. Bob, sway, recoil, reload and raise are all offsets and rotations
+// ABOUT THE GRIP on top of that, which is why every weapon can share them --
+// the grip is the one point all five models agree on.
+glm::mat4 viewmodel_transform(const ViewmodelState& state, const eng::Camera& camera, float reach,
+                              bool melee) {
+    const glm::vec3 forward = camera.forward();
+    const glm::vec3 right = camera.right();
+    const glm::vec3 up = glm::cross(right, forward);
+
+    glm::vec3 offset{
+        kViewmodelRight, -kViewmodelDown,
+        glm::clamp(kViewmodelBusinessEnd - reach, kViewmodelForwardMin, kViewmodelForwardMax)};
+    float pitch_kick = 0.0f;
+    float yaw_kick = 0.0f;
+    float roll_kick = 0.0f;
+
+    const float bob_phase = state.bob_distance / kBobStrideMeters * std::numbers::pi_v<float>;
+    offset.x += std::sin(bob_phase) * kBobLateral * state.bob_weight;
+    // abs() halves the period against the lateral swing and puts a hard
+    // bottom on the dip, which is the frame the foot lands.
+    offset.y -= std::abs(std::sin(bob_phase)) * kBobVertical * state.bob_weight;
+
+    const float lag_yaw = glm::clamp(shortest_yaw_delta(state.sway_yaw, camera.yaw),
+                                     -kSwayMaxRadians, kSwayMaxRadians);
+    const float lag_pitch =
+        glm::clamp(camera.pitch - state.sway_pitch, -kSwayMaxRadians, kSwayMaxRadians);
+    offset.x -= lag_yaw * kSwayMeters;
+    offset.y -= lag_pitch * kSwayMeters;
+    yaw_kick += lag_yaw * kSwayRotate;
+    pitch_kick += lag_pitch * kSwayRotate;
+
+    if (melee) {
+        // No muzzle to rise: the impulse becomes a slash across the view,
+        // and the spring's overshoot brings the blade back the other way.
+        yaw_kick -= state.recoil * kSwingYawRadians;
+        roll_kick -= state.recoil * kSwingRollRadians;
+        offset.z += state.recoil * kSwingLungeMeters;
+    } else {
+        pitch_kick += state.recoil * kRecoilPitchRadians;
+        yaw_kick += state.recoil * kRecoilYawRadians * (state.shots % 2 == 0 ? 1.0f : -1.0f);
+        offset.z -= state.recoil * kRecoilBackMeters;
+    }
+
+    if (state.reload_remaining > 0.0f && state.reload_seconds > 0.0f) {
+        // sin() over the clip: nothing at either end, everything in the
+        // middle, so the weapon leaves and returns to the aim smoothly.
+        const float t = 1.0f - state.reload_remaining / state.reload_seconds;
+        const float arc = std::sin(t * std::numbers::pi_v<float>);
+        offset.y -= arc * kReloadDropMeters;
+        pitch_kick -= arc * kReloadPitchRadians;
+        roll_kick += arc * kReloadRollRadians;
+    }
+
+    if (state.raise_remaining > 0.0f && state.raise_seconds > 0.0f) {
+        const float remaining = state.raise_remaining / state.raise_seconds;
+        const float drop = remaining * remaining;
+        offset.y -= drop * kRaiseDropMeters;
+        pitch_kick -= drop * kRaisePitchRadians;
+    }
+
+    glm::mat4 model{1.0f};
+    model[0] = glm::vec4{right, 0.0f};
+    model[1] = glm::vec4{up, 0.0f};
+    model[2] = glm::vec4{-forward, 0.0f};
+    model[3] =
+        glm::vec4{camera.position + right * offset.x + up * offset.y + forward * offset.z, 1.0f};
+    model = glm::rotate(model, pitch_kick, glm::vec3{1.0f, 0.0f, 0.0f});
+    model = glm::rotate(model, yaw_kick, glm::vec3{0.0f, 1.0f, 0.0f});
+    model = glm::rotate(model, roll_kick, glm::vec3{0.0f, 0.0f, 1.0f});
+    return model;
+}
+
 void draw_capsule(eng::DebugDraw& draw, const glm::vec3& feet, float radius, float height,
                   const glm::vec3& color) {
     constexpr int kSegments = 16;
@@ -838,6 +1143,72 @@ enum class Mode : std::uint8_t {
     Online,   // connected to a server
     Replay,   // watching a recorded match, no local player
 };
+
+// Loads one weapon's boxes from assets/weapons/<name>.glb.
+//
+// `name` is a literal from the arsenal list rather than the parsed config's
+// `name=` field: a value out of an asset file has no business being joined
+// onto a path, which is the same reason fire_sound is validated in
+// parse_weapon_config.
+//
+// A weapon that fails to load simply is not drawn. A GUN that loads without a
+// `muzzle` node is a broken asset and says so here, because the alternative
+// is a gun that silently fires blanks for the rest of the build's life.
+WeaponModel load_weapon_model(eng::AssetCache& assets, const char* name, bool melee) {
+    WeaponModel model;
+    const eng::GltfModel* gltf = assets.model("weapons/" + std::string(name) + ".glb");
+    if (gltf == nullptr) {
+        return model;
+    }
+
+    // One GPU copy per glTF primitive, shared by every box that uses it:
+    // gen_weapons.py emits one mesh per material over a single unit cube, so
+    // a twelve-box sniper uploads four meshes.
+    std::vector<int> first_primitive(gltf->meshes.size(), 0);
+    for (std::size_t i = 0; i < gltf->meshes.size(); ++i) {
+        first_primitive[i] = static_cast<int>(model.primitives.size());
+        for (const eng::GltfPrimitive& primitive : gltf->meshes[i].primitives) {
+            RenderPrimitive rp{eng::GpuMesh::upload(primitive.mesh), glm::vec3{1.0f}, -1};
+            if (primitive.material >= 0) {
+                rp.color = glm::vec3(
+                    gltf->materials[static_cast<std::size_t>(primitive.material)].base_color);
+            }
+            model.primitives.push_back(std::move(rp));
+        }
+    }
+
+    eng::Bounds extent;
+    for (const eng::GltfNode& node : gltf->nodes) {
+        if (node.mesh < 0) {
+            // Mesh-less nodes are markers, read by name -- the same mechanism
+            // the maps use for `spawn_N`.
+            if (node.name == "muzzle") {
+                model.muzzle = glm::vec3(node.transform[3]);
+            }
+            continue;
+        }
+        const std::size_t mesh = static_cast<std::size_t>(node.mesh);
+        for (std::size_t i = 0; i < gltf->meshes[mesh].primitives.size(); ++i) {
+            eng::Bounds local;
+            for (const eng::Vertex& vertex : gltf->meshes[mesh].primitives[i].mesh.vertices) {
+                local.expand(vertex.position);
+            }
+            extent.expand(local, node.transform);
+            model.boxes.push_back({node.transform, first_primitive[mesh] + static_cast<int>(i)});
+        }
+    }
+    // -Z is forward, so the furthest-forward geometry is the smallest z.
+    if (!extent.empty()) {
+        model.reach = std::max(0.0f, -extent.min.z);
+    }
+
+    if (!melee && !model.muzzle) {
+        eng::log::error("Weapon '{}' has no `muzzle` node; it will fire without a flash", name);
+    }
+    eng::log::info("Weapon {}: {} boxes, {} materials, reach {:.3f} m", name, model.boxes.size(),
+                   model.primitives.size(), model.reach);
+    return model;
+}
 
 game::InputCommand make_command(const eng::InputState& input, float yaw, float pitch,
                                 std::uint32_t sequence, std::uint8_t weapon_slot) {
@@ -1146,6 +1517,11 @@ int main(int argc, char** argv) {
 
     // Slot order must match the server's: 1=rifle, 2=smg, 3=shotgun, 4=sniper.
     game::Arsenal arsenal;
+    // Index-aligned with arsenal.weapons, which is why the model is loaded in
+    // the same step as the config rather than in a second loop: a weapon whose
+    // .cfg fails to parse takes no slot, and a parallel list built separately
+    // would hand the viewmodel the wrong gun from there on.
+    std::vector<WeaponModel> weapon_models;
     for (const char* weapon_name : {"rifle", "smg", "shotgun", "sniper", "knife"}) {
         const auto text =
             eng::read_text_file(*assets_root / "weapons" / (std::string(weapon_name) + ".cfg"));
@@ -1154,14 +1530,27 @@ int main(int argc, char** argv) {
         }
         if (const auto parsed = game::parse_weapon_config(*text)) {
             arsenal.weapons.push_back(*parsed);
+            weapon_models.push_back(load_weapon_model(assets, weapon_name, parsed->melee));
         }
     }
     if (arsenal.empty()) {
         arsenal.weapons.push_back(game::WeaponConfig{});
     }
+    // The weapon whose model to draw, or nullptr when the slot has none (a
+    // failed load, or the default config the line above falls back to).
+    const auto weapon_model_for = [&weapon_models](std::uint8_t slot) -> const WeaponModel* {
+        if (slot >= weapon_models.size() || !weapon_models[slot].loaded()) {
+            return nullptr;
+        }
+        return &weapon_models[slot];
+    };
     game::Loadout loadout;
     game::reset_loadout(loadout, arsenal);
-    std::uint8_t desired_slot = 0;
+    // The slot is state rather than an edge (it rides every command), so
+    // seeding it here is all --weapon needs to work in BOTH offline and
+    // online runs. There is no other way to put a chosen gun in front of an
+    // automated screenshot: the keys 1-5 need a keyboard.
+    std::uint8_t desired_slot = args.weapon ? arsenal.clamp_slot(*args.weapon) : 0;
 
     // The bang for a weapon slot, straight out of its config. Deliberately not
     // arsenal.at(), whose out-of-range clamp to slot 0 would answer "what does
@@ -1337,6 +1726,16 @@ int main(int argc, char** argv) {
     float view_pitch = 0.0f;
     std::uint32_t input_sequence = 0;
 
+    ViewmodelState viewmodel;
+    // The flash owed to this frame's own shots. Deferred rather than emitted
+    // where the shot is taken, because a shot is taken inside the fixed tick
+    // and the barrel it leaves is not placed until the camera exists further
+    // down the frame. `armed` also covers several shots in one frame (an smg
+    // at 900 rpm can tick twice): one flash per frame is all that would be
+    // visible anyway.
+    bool muzzle_flash_armed = false;
+    std::uint32_t muzzle_flash_seed = 0;
+
     float smoothed_eye_height = game::kMove.eye_height;
     // Killcam playback position, in seconds. Reset while alive rather than on
     // arrival: the message can land a frame before or after PlayerDied, and
@@ -1510,6 +1909,14 @@ int main(int argc, char** argv) {
                 view_pitch = std::clamp(*args.fixed_pitch, -eng::Camera::kMaxPitchRadians,
                                         eng::Camera::kMaxPitchRadians);
             }
+            // --auto-fire PULLS the trigger rather than holding it down. Held,
+            // it could never fire a semi-automatic weapon at all -- the
+            // shotgun and the sniper need the trigger released between shots,
+            // so both fired exactly once and then sat there, and nothing that
+            // needs a shotgun to keep shooting could be verified. Every other
+            // tick costs an automatic weapon at most one tick of delay against
+            // its own cooldown.
+            const bool auto_fire_now = args.auto_fire && client_tick % 2 == 0;
 
             if (online) {
                 // Predict locally with the shared movement code; the server
@@ -1521,7 +1928,10 @@ int main(int argc, char** argv) {
                     game::set_button(command, game::Button::Fire, false);  // menu clicks
                 }
                 if (args.auto_fire) {
-                    game::set_button(command, game::Button::Fire, true);
+                    game::set_button(command, game::Button::Fire, auto_fire_now);
+                }
+                if (args.auto_walk) {
+                    game::set_button(command, game::Button::Forward, true);
                 }
                 if (net->self_alive()) {
                     prediction->tick(command);
@@ -1541,7 +1951,10 @@ int main(int argc, char** argv) {
             game::InputCommand command =
                 make_command(input, view_yaw, view_pitch, input_sequence++, desired_slot);
             if (args.auto_fire) {
-                game::set_button(command, game::Button::Fire, true);
+                game::set_button(command, game::Button::Fire, auto_fire_now);
+            }
+            if (args.auto_walk) {
+                game::set_button(command, game::Button::Forward, true);
             }
             const bool was_on_ground = player.on_ground;
             game::advance_player(player, command, game::kTickSeconds, controller, world);
@@ -1575,19 +1988,15 @@ int main(int argc, char** argv) {
             }
             if (shot.fired) {
                 sound(weapon_config.fire_sound.c_str(), 0.9f);
+                fire_viewmodel(viewmodel, weapon_config);
+                // The flash comes out of the drawn barrel, which is not
+                // placed until the camera is built further down the frame.
+                muzzle_flash_armed = true;
+                muzzle_flash_seed = input_sequence;
                 const glm::vec3 eye =
                     player.position + glm::vec3{0.0f, game::eye_height_for(player), 0.0f};
                 const glm::vec3 aim = game::view_direction(command.yaw, command.pitch);
                 const float spread = glm::radians(weapon_config.spread_degrees);
-                // There is no first-person weapon model, so the flash is
-                // placed where a muzzle would be -- forward, right and
-                // slightly down -- rather than dead centre, which reads as
-                // a light in the player's face.
-                const glm::vec3 aim_right =
-                    glm::normalize(glm::cross(aim, glm::vec3{0.0f, 1.0f, 0.0f}));
-                emit_muzzle_flash(
-                    particles, eye + aim * 0.5f + aim_right * 0.16f - glm::vec3{0.0f, 0.13f, 0.0f},
-                    aim, input_sequence);
 
                 // Same pellet loop the server runs, so offline practice and
                 // online play behave identically.
@@ -1694,6 +2103,7 @@ int main(int argc, char** argv) {
                 // a single bang.
                 bool any_hit = false;
                 std::uint32_t ray_index = 0;
+                const bool own_shot = fire.shooter == net->my_id();
                 for (const game::FireRay& ray : fire.rays) {
                     tracers.push_back({fire.from + glm::vec3{0.0f, -0.06f, 0.0f}, ray.to, 0.08f});
                     any_hit = any_hit || ray.hit_player != game::kNoPlayer;
@@ -1712,13 +2122,19 @@ int main(int argc, char** argv) {
                             // surface normal, so spray back along the ray.
                             emit_impact(particles, ray.to, -unit, seed);
                         }
-                        if (ray_index == 0) {
+                        // Your own flash comes off the viewmodel's muzzle node
+                        // below; fire.from is the SERVER's copy of your eye and
+                        // is tens of centimetres from your camera, which would
+                        // put your own flash somewhere your gun is not. Remote
+                        // shooters have no viewmodel to hang off, so they keep
+                        // the eye-plus-0.3 m estimate until a weapon is
+                        // attached to their hand joint.
+                        if (ray_index == 0 && !own_shot) {
                             emit_muzzle_flash(particles, fire.from + unit * 0.3f, unit, seed);
                         }
                     }
                     ++ray_index;
                 }
-                const bool own_shot = fire.shooter == net->my_id();
                 if (own_shot) {
                     // Your own rifle is in your hands, not out in the arena.
                     // Being at zero distance would not save it either:
@@ -1728,6 +2144,13 @@ int main(int argc, char** argv) {
                     // 20 cm error pans as hard as a 20 m one, and your own
                     // gun would wander between your ears as you moved.
                     sound(fire_sound_for(fire.slot), 0.9f);
+                    // Kick and flash the gun you are actually holding. The
+                    // event is the server's answer, so this lands one round
+                    // trip late -- the same latency the bang has always had.
+                    fire_viewmodel(viewmodel, arsenal.at(fire.slot));
+                    muzzle_flash_armed = true;
+                    muzzle_flash_seed =
+                        game::hash_combine(fire.shooter, static_cast<std::uint32_t>(client_tick));
                 } else {
                     // The one that matters. Distance used to be faked here
                     // with a hand-rolled volume ramp, which told you a shot
@@ -1895,6 +2318,49 @@ int main(int argc, char** argv) {
         // takes to notice a panning error.
         if (audio) {
             audio->set_listener(camera.position, camera.forward(), glm::vec3{0.0f, 1.0f, 0.0f});
+        }
+
+        // --- viewmodel ----------------------------------------------------
+        // Only where the camera is genuinely the player's eye. The menu orbit,
+        // the fly camera, the replay chase cam and the killcam are all looking
+        // through someone else's head (or nobody's), and a gun pinned to the
+        // corner of those frames would belong to no one.
+        const bool viewmodel_visible =
+            !fly_mode && (mode == Mode::Offline || (online && net->self_alive()));
+        // The raised weapon, and the same answer the HUD gives: online that is
+        // the server's, offline the local loadout's.
+        const std::uint8_t viewmodel_slot = online ? net->self_weapon_slot() : loadout.slot;
+        const game::WeaponConfig& viewmodel_config = arsenal.at(viewmodel_slot);
+        const WeaponModel* held = weapon_model_for(arsenal.clamp_slot(viewmodel_slot));
+        glm::mat4 viewmodel_model{1.0f};
+        if (viewmodel_visible) {
+            const bool reloading =
+                online ? net->self_reloading() : loadout.weapons[loadout.slot].reloading();
+            update_viewmodel(viewmodel, viewmodel_config, viewmodel_slot, reloading,
+                             player.position, player.velocity, player.on_ground,
+                             game::kMove.max_speed, camera.yaw, camera.pitch,
+                             static_cast<float>(dt));
+            viewmodel_model = viewmodel_transform(
+                viewmodel, camera, held != nullptr ? held->reach : 0.0f, viewmodel_config.melee);
+        } else {
+            // Hidden means dead, in the menu, or watching someone else. Forget
+            // everything, so coming back raises the weapon rather than
+            // resuming a clip from before the death, and so the first frame
+            // back does not read a respawn across the arena as a stride.
+            viewmodel = ViewmodelState{};
+        }
+        // The flash owed by this frame's shots, now that the barrel has a
+        // place to be. A weapon with no `muzzle` node -- the knife -- simply
+        // disarms it: no muzzle, no flash, and no branch on which slot is
+        // which. Emit direction is the weapon's own -Z, so the flash leaves
+        // along the barrel rather than along the aim it just kicked off.
+        if (muzzle_flash_armed) {
+            if (viewmodel_visible && held != nullptr && held->muzzle) {
+                emit_muzzle_flash(particles,
+                                  glm::vec3(viewmodel_model * glm::vec4{*held->muzzle, 1.0f}),
+                                  -glm::vec3(viewmodel_model[2]), muzzle_flash_seed);
+            }
+            muzzle_flash_armed = false;
         }
 
         // --- render -----------------------------------------------------
@@ -2171,6 +2637,65 @@ int main(int argc, char** argv) {
         }
         debug_draw->axes(glm::mat4{1.0f}, 2.0f);
         draw_calls += debug_draw->flush(view_projection) > 0 ? 1 : 0;
+
+        // Pass 3: the first-person weapon, still inside the HDR target so its
+        // muzzle flash reaches bloom like everything else in the scene.
+        //
+        // Depth is CLEARED and the gun drawn with its own projection -- same
+        // FOV and aspect, near plane 0.01 instead of the camera's 0.05. That
+        // is the whole anti-clipping mechanism: after the clear there is no
+        // world depth left to lose against, so a player who walks into a wall
+        // gets a gun in front of the wall rather than a barrel through it, and
+        // the tight near plane keeps the stock (which lives inside the
+        // player's head, as it does in every FPS) from clipping. The FOV MUST
+        // match: a point projects to the same pixel in both matrices only if
+        // the x/y scale agrees, and if it does not, the flash lands somewhere
+        // other than the drawn muzzle.
+        //
+        // Deliberately AFTER the particles and debug lines, not before: they
+        // still need the world's depth buffer to be occluded by the world, and
+        // clearing it first would put impact sparks through pillars. The cost
+        // is that the gun overdraws the part of its own flash that falls on
+        // the barrel in screen space -- which is what a real flash does
+        // anyway, since that part is physically behind the barrel.
+        //
+        // It is not in draw_items, so it casts NO shadow: a first-person gun
+        // is not in the world, and a gun-shaped shadow on the floor beside a
+        // player who cannot see their own body would be worse than none. It
+        // does RECEIVE the world's shadows, because its transform is a genuine
+        // world position -- so the gun goes dark when you step into a pillar's
+        // shade, for free.
+        if (viewmodel_visible && held != nullptr) {
+            glClear(GL_DEPTH_BUFFER_BIT);
+            const glm::mat4 viewmodel_projection = glm::perspective(
+                glm::radians(camera.fov_y_degrees), camera.aspect, kViewmodelNear, kViewmodelFar);
+            lit_shader->bind();
+            lit_shader->set_mat4("u_view_projection", viewmodel_projection * camera.view());
+            // The rest of the lit uniforms are program state and survive from
+            // pass 2. These do not, because pass 2 leaves them wherever its
+            // last draw put them: the last item may have been a skinned
+            // character, and unit 0 and unit 3 may still hold whichever arena
+            // material was bound last. The normal map matters more than it
+            // looks -- the loader derives a tangent frame for every mesh with
+            // UVs, so a weapon box has a perfectly good one and would happily
+            // wear the concrete's bumps at whatever strength the wall left
+            // behind. Strength 0 is the "no map" contract bind_material uses.
+            lit_shader->set_int("u_skinned", 0);
+            lit_shader->set_float("u_normal_strength", 0.0f);
+            white.bind(0);
+            flat_normal.bind(3);
+            shadow_map->bind_depth(1);
+            for (const WeaponModel::Box& box : held->boxes) {
+                const glm::mat4 model = viewmodel_model * box.local;
+                lit_shader->set_mat4("u_model", model);
+                lit_shader->set_mat3("u_normal_matrix",
+                                     glm::mat3(glm::transpose(glm::inverse(model))));
+                lit_shader->set_vec3(
+                    "u_tint", held->primitives[static_cast<std::size_t>(box.primitive)].color);
+                held->primitives[static_cast<std::size_t>(box.primitive)].gpu.draw();
+                ++draw_calls;
+            }
+        }
 
         // Resolve the HDR scene to the screen. Everything below this point
         // (HUD, ImGui) draws straight to the default framebuffer, so it is

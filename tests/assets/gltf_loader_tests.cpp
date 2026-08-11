@@ -1,12 +1,15 @@
 #include "engine/assets/gltf_loader.h"
 
 #include <algorithm>
+#include <optional>
+#include <string>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include "engine/assets/asset_cache.h"
 #include "engine/assets/paths.h"
+#include "game/shared/weapon.h"
 
 namespace {
 
@@ -94,6 +97,86 @@ TEST_CASE("every shipped map satisfies what the server relies on", "[gltf]") {
             CHECK(spawn.z > lo.z);
             CHECK(spawn.z < hi.z);
         }
+    }
+}
+
+// The viewmodel reads three things out of a weapon asset and nothing else:
+// geometry, a grip at the origin, and a `muzzle` marker. All three are silent
+// when they go wrong -- a regenerated weapon that lost its marker still loads,
+// still draws, and simply never flashes again -- so they are asserted here
+// rather than left to whoever next edits gen_weapons.py.
+//
+// Whether a weapon HAS a muzzle is not a property of its slot: it is the
+// weapon's own melee flag, which is exactly the rule the client implements by
+// keying the flash off the marker's presence.
+TEST_CASE("every shipped weapon satisfies what the viewmodel relies on", "[gltf]") {
+    static eng::AssetCache cache{*eng::find_assets_root()};
+    const auto assets_root = eng::find_assets_root();
+    REQUIRE(assets_root.has_value());
+
+    for (const char* name : {"rifle", "smg", "shotgun", "sniper", "knife"}) {
+        CAPTURE(name);
+        const auto config_text =
+            eng::read_text_file(*assets_root / "weapons" / (std::string(name) + ".cfg"));
+        REQUIRE(config_text.has_value());
+        const auto config = game::parse_weapon_config(*config_text);
+        REQUIRE(config.has_value());
+
+        const eng::GltfModel* model = cache.model("weapons/" + std::string(name) + ".glb");
+        REQUIRE(model != nullptr);
+
+        std::optional<glm::vec3> muzzle;
+        glm::vec3 lo{1e9f};
+        glm::vec3 hi{-1e9f};
+        std::size_t boxes = 0;
+        for (const eng::GltfNode& node : model->nodes) {
+            if (node.mesh < 0) {
+                if (node.name == "muzzle") {
+                    muzzle = glm::vec3(node.transform[3]);
+                }
+                continue;
+            }
+            ++boxes;
+            for (const eng::GltfPrimitive& primitive :
+                 model->meshes[static_cast<std::size_t>(node.mesh)].primitives) {
+                // Every material must resolve, or the box draws untinted white
+                // and the whole "dark gun against a pale world" read is gone.
+                CHECK(primitive.material >= 0);
+                for (const eng::Vertex& vertex : primitive.mesh.vertices) {
+                    const glm::vec3 local =
+                        glm::vec3(node.transform * glm::vec4(vertex.position, 1.0f));
+                    lo = glm::min(lo, local);
+                    hi = glm::max(hi, local);
+                }
+            }
+        }
+        CHECK(boxes >= 5);
+
+        // The grip IS the origin: both the viewmodel and any future hand-joint
+        // attach add the same offset and no per-weapon correction.
+        CHECK(lo.x <= 0.0f);
+        CHECK(hi.x >= 0.0f);
+        CHECK(lo.y <= 0.0f);
+        CHECK(hi.y >= 0.0f);
+        CHECK(lo.z <= 0.0f);
+        CHECK(hi.z >= 0.0f);
+
+        if (config->melee) {
+            // A knife with a muzzle node would spit fire out of its blade.
+            CHECK_FALSE(muzzle.has_value());
+            continue;
+        }
+        REQUIRE(muzzle.has_value());
+        // Ahead of every box, so the additive flash is not born inside the
+        // barrel and half depth-rejected by it -- but only just ahead, or it
+        // detaches from the gun it is supposed to be leaving.
+        CHECK(muzzle->z < lo.z);
+        CHECK(muzzle->z > lo.z - 0.05f);
+        // On the weapon's centreline and on the shared bore axis: the hold is
+        // one offset for the arsenal, so a bore that moved per weapon would
+        // move the barrel up and down the screen on every switch.
+        CHECK(muzzle->x == Catch::Approx(0.0f).margin(1e-4f));
+        CHECK(muzzle->y == Catch::Approx(0.105f).margin(1e-4f));
     }
 }
 

@@ -14,9 +14,12 @@
 // Minimal glTF 2.0 import (via cgltf), headless-safe: produces CPU data
 // only. Supported subset: .glb/.gltf, POSITION/NORMAL/TEXCOORD_0
 // attributes, indexed triangles, pbrMetallicRoughness (baseColorFactor,
-// baseColorTexture, metallic/roughness factors) and emissive factor.
-// Skins, animations and cameras are intentionally ignored until the game
-// needs them.
+// baseColorTexture, metallic/roughness factors), normalTexture and emissive
+// factor. Cameras are intentionally ignored until the game needs them.
+//
+// Tangents are always derived from positions and UVs rather than read from
+// a TANGENT accessor: nothing this project generates authors one, and one
+// code path cannot disagree with itself about handedness.
 namespace eng {
 
 // A decoded image, always RGBA8. Only produced when image decoding is
@@ -36,6 +39,11 @@ struct GltfMaterial {
     glm::vec4 base_color{1.0f};
     // Index into GltfModel::images, or -1 for an untextured material.
     int base_color_image = -1;
+    // Tangent-space normal map, also an index into GltfModel::images, -1 for
+    // a material that just uses its geometric normal. Unlike the base color
+    // this image is NOT sRGB-encoded: it holds directions, not colours.
+    int normal_image = -1;
+    float normal_scale = 1.0f;  // glTF normalTexture.scale, multiplies XY
     float metallic = 0.0f;
     float roughness = 1.0f;
     glm::vec3 emissive{0.0f};

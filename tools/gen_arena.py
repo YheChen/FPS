@@ -7,7 +7,9 @@ as its own mesh so UVs can be scaled to WORLD size - that keeps texel density
 constant, instead of stretching one 0..1 UV square across a 40 m floor.
 
 Textures (from tools/gen_textures.py) are embedded in the .glb as PNG buffer
-views, so each map is a single self-contained file.
+views, so each map is a single self-contained file. Each material carries an
+albedo and a normal map; that is also why every byte a texture gains is paid
+for once per map plus once loose under assets/textures/.
 
 Conventions: meters, +Y up, -Z forward (glTF standard). Floor top at y = 0.
 Every layout must be fully enclosed by walls: nothing stops a player who
@@ -33,14 +35,14 @@ from pathlib import Path
 # Texels per meter: how densely textures tile across surfaces.
 TEXTURE_SCALE = 0.5
 
-# name -> (texture file, base color factor)
+# name -> (albedo file, normal map file, base color factor)
 MATERIALS = [
-    ("mat_floor", "concrete.png", [0.85, 0.85, 0.88, 1.0]),
-    ("mat_wall", "wall.png", [0.9, 0.88, 0.85, 1.0]),
-    ("mat_pillar", "metal.png", [0.85, 0.9, 1.0, 1.0]),
-    ("mat_platform", "platform.png", [0.9, 1.0, 0.9, 1.0]),
+    ("mat_floor", "concrete.png", "concrete_normal.png", [0.85, 0.85, 0.88, 1.0]),
+    ("mat_wall", "wall.png", "wall_normal.png", [0.9, 0.88, 0.85, 1.0]),
+    ("mat_pillar", "metal.png", "metal_normal.png", [0.85, 0.9, 1.0, 1.0]),
+    ("mat_platform", "platform.png", "platform_normal.png", [0.9, 1.0, 0.9, 1.0]),
 ]
-MATERIAL_INDEX = {name: i for i, (name, _, _) in enumerate(MATERIALS)}
+MATERIAL_INDEX = {name: i for i, (name, _, _, _) in enumerate(MATERIALS)}
 
 # arena01 - a symmetric 40x40 box around a raised centre platform. Fights
 # converge on the middle, which is the highest ground and the most exposed.
@@ -192,24 +194,27 @@ def build_glb(texture_dir: Path, map_name: str):
     b = GlbBuilder()
 
     # --- textures (embedded PNG bytes) ---
+    # Albedo and normal map for every material, so a map stays one
+    # self-contained file. Image i*2 is the albedo, i*2+1 the normal.
     images, textures = [], []
-    for i, (_, texture_file, _) in enumerate(MATERIALS):
-        png = (texture_dir / texture_file).read_bytes()
-        view = b.add_view(png)
-        images.append({"name": texture_file, "mimeType": "image/png", "bufferView": view})
-        textures.append({"source": i, "sampler": 0})
+    for _, albedo_file, normal_file, _ in MATERIALS:
+        for texture_file in (albedo_file, normal_file):
+            view = b.add_view((texture_dir / texture_file).read_bytes())
+            images.append({"name": texture_file, "mimeType": "image/png", "bufferView": view})
+            textures.append({"source": len(images) - 1, "sampler": 0})
 
     materials = [
         {
             "name": name,
             "pbrMetallicRoughness": {
                 "baseColorFactor": color,
-                "baseColorTexture": {"index": i},
+                "baseColorTexture": {"index": i * 2},
                 "metallicFactor": 0.0,
                 "roughnessFactor": 0.9,
             },
+            "normalTexture": {"index": i * 2 + 1},
         }
-        for i, (name, _, color) in enumerate(MATERIALS)
+        for i, (name, _, _, color) in enumerate(MATERIALS)
     ]
 
     # --- one mesh per box, with world-scaled UVs ---
@@ -291,8 +296,10 @@ def main():
 
     root = Path(__file__).resolve().parent.parent
     texture_dir = root / "assets" / "textures"
-    if not (texture_dir / "concrete.png").exists():
-        print("textures missing; run tools/gen_textures.py first", file=sys.stderr)
+    missing = [f for m in MATERIALS for f in m[1:3] if not (texture_dir / f).exists()]
+    if missing:
+        print(f"textures missing ({', '.join(missing)}); run tools/gen_textures.py first",
+              file=sys.stderr)
         return 1
 
     for name in ([args.map] if args.map else sorted(LAYOUTS)):

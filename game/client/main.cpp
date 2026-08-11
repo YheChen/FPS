@@ -150,12 +150,14 @@ constexpr std::string_view kLitVertexSource = R"(
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec3 a_normal;
 layout(location = 2) in vec2 a_uv;
+layout(location = 5) in vec4 a_tangent;   // xyz direction, w handedness
 uniform mat4 u_model;
 uniform mat3 u_normal_matrix;
 uniform mat4 u_view_projection;
 out vec3 v_world_pos;
 out vec3 v_normal;
 out vec2 v_uv;
+out vec4 v_tangent;
 void main() {
     mat4 skin = skin_matrix();
     vec4 world = u_model * skin * vec4(a_position, 1.0);
@@ -164,6 +166,11 @@ void main() {
     // the lighting of its bind pose. mat3 of the skin matrix is close enough
     // here: joints are rigid, with no non-uniform scale to invert-transpose.
     v_normal = u_normal_matrix * (mat3(skin) * a_normal);
+    // Same transform for the tangent, and the handedness rides through
+    // untouched: it is a property of the UV layout, not of the pose. A zero
+    // tangent stays zero through both matrices, which is what lets the
+    // fragment stage recognise geometry with no tangent frame.
+    v_tangent = vec4(u_normal_matrix * (mat3(skin) * a_tangent.xyz), a_tangent.w);
     v_uv = a_uv;
     gl_Position = u_view_projection * world;
 }
@@ -173,7 +180,10 @@ constexpr std::string_view kLitFragmentSource = R"(
 in vec3 v_world_pos;
 in vec3 v_normal;
 in vec2 v_uv;
+in vec4 v_tangent;
 uniform sampler2D u_base_color;
+uniform sampler2D u_normal_map;
+uniform float u_normal_strength;   // 0 disables the map without a rebind
 uniform sampler2DShadow u_shadow_map;
 uniform mat4 u_light_view_projection;
 uniform float u_shadow_texel;   // 1.0 / shadow map resolution
@@ -212,9 +222,42 @@ float sun_visibility(vec3 normal, vec3 to_light) {
     return sum / 9.0;
 }
 
+// The shading normal: the normal map rotated into world space, or just the
+// interpolated vertex normal where there is no tangent frame to rotate it
+// with.
+//
+// Most of the meshes in this game take the second branch -- the character,
+// the targets, anything untextured -- so it has to be the safe one. The
+// guard is on the length of the ORTHOGONALIZED tangent, which catches both
+// "this mesh has no tangents at all" (zero) and "interpolation left the
+// tangent parallel to the normal" (also zero after projection). Normalizing
+// either would produce a NaN and paint the surface black.
+vec3 shading_normal(vec3 n) {
+    // Sampled BEFORE the guard, deliberately. texture() picks its mip level
+    // from screen-space derivatives, and GLSL ES 3.00 leaves those undefined
+    // inside non-uniform control flow -- which the branch below becomes the
+    // moment a 2x2 quad straddles a vertex whose tangent is degenerate. No
+    // mesh mixes the two today, so nothing is broken now; it would start
+    // being broken the first time one does (a UV seam collapsed to a point,
+    // or a viewmodel handed tangents by the loader), and the symptom would
+    // be a speckled seam on some drivers and not others. Hoisting costs one
+    // fetch of the 1x1 flat-normal texture on geometry that then discards it.
+    vec3 tangent_normal = texture(u_normal_map, v_uv).xyz * 2.0 - 1.0;
+
+    vec3 t = v_tangent.xyz - n * dot(n, v_tangent.xyz);
+    if (dot(t, t) < 1e-12) {
+        return n;
+    }
+    t = normalize(t);
+    vec3 b = cross(n, t) * v_tangent.w;
+    tangent_normal.xy *= u_normal_strength;
+    return normalize(mat3(t, b, n) * tangent_normal);
+}
+
 void main() {
     vec3 albedo = texture(u_base_color, v_uv).rgb * u_tint;
-    vec3 n = normalize(v_normal);
+    vec3 geometric = normalize(v_normal);
+    vec3 n = shading_normal(geometric);
     vec3 l = normalize(-u_light_direction);
     float n_dot_l = max(dot(n, l), 0.0);
     vec3 view_dir = normalize(u_camera_pos - v_world_pos);
@@ -224,7 +267,13 @@ void main() {
     // Ambient stays unshadowed; only the sun's direct contribution is
     // occluded, which is what keeps shadowed areas readable rather than
     // black.
-    float visibility = sun_visibility(n, l);
+    //
+    // The shadow bias is computed from the GEOMETRIC normal, not the mapped
+    // one: it is slack for how much depth the surface's own footprint spans
+    // in a shadow texel, which is a property of the triangle. Feeding it the
+    // bumpy normal would modulate the bias per texel and speckle flat walls
+    // with acne.
+    float visibility = sun_visibility(geometric, l);
     vec3 direct = u_light_color * n_dot_l * visibility;
     vec3 color = albedo * (u_ambient + direct) + u_light_color * spec * n_dot_l * visibility;
     o_color = vec4(color, 1.0);
@@ -396,7 +445,9 @@ ClientArgs parse_args(int argc, char** argv) {
 struct RenderPrimitive {
     eng::GpuMesh gpu;
     glm::vec3 color{1.0f};
-    int texture = -1;  // index into the arena texture list, -1 = untextured
+    int texture = -1;         // index into the arena texture list, -1 = untextured
+    int normal_texture = -1;  // same list, -1 = no normal map
+    float normal_scale = 1.0f;
 };
 
 // Upper bound on rig size; the joint texture is sized to this.
@@ -884,12 +935,24 @@ int main(int argc, char** argv) {
     // The list stays index-aligned with arena->images so material indices
     // work directly; anything that failed to decode gets the missing-texture
     // checkerboard rather than silently rendering untextured.
+    //
+    // Normal maps go in the same list but are uploaded as plain RGBA8: they
+    // encode directions, and running them through the sRGB decode would bend
+    // every one of them toward the surface normal.
+    std::vector<bool> is_normal_map(arena->images.size(), false);
+    for (const eng::GltfMaterial& material : arena->materials) {
+        if (material.normal_image >= 0 &&
+            static_cast<std::size_t>(material.normal_image) < is_normal_map.size()) {
+            is_normal_map[static_cast<std::size_t>(material.normal_image)] = true;
+        }
+    }
     std::vector<eng::Texture2D> arena_textures;
     arena_textures.reserve(arena->images.size());
-    for (const eng::GltfImage& image : arena->images) {
+    for (std::size_t i = 0; i < arena->images.size(); ++i) {
+        const eng::GltfImage& image = arena->images[i];
         if (image.valid()) {
-            arena_textures.push_back(
-                eng::Texture2D::from_pixels(image.width, image.height, image.pixels, true));
+            arena_textures.push_back(eng::Texture2D::from_pixels(image.width, image.height,
+                                                                 image.pixels, !is_normal_map[i]));
         } else {
             eng::log::warn("Arena image '{}' has no pixels; using the missing-texture pattern",
                            image.name);
@@ -903,7 +966,7 @@ int main(int argc, char** argv) {
     for (const eng::GltfMesh& mesh : arena->meshes) {
         std::vector<RenderPrimitive> primitives;
         for (const eng::GltfPrimitive& primitive : mesh.primitives) {
-            RenderPrimitive rp{eng::GpuMesh::upload(primitive.mesh), glm::vec3{1.0f}, -1};
+            RenderPrimitive rp{eng::GpuMesh::upload(primitive.mesh), glm::vec3{1.0f}, -1, -1, 1.0f};
             if (primitive.material >= 0) {
                 const eng::GltfMaterial& material =
                     arena->materials[static_cast<std::size_t>(primitive.material)];
@@ -912,16 +975,30 @@ int main(int argc, char** argv) {
                     static_cast<std::size_t>(material.base_color_image) < arena_textures.size()) {
                     rp.texture = material.base_color_image;
                 }
+                if (material.normal_image >= 0 &&
+                    static_cast<std::size_t>(material.normal_image) < arena_textures.size()) {
+                    rp.normal_texture = material.normal_image;
+                    rp.normal_scale = material.normal_scale;
+                }
             }
             primitives.push_back(std::move(rp));
         }
         render_meshes.push_back(std::move(primitives));
     }
 
-    // Stand-in for untextured geometry (players, targets) so the lit shader
-    // always has something bound to sample.
+    // Stand-ins for untextured geometry (players, targets) so the lit shader
+    // always has something bound to sample. (128,128,255) decodes to a
+    // straight-up tangent-space normal, so a material with no normal map
+    // shades exactly as it did before this existed -- belt and braces
+    // alongside the shader's zero-tangent fallback, since sampling a unit
+    // with nothing bound is undefined rather than harmless. It is uploaded
+    // LINEAR: through the sRGB decode 128 would land at 0.21, not 0.5, and
+    // every "flat" surface would lean 35 degrees.
     const eng::Texture2D white =
         eng::Texture2D::checkerboard(4, 1, {255, 255, 255}, {255, 255, 255});
+    constexpr std::array<std::uint8_t, 4> kFlatNormalTexel{128, 128, 255, 255};
+    const eng::Texture2D flat_normal =
+        eng::Texture2D::from_pixels(1, 1, kFlatNormalTexel, /*srgb=*/false);
     const eng::GpuMesh cube = eng::GpuMesh::upload(eng::MeshData::unit_cube());
 
     // --- skinned character -------------------------------------------------
@@ -1995,6 +2072,7 @@ int main(int argc, char** argv) {
         lit_shader->set_vec3("u_camera_pos", camera.position);
         lit_shader->set_int("u_base_color", 0);
         lit_shader->set_int("u_shadow_map", 1);
+        lit_shader->set_int("u_normal_map", 3);
         lit_shader->set_mat4("u_light_view_projection", light_view_projection);
         lit_shader->set_float("u_shadow_texel",
                               1.0f / static_cast<float>(shadow_map->resolution()));
@@ -2002,18 +2080,29 @@ int main(int argc, char** argv) {
 
         // Texture binds are the only per-draw GL state here, so track the
         // current one and only switch when the material actually changes.
-        int bound_texture = -1;  // -1 = the white fallback
+        // Unit 2 belongs to the joint texture, so the normal map takes 3.
+        int bound_texture = -1;         // -1 = the white fallback
+        int bound_normal_texture = -1;  // -1 = the flat-normal fallback
         white.bind(0);
-        const auto bind_texture = [&](int texture) {
-            if (texture == bound_texture) {
-                return;
+        flat_normal.bind(3);
+        const auto bind_material = [&](int texture, int normal_texture, float normal_scale) {
+            if (texture != bound_texture) {
+                bound_texture = texture;
+                if (texture < 0) {
+                    white.bind(0);
+                } else {
+                    arena_textures[static_cast<std::size_t>(texture)].bind(0);
+                }
             }
-            bound_texture = texture;
-            if (texture < 0) {
-                white.bind(0);
-            } else {
-                arena_textures[static_cast<std::size_t>(texture)].bind(0);
+            if (normal_texture != bound_normal_texture) {
+                bound_normal_texture = normal_texture;
+                if (normal_texture < 0) {
+                    flat_normal.bind(3);
+                } else {
+                    arena_textures[static_cast<std::size_t>(normal_texture)].bind(3);
+                }
             }
+            lit_shader->set_float("u_normal_strength", normal_texture < 0 ? 0.0f : normal_scale);
         };
 
         for (const DrawItem& item : draw_items) {
@@ -2022,7 +2111,9 @@ int main(int argc, char** argv) {
                                  glm::mat3(glm::transpose(glm::inverse(item.model))));
             bind_joints(*lit_shader, item);
             if (item.kind != DrawKind::ArenaMesh) {
-                bind_texture(-1);  // characters and targets are untextured
+                // Characters and targets are untextured, so they get the
+                // white albedo and the flat normal.
+                bind_material(-1, -1, 1.0f);
                 lit_shader->set_vec3("u_tint", item.tint);
                 if (item.kind == DrawKind::Character) {
                     character_mesh.draw();
@@ -2034,7 +2125,7 @@ int main(int argc, char** argv) {
             }
             for (const RenderPrimitive& primitive :
                  render_meshes[static_cast<std::size_t>(item.mesh)]) {
-                bind_texture(primitive.texture);
+                bind_material(primitive.texture, primitive.normal_texture, primitive.normal_scale);
                 lit_shader->set_vec3("u_tint", primitive.color * item.tint);
                 primitive.gpu.draw();
                 ++draw_calls;

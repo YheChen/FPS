@@ -101,20 +101,59 @@ TEST_CASE("arena materials reference decoded textures", "[gltf]") {
     const eng::GltfModel* model = load_arena();
     REQUIRE(model != nullptr);
 
-    REQUIRE(model->images.size() == 4);
+    // An albedo and a normal map per material.
+    REQUIRE(model->images.size() == 8);
     for (const eng::GltfImage& image : model->images) {
         CHECK(image.valid());
-        CHECK(image.width == 256);
-        CHECK(image.height == 256);
+        CHECK(image.width == image.height);
         // RGBA8, tightly packed.
         CHECK(image.pixels.size() ==
               static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height) * 4);
     }
 
     for (const eng::GltfMaterial& material : model->materials) {
+        CAPTURE(material.name);
         REQUIRE(material.base_color_image >= 0);
         CHECK(static_cast<std::size_t>(material.base_color_image) < model->images.size());
         CHECK(material.roughness > 0.0f);
+
+        // Every arena material is normal-mapped, and never by the same image
+        // it uses for albedo: the two are uploaded with different sRGB
+        // settings, so sharing one would have to be wrong for one of them.
+        REQUIRE(material.normal_image >= 0);
+        CHECK(static_cast<std::size_t>(material.normal_image) < model->images.size());
+        CHECK(material.normal_image != material.base_color_image);
+        CHECK(material.normal_scale == Catch::Approx(1.0f));
+
+        // Normal maps ship at half the albedo's resolution to keep the
+        // browser download down; if that ratio ever changes, the size budget
+        // in tools/gen_textures.py changed with it.
+        const eng::GltfImage& albedo =
+            model->images[static_cast<std::size_t>(material.base_color_image)];
+        const eng::GltfImage& normal =
+            model->images[static_cast<std::size_t>(material.normal_image)];
+        CHECK(albedo.width == 512);
+        CHECK(normal.width == 256);
+    }
+}
+
+TEST_CASE("arena geometry carries a usable tangent frame", "[gltf]") {
+    const eng::GltfModel* model = load_arena();
+    REQUIRE(model != nullptr);
+
+    for (const eng::GltfMesh& mesh : model->meshes) {
+        CAPTURE(mesh.name);
+        for (const eng::GltfPrimitive& primitive : mesh.primitives) {
+            for (const eng::Vertex& vertex : primitive.mesh.vertices) {
+                // Unit length, perpendicular to the normal, and a handedness
+                // of exactly +/-1: anything else and the shader's TBN is not
+                // orthonormal, which shears the normal map.
+                CHECK(glm::length(glm::vec3(vertex.tangent)) == Catch::Approx(1.0f));
+                CHECK(glm::dot(glm::vec3(vertex.tangent), vertex.normal) ==
+                      Catch::Approx(0.0f).margin(1e-5));
+                CHECK(std::abs(vertex.tangent.w) == Catch::Approx(1.0f));
+            }
+        }
     }
 }
 
@@ -176,7 +215,7 @@ TEST_CASE("image decoding can be skipped for headless loads", "[gltf]") {
 
     // The slots survive so material image indices stay meaningful, but
     // nothing was decoded into them.
-    REQUIRE(model->images.size() == 4);
+    REQUIRE(model->images.size() == 8);
     for (const eng::GltfImage& image : model->images) {
         CHECK_FALSE(image.valid());
         CHECK(image.pixels.empty());

@@ -39,11 +39,17 @@ inline constexpr bool kGlIsWebGL =
 // ones, so a `sampler2DShadow` uniform fails to compile with "No precision
 // specified" unless it is declared here. Desktop GLSL ignores precision
 // statements, but they are only emitted on the WebGL path anyway.
+//
+// `sampler2D` does have a default, but it is lowp. That is fine for albedo
+// and invisible on the joint texture (texelFetch of a highp-backed RGBA32F
+// target), but a tangent-space normal map decoded at lowp is ~8 usable
+// levels per channel, which bands every shaded gradient in the arena.
 inline const char* glsl_preamble() {
     if constexpr (kGlIsWebGL) {
         return "#version 300 es\n"
                "precision highp float;\n"
                "precision highp int;\n"
+               "precision highp sampler2D;\n"
                "precision highp sampler2DShadow;\n";
     } else {
         return "#version 410 core\n";

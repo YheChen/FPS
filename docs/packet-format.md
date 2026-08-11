@@ -109,3 +109,27 @@ There is one grace in the design: an unknown message *type* is rejected by
 `read_message_type` rather than skipped, so a client that somehow saw a newer
 message would drop it rather than misparse it. That is a safety net against
 corruption, not a compatibility mechanism.
+
+## WebRTC signalling (M19b): RtcOffer 17, RtcAnswer 18, RtcCandidate 19
+
+The only messages the game layer never sees. They ride the WebSocket
+connection; a router in front of `ServerGame` consumes them, because a
+signalling message reaching the game would be counted as malformed and would
+eventually kick the client.
+
+| Field | Type | Notes |
+|---|---|---|
+| **RtcOffer** (client -> server) | | |
+| sdp | long_str | u16 length prefix, <= 8192 |
+| **RtcAnswer** (server -> client) | | |
+| sdp | long_str | u16 length prefix, <= 8192 |
+| **RtcCandidate** (both ways) | | |
+| candidate | long_str | u16 length prefix, <= 512 |
+| mid | str | u8 length prefix, <= 64 |
+
+`long_str` is a u16-length-prefixed string, added for exactly this: an SDP is
+a couple of kilobytes and `str()` caps at 255 bytes. Every other field on this
+wire keeps its one-byte prefix, so a 300-byte player name stays impossible.
+
+A hostile peer can claim 60 KB and send none; the reader rejects any length
+past the caller's own limit rather than allocating on the claim.

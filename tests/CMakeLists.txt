@@ -52,7 +52,8 @@ add_executable(engine_tests
 if(NOT EMSCRIPTEN)
     target_sources(engine_tests PRIVATE
         server/server_game_tests.cpp
-        server/stats_store_tests.cpp
+        server/signalling_router_tests.cpp
+    server/stats_store_tests.cpp
     )
     target_link_libraries(engine_tests PRIVATE fps::game_server)
 else()

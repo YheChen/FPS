@@ -19,7 +19,7 @@
 // returning nullopt means "hostile or corrupt packet - drop it".
 namespace game {
 
-inline constexpr std::uint16_t kProtocolVersion = 7;
+inline constexpr std::uint16_t kProtocolVersion = 8;
 inline constexpr std::uint8_t kMaxPlayers = 8;
 inline constexpr std::size_t kMaxNameLength = 16;
 inline constexpr int kSnapshotDivisor = 3;  // 60 Hz ticks -> 20 Hz snapshots
@@ -50,6 +50,39 @@ enum class MessageType : std::uint8_t {
     // Unicast rather than broadcast: it is the one message in the
     // protocol addressed to a single player about their own death.
     KillCam = 16,
+    // WebRTC signalling (M19b). These ride the WebSocket connection, which
+    // for a WebRTC client exists only to negotiate: once the DataChannel
+    // opens, every byte of game traffic moves to it and nothing is sent
+    // over the socket again.
+    //
+    // They are the only messages in the protocol that the game layer never
+    // sees. A signalling router in front of ServerGame consumes them,
+    // because ServerGame has no business knowing which transports exist --
+    // and one reaching it would be counted as malformed and eventually kick
+    // the client.
+    RtcOffer = 17,      // client -> server, SDP
+    RtcAnswer = 18,     // server -> client, SDP
+    RtcCandidate = 19,  // both ways, ICE candidate + media id
+};
+
+// An SDP session description runs to a couple of kilobytes -- by far the
+// largest thing on this wire, and the reason long_str exists. A candidate
+// line is short.
+inline constexpr std::size_t kMaxSdpLength = 8192;
+inline constexpr std::size_t kMaxCandidateLength = 512;
+inline constexpr std::size_t kMaxMidLength = 64;
+
+struct RtcOfferMsg {
+    std::string sdp;
+};
+
+struct RtcAnswerMsg {
+    std::string sdp;
+};
+
+struct RtcCandidateMsg {
+    std::string candidate;
+    std::string mid;  // which media section the candidate belongs to
 };
 
 // How many rows the server will ever send. Bounded on the wire because
@@ -244,6 +277,9 @@ void write(eng::ByteWriter& w, const MatchStateMsg& m);
 void write(eng::ByteWriter& w, const LeaderboardMsg& m);
 void write(eng::ByteWriter& w, const KillCamMsg& m);
 void write(eng::ByteWriter& w, const WeaponStatusMsg& m);
+void write(eng::ByteWriter& w, const RtcOfferMsg& m);
+void write(eng::ByteWriter& w, const RtcAnswerMsg& m);
+void write(eng::ByteWriter& w, const RtcCandidateMsg& m);
 
 // --- decode (after the type byte has been consumed) -------------------------
 std::optional<ClientHello> read_client_hello(eng::ByteReader& r);
@@ -262,6 +298,9 @@ std::optional<MatchStateMsg> read_match_state(eng::ByteReader& r);
 std::optional<LeaderboardMsg> read_leaderboard(eng::ByteReader& r);
 std::optional<KillCamMsg> read_kill_cam(eng::ByteReader& r);
 std::optional<WeaponStatusMsg> read_weapon_status(eng::ByteReader& r);
+std::optional<RtcOfferMsg> read_rtc_offer(eng::ByteReader& r);
+std::optional<RtcAnswerMsg> read_rtc_answer(eng::ByteReader& r);
+std::optional<RtcCandidateMsg> read_rtc_candidate(eng::ByteReader& r);
 
 // Reads and validates the leading type byte.
 std::optional<MessageType> read_message_type(eng::ByteReader& r);

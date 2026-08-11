@@ -267,6 +267,32 @@ struct ClientArgs {
     std::string map = "maps/arena01.glb";  // --map
 };
 
+#if defined(__EMSCRIPTEN__)
+// A browser has no argv, so connection details come from the query string:
+//   fps_client.html?connect=rtc://host:port&name=bob
+// That doubles as a shareable join link for a deployed build, and it is the
+// only way to drive the client without clicking through the menu -- which is
+// what makes an automated browser test of the connection path possible.
+// clang-format off
+EM_JS(int, fps_read_query_param, (const char* key, char* out, int max), {
+    var params = new URLSearchParams(window.location.search);
+    var value = params.get(UTF8ToString(key));
+    if (!value) { return 0; }
+    stringToUTF8(value, out, max);
+    return 1;
+});
+// clang-format on
+
+std::optional<std::string> query_param(const char* key) {
+    constexpr int kMax = 256;
+    std::string buffer(kMax, '\0');
+    if (fps_read_query_param(key, buffer.data(), kMax) == 0) {
+        return std::nullopt;
+    }
+    return std::string(buffer.c_str());
+}
+#endif
+
 ClientArgs parse_args(int argc, char** argv) {
     ClientArgs args;
     for (int i = 1; i < argc; ++i) {
@@ -354,6 +380,16 @@ ClientArgs parse_args(int argc, char** argv) {
             eng::log::warn("Unknown argument '{}'", arg);
         }
     }
+#if defined(__EMSCRIPTEN__)
+    // After the argv loop so a hand-built command line still wins where one
+    // exists; in a browser there is none, so these are the only source.
+    if (const auto connect = query_param("connect")) {
+        args.connect_host = *connect;
+    }
+    if (const auto name = query_param("name")) {
+        args.name = *name;
+    }
+#endif
     return args;
 }
 

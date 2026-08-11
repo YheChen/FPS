@@ -33,6 +33,12 @@ void ByteWriter::str(std::string_view value) {
     buffer_.insert(buffer_.end(), value.begin(), value.end());
 }
 
+void ByteWriter::long_str(std::string_view value) {
+    ENG_ASSERT(value.size() <= 65535, "long wire strings are u16-length-prefixed");
+    u16(static_cast<std::uint16_t>(value.size()));
+    buffer_.insert(buffer_.end(), value.begin(), value.end());
+}
+
 bool ByteReader::take(std::size_t count, const std::uint8_t** out) {
     if (failed_ || data_.size() - position_ < count) {
         failed_ = true;
@@ -83,6 +89,19 @@ std::optional<float> ByteReader::f32() {
 
 std::optional<std::string> ByteReader::str(std::size_t max_length) {
     const auto length = u8();
+    if (!length || *length == 0 || *length > max_length) {
+        failed_ = true;
+        return std::nullopt;
+    }
+    const std::uint8_t* p = nullptr;
+    if (!take(*length, &p)) {
+        return std::nullopt;
+    }
+    return std::string(reinterpret_cast<const char*>(p), *length);
+}
+
+std::optional<std::string> ByteReader::long_str(std::size_t max_length) {
+    const auto length = u16();
     if (!length || *length == 0 || *length > max_length) {
         failed_ = true;
         return std::nullopt;

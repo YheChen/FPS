@@ -32,6 +32,10 @@ add_executable(fps_client
     client/main.cpp
     client/net_client.cpp
     client/net_client.h
+    # Browser-only, and guarded by #if __EMSCRIPTEN__ so a native build
+    # compiles it away to nothing rather than needing a second source list.
+    client/rtc_transport.cpp
+    client/rtc_transport.h
 )
 target_link_libraries(fps_client PRIVATE fps::engine_platform fps::game_shared)
 fps_set_warnings(fps_client)
@@ -107,6 +111,12 @@ if(NOT EMSCRIPTEN)
     add_library(game_server STATIC
         server/server_game.cpp
         server/server_game.h
+        # Deliberately NOT gated on FPS_ENABLE_WEBRTC: the router talks to a
+        # narrow SignallingHost interface, not to libdatachannel, so it builds
+        # and is tested in the default configuration -- which is the one CI
+        # runs and therefore the only one whose tests are ever green.
+        server/signalling_router.cpp
+        server/signalling_router.h
         server/stats_store.cpp
         server/stats_store.h
     )

@@ -119,6 +119,10 @@ std::optional<MeshData> read_primitive(const cgltf_primitive& primitive,
         }
         mesh.indices[i] = static_cast<std::uint32_t>(index);
     }
+
+    // After the indices, because the tangent of a vertex is an average over
+    // every triangle that uses it.
+    generate_tangents(mesh);
     return mesh;
 }
 
@@ -228,6 +232,12 @@ std::optional<GltfModel> load_gltf(const std::filesystem::path& path, bool decod
                 out.base_color_image =
                     static_cast<int>(pbr.base_color_texture.texture->image - data->images);
             }
+        }
+        if (material.normal_texture.texture != nullptr &&
+            material.normal_texture.texture->image != nullptr) {
+            out.normal_image =
+                static_cast<int>(material.normal_texture.texture->image - data->images);
+            out.normal_scale = material.normal_texture.scale;
         }
         out.emissive = {material.emissive_factor[0], material.emissive_factor[1],
                         material.emissive_factor[2]};

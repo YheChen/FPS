@@ -233,13 +233,23 @@ float sun_visibility(vec3 normal, vec3 to_light) {
 // tangent parallel to the normal" (also zero after projection). Normalizing
 // either would produce a NaN and paint the surface black.
 vec3 shading_normal(vec3 n) {
+    // Sampled BEFORE the guard, deliberately. texture() picks its mip level
+    // from screen-space derivatives, and GLSL ES 3.00 leaves those undefined
+    // inside non-uniform control flow -- which the branch below becomes the
+    // moment a 2x2 quad straddles a vertex whose tangent is degenerate. No
+    // mesh mixes the two today, so nothing is broken now; it would start
+    // being broken the first time one does (a UV seam collapsed to a point,
+    // or a viewmodel handed tangents by the loader), and the symptom would
+    // be a speckled seam on some drivers and not others. Hoisting costs one
+    // fetch of the 1x1 flat-normal texture on geometry that then discards it.
+    vec3 tangent_normal = texture(u_normal_map, v_uv).xyz * 2.0 - 1.0;
+
     vec3 t = v_tangent.xyz - n * dot(n, v_tangent.xyz);
     if (dot(t, t) < 1e-12) {
         return n;
     }
     t = normalize(t);
     vec3 b = cross(n, t) * v_tangent.w;
-    vec3 tangent_normal = texture(u_normal_map, v_uv).xyz * 2.0 - 1.0;
     tangent_normal.xy *= u_normal_strength;
     return normalize(mat3(t, b, n) * tangent_normal);
 }

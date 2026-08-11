@@ -161,3 +161,77 @@ is not left to a developer's machine.
 
 Binary messages only. A browser's `dataChannel.send(ArrayBuffer)` is binary;
 a text message means something that is not our client is talking to us.
+
+## The browser half (M19b)
+
+A browser already has an `RTCPeerConnection`, so the client side needs no
+libdatachannel at all — and is therefore **not** gated on `FPS_ENABLE_WEBRTC`.
+Emscripten ships no binding for it, so `eng::WebRtcClient` is hand-written JS
+behind a small C boundary; everything crossing it is an int, a C string or a
+byte buffer.
+
+It is split the same way the server is, and for the same reason:
+
+| Layer | Knows about | Does not know about |
+|---|---|---|
+| `eng::WebRtcClient` | `RTCPeerConnection`, channels | the game's wire protocol |
+| `game::make_rtc_client_transport` | `MessageType::Rtc*` | how ICE works |
+| `game::SignallingRouter` (server) | `MessageType::Rtc*` | libdatachannel |
+
+The first draft of this had `engine/` writing `writer.u8(15)` with a comment
+pointing at `protocol.h`. That is a duplicate of the protocol that no compiler
+checks — and it went stale immediately, because 15 and 16 were taken by
+`Leaderboard` and `KillCam` by the time the branch was finished. Signalling
+encode/decode lives in `game/` on both sides now.
+
+### Choosing it
+
+An `rtc://host:port` address selects WebRTC and signals over `ws://` on the
+same URL; `rtcs://` pairs with `wss://`. The address says which transport to
+use, so there is no new UI and no rebuild:
+
+```
+fps_client.html?connect=rtc://localhost:7788&name=you
+```
+
+`?connect=` and `?name=` exist because a browser has no argv. They double as
+a shareable join link, and they are what makes the connection path drivable
+from an automated browser test.
+
+### The handshake, in order
+
+1. `WebRtcClient::create()` builds the peer connection and both channels and
+   starts `createOffer()`. This happens **before** the signalling socket is
+   open: ICE gathering is the slow half, so starting it during the socket's
+   HTTP upgrade means the offer is usually ready by the time there is
+   somewhere to send it.
+2. Offer and local candidates are queued until the socket reports open.
+   `emscripten_websocket_send_binary` silently drops before then, so anything
+   not queued is simply lost — which is what the first attempt at this got
+   wrong, and it presented as "the handshake never starts".
+3. The server's router accepts the offer, allocates a WebRTC peer, and sends
+   the answer back **down the socket that offered**.
+4. Only when *both* channels report `open` does the transport report
+   `Connected` upward. A half-open pair would drop whichever kind of traffic
+   went to the channel that never opened.
+5. `NetClient` then sends its `ClientHello` over the DataChannel, so the
+   server sees exactly one session per player. The signalling socket stays
+   connected but carries no more game traffic; it sits in the server's peer
+   table forever "awaiting hello", which is correct — it is not a player.
+
+Verified end to end against a real browser and a real `--webrtc` server:
+
+```
+Peer 1 connected (awaiting hello)             <- signalling WebSocket
+Signalling peer 1 -> WebRTC peer 1            <- offer accepted
+Peer 16777217 connected (awaiting hello)      <- the DataChannel
+Player 2 'webrtc_ok' joined (peer 16777217)   <- hello arrived over WebRTC
+```
+
+### Known limitation
+
+A hidden browser tab stops running `requestAnimationFrame`, so the client
+stops draining its receive queue and the backlog grows until the tab is
+foregrounded again. This is not specific to WebRTC — the WebSocket transport
+queues in exactly the same way — but it is more visible here because the
+queue lives in JS where it is easy to look at.

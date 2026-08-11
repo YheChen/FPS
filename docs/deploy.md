@@ -205,6 +205,25 @@ exposed.
 
 </details>
 
+### Optional: accept WebRTC clients
+
+Browsers reach the server over WebSockets, which is TCP and head-of-line
+blocks. `--webrtc` also accepts DataChannel clients, which gives browsers real
+UDP semantics (docs/networking.md). It needs `--ws-port`, because signalling
+rides that connection:
+
+```bash
+./build/release/game/fps_server --ws-port 7778 --no-enet --webrtc --bots 2
+```
+
+**The deployed stack does not run this.** `deploy/Dockerfile` builds with
+`FPS_ENABLE_WEBRTC=OFF`, so the image has no `--webrtc` at all and browsers on
+the live site connect over `wss://`. Turning it on means fetching
+libdatachannel (five submodules and a TLS backend) into the image and opening
+a UDP port range on the router — a deployment change, not a flag. Until then
+`rtc://` works against a locally built server, which is what it was verified
+against.
+
 ## 2. Keep the laptop awake
 
 This applies either way, Docker or not. A closed lid suspends the machine on a

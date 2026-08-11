@@ -17,9 +17,13 @@
 #include "engine/net/composite_transport.h"
 #include "engine/net/transport.h"
 #include "engine/net/websocket_host.h"
+#if defined(FPS_HAS_WEBRTC)
+#include "engine/net/webrtc_host.h"
+#endif
 #include "engine/physics/character_controller.h"
 #include "engine/physics/physics_world.h"
 #include "game/server/server_game.h"
+#include "game/server/signalling_router.h"
 #include "game/shared/bot.h"
 #include "game/shared/player_movement.h"
 #include "game/shared/replay.h"
@@ -31,6 +35,9 @@ struct ServerArgs {
     std::uint16_t port = 7777;             // ENet/UDP (native clients)
     std::optional<std::uint16_t> ws_port;  // WebSocket/TCP (browser clients)
     bool enet = true;                      // --no-enet to run WS-only
+    // --webrtc: also accept browser DataChannel clients. Needs --ws-port,
+    // because signalling rides that connection.
+    bool webrtc = false;
     std::optional<double> run_seconds;
     bool verbose = false;
     std::optional<std::string> record_path;             // --record: write a replay
@@ -72,6 +79,8 @@ ServerArgs parse_args(int argc, char** argv) {
             }
         } else if (arg == "--no-enet") {
             args.enet = false;
+        } else if (arg == "--webrtc") {
+            args.webrtc = true;
         } else if (arg == "--run-seconds") {
             if (const auto value = next_value()) {
                 double seconds = 0.0;
@@ -180,6 +189,42 @@ int run_replay(const std::filesystem::path& path,
     return 0;
 }
 
+#if defined(FPS_HAS_WEBRTC)
+// Adapts eng::WebRtcHost to the narrow interface SignallingRouter talks to.
+//
+// The two Signal types are deliberately not shared. game/ must keep building
+// when libdatachannel was never fetched, which is the default -- so the
+// router cannot name a type that lives in the optional half, and this
+// four-line copy is what buys that.
+class WebRtcSignallingHost final : public game::SignallingHost {
+public:
+    explicit WebRtcSignallingHost(eng::WebRtcHost& host) : host_(host) {}
+
+    std::optional<std::uint32_t> accept_offer(const std::string& sdp) override {
+        return host_.accept_offer(sdp);
+    }
+    void add_remote_candidate(std::uint32_t peer, const std::string& candidate,
+                              const std::string& mid) override {
+        host_.add_remote_candidate(peer, candidate, mid);
+    }
+    void take_signals(std::vector<Signal>& out) override {
+        raw_.clear();
+        host_.take_signals(raw_);
+        for (const eng::WebRtcHost::Signal& signal : raw_) {
+            out.push_back({signal.peer,
+                           signal.type == eng::WebRtcHost::Signal::Type::Answer
+                               ? Signal::Type::Answer
+                               : Signal::Type::Candidate,
+                           signal.data, signal.mid});
+        }
+    }
+
+private:
+    eng::WebRtcHost& host_;
+    std::vector<eng::WebRtcHost::Signal> raw_;
+};
+#endif  // FPS_HAS_WEBRTC
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -269,11 +314,46 @@ int main(int argc, char** argv) {
         }
         transports.push_back(std::make_unique<eng::WebSocketHost>(std::move(*host)));
     }
+    // The WebRTC host is a CompositeTransport child like any other, so
+    // ServerGame cannot tell a DataChannel player from an ENet one.
+#if defined(FPS_HAS_WEBRTC)
+    eng::WebRtcHost* webrtc_host = nullptr;
+    if (args.webrtc) {
+        if (!args.ws_port) {
+            eng::log::error("--webrtc needs --ws-port: signalling rides the WebSocket connection");
+            return 1;
+        }
+        auto host = eng::WebRtcHost::create({.max_peers = game::kMaxPlayers, .ice_servers = {}});
+        if (!host) {
+            return 1;
+        }
+        auto owned = std::make_unique<eng::WebRtcHost>(std::move(*host));
+        webrtc_host = owned.get();
+        transports.push_back(std::move(owned));
+        eng::log::info("WebRTC DataChannel clients accepted (signalling on the WebSocket port)");
+    }
+#else
+    if (args.webrtc) {
+        eng::log::error("--webrtc: this build has no WebRTC support");
+        eng::log::error("  rebuild with -DFPS_ENABLE_WEBRTC=ON (see docs/networking.md)");
+        return 1;
+    }
+#endif
+
     if (transports.empty()) {
         eng::log::error("No transport enabled (use --no-enet only with --ws-port)");
         return 1;
     }
     eng::CompositeTransport net{std::move(transports)};
+
+#if defined(FPS_HAS_WEBRTC)
+    std::optional<WebRtcSignallingHost> signalling_host;
+    std::optional<game::SignallingRouter> signalling;
+    if (webrtc_host != nullptr) {
+        signalling_host.emplace(*webrtc_host);
+        signalling.emplace(*signalling_host);
+    }
+#endif
 
     game::ServerGame server{std::move(collision), std::move(spawns), map_path, std::move(arsenal)};
     server.set_bot_config(game::bot_config_for(args.bot_skill));
@@ -304,8 +384,23 @@ int main(int argc, char** argv) {
         events.clear();
         net.poll(events);
         for (const eng::NetEvent& event : events) {
+#if defined(FPS_HAS_WEBRTC)
+            // Signalling is consumed here, in front of the game. See
+            // signalling_router.h for why it must not reach ServerGame.
+            if (signalling && signalling->intercept(event)) {
+                continue;
+            }
+#endif
             server.handle_event(event, net);
         }
+#if defined(FPS_HAS_WEBRTC)
+        // Every frame, not only when something arrived: answers and
+        // candidates are produced asynchronously by the ICE agent, and ICE
+        // stalls if they are not delivered.
+        if (signalling) {
+            signalling->pump(net);
+        }
+#endif
 
         step.advance(clock.tick());
         while (step.consume_tick()) {

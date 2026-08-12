@@ -21,6 +21,11 @@ public:
     void f32(float value);
     // u8 length prefix + UTF-8 bytes. `value` must be <= 255 bytes.
     void str(std::string_view value);
+    // u16 length prefix + UTF-8 bytes, for the one thing on this wire that is
+    // genuinely kilobytes: an SDP session description. Kept separate from
+    // str() rather than widening it, so every existing field keeps its
+    // one-byte prefix and a 300-byte player name stays impossible.
+    void long_str(std::string_view value);
 
     std::span<const std::uint8_t> data() const { return buffer_; }
     std::size_t size() const { return buffer_.size(); }
@@ -40,6 +45,10 @@ public:
     std::optional<float> f32();
     // Rejects length 0 or length > max_length.
     std::optional<std::string> str(std::size_t max_length);
+    // The u16-prefixed counterpart. `max_length` is still enforced by the
+    // caller's own limit, so a hostile peer cannot make us allocate 64 KB
+    // just by claiming to.
+    std::optional<std::string> long_str(std::size_t max_length);
 
     bool ok() const { return !failed_; }
     std::size_t remaining() const { return data_.size() - position_; }

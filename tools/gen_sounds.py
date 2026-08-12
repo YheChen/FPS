@@ -5,7 +5,10 @@ Pure stdlib (wave + math + random with fixed seed) so the sounds are
 reproducible anywhere. The feedback beeps are still deliberately simple
 synthesized placeholders; the four weapon reports are not, because a player
 has to tell the guns apart blind and that is a property of the SET rather
-than of any one file -- see the table above rifle_fire().
+than of any one file -- see the table above rifle_fire(). The footsteps are
+not either, for the same reason and one more: they are the sound a player is
+expected to LOCALISE, and localisation is a spectral property -- see the
+table above footstep().
 
 Usage: python3 tools/gen_sounds.py
 """
@@ -410,6 +413,123 @@ def sniper_fire():
     return fade_out(normalize(soft_clip(shot, 1.9), 0.95), 0.020)
 
 
+# --- footsteps -------------------------------------------------------------
+# The most-played sound in the game by a wide margin: one moving player emits
+# ~2.5 a second, eight of them emit twenty. Everything below follows from that
+# number rather than from what a single footstep "should" sound like.
+#
+#  - Under 100 ms, so consecutive steps never overlap even at the sprint
+#    cadence (a step every 258 ms at 9.3 m/s).
+#  - No pitched resonator anywhere. A narrow peak heard twenty times a second
+#    stops being a texture and becomes a tone, and a tone that never resolves
+#    is the definition of listening fatigue. Everything here is either noise
+#    or a glide that never sits still.
+#  - Peak 0.55, well under the weapons (0.80-0.95). A footstep must be
+#    information you can hear THROUGH gunfire, not something that competes
+#    with it; the client's own gain ramp does the rest.
+#  - Sealed at both ends (attack_ramp/fade_out). A truncated 90 ms tail is a
+#    click, and twenty clicks a second is all anyone would hear.
+#
+# The spectral balance is the part that is easy to get wrong, and it was:
+# built by ear-free intuition the heel dominated so completely that 96% of a
+# step's energy sat under 400 Hz. That is not merely dull, it is USELESS --
+# below ~500 Hz a wavelength is longer than a head, interaural level
+# difference collapses, and the listener cannot tell which side the sound came
+# from. A footstep nobody can point at is not worth playing. So each layer is
+# peak-normalised to a stated level (the volume arguments of a sine and of
+# band-passed noise are not comparable: one-pole filters throw most of the
+# noise away, so equal "volume" is nowhere near equal loudness), and the
+# finished step is measured, not assumed. Target: roughly half the energy
+# under 400 Hz for weight, a quarter above 2 kHz for direction.
+#
+# The four variants are one pair of boots on one floor, not four different
+# events, so they share the recipe and differ only where two real consecutive
+# steps differ: the heel pitch (a few percent), how much of the sole caught,
+# and the balance between the two. The client also jitters level and playback
+# pitch per step, so the audible period is far longer than four.
+#
+# Measured on the rendered files (FFT band shares, % of total energy). The
+# four steps are a tight cluster and the landing is nowhere near it -- that
+# separation is the point: a landing must never be mistaken for a step, and it
+# is told apart by TILT (1.8 kHz centroid against ~4.5 kHz) rather than by
+# level, because level is what distance already spends.
+#
+#   sound     length   peak   <400 Hz   >2 kHz   centroid
+#   step1      65 ms   0.55     46%       44%     4518 Hz
+#   step2      65 ms   0.55     58%       37%     3783 Hz
+#   step3      65 ms   0.55     48%       42%     5096 Hz
+#   step4      65 ms   0.55     51%       43%     4770 Hz
+#   land      200 ms   0.78     75%       18%     1800 Hz
+STEP_VARIANTS = [
+    # seed,   heel Hz, scuff band,      heel, scuff
+    (0x57A1, 132.0, (2100.0, 7000.0), 0.38, 0.85),
+    (0x57A2, 121.0, (1900.0, 6400.0), 0.42, 0.80),
+    (0x57A3, 142.0, (2500.0, 7600.0), 0.35, 0.90),
+    (0x57A4, 126.0, (2000.0, 6800.0), 0.40, 0.82),
+]
+
+
+def footstep(seed, heel_hz, scuff_band, heel_level, scuff_level):
+    """One footfall on concrete: a heel, a sole, and the room noticing."""
+    rng = random.Random(seed)
+
+    # 0-40 ms. The heel. A falling glide rather than a fixed pitch, because a
+    # boot on concrete is a struck plate whose contact patch grows as it
+    # flattens -- and because a fixed pitch is exactly the thing that would
+    # ring after the twentieth repeat.
+    heel = sweep(0.040, heel_hz, heel_hz * 0.58, decay=58.0, volume=heel_level)
+    # 0-20 ms. The sole. Band-limited noise well above the heel, so the two
+    # layers occupy different bands and the ear hears one event with weight
+    # AND edge instead of two stacked sounds. This is also the layer with the
+    # high-frequency detail the panner localises on, which is the entire
+    # reason a footstep is worth hearing -- hence the peak ABOVE the heel's.
+    scuff = normalize(decay_envelope(band_pass(white_noise(0.020, rng), scuff_band[0],
+                                               scuff_band[1]), 200.0), scuff_level)
+    # 3-28 ms. Grit under the boot, bridging the gap between heel and scuff so
+    # the step is not two disconnected bands. Delayed a few ms so it colours
+    # the decay rather than blunting the transient.
+    grit = delayed(normalize(decay_envelope(band_pass(white_noise(0.025, rng), 700.0, 2600.0),
+                                            150.0), 0.34), 0.003)
+    # A dark, very quiet room slap. Without it a step is a click in a vacuum;
+    # any more of it and eight players moving turn the arena into a swamp.
+    tail = delayed(normalize(low_pass(noise_burst(0.055, 42.0, 1.0, rng), 1200.0), 0.05), 0.010)
+
+    step = mix(heel, scuff, grit, tail)[:seconds(0.095)]
+    return normalize(fade_out(attack_ramp(step, 0.0004), 0.012), 0.55)
+
+
+def landing():
+    """Arriving from a jump or a drop. Deliberately not "a louder footstep":
+    it is a whole body stopping, so it is an octave lower, three times as long
+    and carries gear rattle -- and it is a discrete event rather than one of a
+    stream, which is what buys it the length and the 0.78 peak."""
+    rng = random.Random(0x1A2D)
+
+    # 0-200 ms. The mass. An octave under a footstep's heel and five times as
+    # long; this is what says "person", not "pebble".
+    thud = sweep(0.200, 96.0, 44.0, decay=17.0, volume=0.55)
+    # The floor answering. Sweeping the cutoff shut turns a broadband impact
+    # into low-end residue over 150 ms, which is what a real room does and
+    # what no static filter can imitate.
+    body = normalize(decay_envelope(low_pass(white_noise(0.150, rng), 900.0, 260.0), 26.0), 0.45)
+    # Both boots, 12 ms apart. Nobody lands in unison, and 12 ms is inside the
+    # fusion window, so it widens the transient instead of reading as two.
+    slap = mix(normalize(decay_envelope(band_pass(white_noise(0.030, rng), 1400.0, 6500.0), 210.0),
+                         0.80),
+               delayed(normalize(decay_envelope(band_pass(white_noise(0.030, rng), 1200.0, 5600.0),
+                                                230.0), 0.55), 0.012))
+    # 40-140 ms. Kit settling after the impact. It is the cue that separates a
+    # landing from a footstep at a distance, where the falloff curve and the
+    # air have eaten the low end and only the top of the sound survives.
+    rattle = delayed(normalize(decay_envelope(band_pass(white_noise(0.100, rng), 2400.0, 9000.0),
+                                              34.0), 0.22), 0.040)
+
+    out = mix(thud, body, slap, rattle)[:seconds(0.210)]
+    # High-passed before the normalise for the same reason the shotgun is:
+    # sub-40 Hz content nothing can reproduce is pure burnt headroom.
+    return normalize(fade_out(attack_ramp(high_pass(out, 35.0), 0.0004), 0.025), 0.78)
+
+
 def main():
     root = Path(__file__).resolve().parent.parent / "assets" / "sounds"
     rng = random.Random(42)
@@ -450,6 +570,14 @@ def main():
 
     # Jump: soft thump.
     write_wav(root / "jump.wav", tone(0.08, 180, 120, decay=30, volume=0.4))
+
+    # Footsteps and the landing that ends a jump. Each owns its RNG seed for
+    # the same reason the weapons do: re-cutting one variant must not shift
+    # the other three, or a one-line tweak becomes a five-file binary diff.
+    for index, (seed, heel_hz, band, heel_level, scuff_level) in enumerate(STEP_VARIANTS, start=1):
+        write_wav(root / f"step{index}.wav",
+                  footstep(seed, heel_hz, band, heel_level, scuff_level))
+    write_wav(root / "land.wav", landing())
 
 
 if __name__ == "__main__":

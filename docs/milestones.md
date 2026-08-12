@@ -864,8 +864,40 @@ packet); a full host refusing further offers; a malformed offer rejected
 spamming garbage; and operations on an unknown peer being ignored rather than
 throwing.
 
-**Still to do (M19b):** the browser client. Emscripten ships no WebRTC
-DataChannel binding, so it is hand-written JS glue around `RTCPeerConnection`
-wired into `eng::IClientTransport`, plus carrying signalling over the existing
-WebSocket connection. The Windows OpenSSL question also stays open — likely
-answered by `-DUSE_MBEDTLS=ON`.
+## M19b — the browser actually speaks WebRTC
+
+The browser half, which M19a deliberately left out. A browser already has an
+`RTCPeerConnection`, so this needs no libdatachannel and is not gated on
+`FPS_ENABLE_WEBRTC`: `eng::WebRtcClient` is hand-written JS behind a small C
+boundary, and `game::make_rtc_client_transport` joins it to a WebSocket
+carrying `RtcOffer`/`RtcAnswer`/`RtcCandidate`.
+
+An `rtc://host:port` address selects it (`rtcs://` for TLS), so no new UI and
+no rebuild. `?connect=` and `?name=` read from the URL, because a browser has
+no argv.
+
+**The bug the WIP branch died on:** the offer was sent only after the
+signalling socket reported open, but nothing queued it if it was ready first
+— and `emscripten_websocket_send_binary` drops silently before the socket is
+open, so the offer simply vanished and the handshake never started. Anything
+produced before the socket opens is queued now.
+
+**Protocol 8.** Three new message types; `read_message_type` bounds-checks
+against the last enumerator, so adding them without moving that bound would
+have made them unreadable — there is a test for exactly that.
+
+**Tests:** 253 (+17). Nine of them are the signalling router, which is the
+piece that decides which bytes `ServerGame` is allowed to see and which socket
+an answer goes back down. Both are addressing questions, and addressing bugs
+stay invisible until two clients negotiate at once, so most of those cases use
+two — including a host that answers the second peer first.
+
+**Verified in a browser**, against a real `--webrtc` server, not only in
+tests: the client negotiates in ~2.6 s and joins over the DataChannel, and the
+server logs the signalling peer and the DataChannel peer as separate peers,
+with the `ClientHello` arriving on the second.
+
+The Windows OpenSSL question stays open — likely answered by
+`-DUSE_MBEDTLS=ON`. The deployed server does not run `--webrtc` yet: the
+Docker image builds with `FPS_ENABLE_WEBRTC=OFF`, so browsers on the live site
+still connect over `wss://`.

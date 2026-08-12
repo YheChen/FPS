@@ -4,12 +4,40 @@
 #include <utility>
 
 #include "engine/core/log.h"
+#if defined(__EMSCRIPTEN__)
+#include "game/client/rtc_transport.h"
+#endif
 
 namespace game {
 
+namespace {
+
+// An "rtc://" address selects the WebRTC transport, signalling over the ws://
+// form of the same URL; "rtcs://" pairs with wss://. Same spirit as the
+// existing ws:// / wss:// convention -- the address says which transport to
+// use, so trying one against a given server needs no new UI and no rebuild.
+//
+// The dispatch lives here rather than in eng::make_client_transport because
+// the WebRTC path needs the game's protocol to encode signalling, and engine/
+// must not depend on game/.
+std::unique_ptr<eng::IClientTransport> open_transport(const std::string& host, std::uint16_t port) {
+#if defined(__EMSCRIPTEN__)
+    constexpr std::string_view kRtc = "rtc://";
+    constexpr std::string_view kRtcs = "rtcs://";
+    if (host.starts_with(kRtc) || host.starts_with(kRtcs)) {
+        const bool secure = host.starts_with(kRtcs);
+        const std::string rest = host.substr(secure ? kRtcs.size() : kRtc.size());
+        return make_rtc_client_transport((secure ? "wss://" : "ws://") + rest);
+    }
+#endif
+    return eng::make_client_transport(host, port);
+}
+
+}  // namespace
+
 std::optional<NetClient> NetClient::connect(const std::string& host, std::uint16_t port,
                                             std::string player_name) {
-    auto transport = eng::make_client_transport(host, port);
+    auto transport = open_transport(host, port);
     if (!transport) {
         return std::nullopt;
     }
@@ -99,8 +127,9 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
         }
         case MessageType::ServerReject: {
             if (const auto reject = read_server_reject(reader)) {
-                eng::log::error("Server rejected connection (reason {})",
-                                static_cast<int>(reject->reason));
+                eng::log::error("Server rejected connection: {}",
+                                reject_reason_name(reject->reason));
+                reject_reason_ = reject->reason;
                 state_ = State::Rejected;
             }
             break;
@@ -214,6 +243,14 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
         case MessageType::ClientHello:
         case MessageType::Input:
             break;  // client-to-server only; a server sending these is broken
+        case MessageType::RtcOffer:
+        case MessageType::RtcAnswer:
+        case MessageType::RtcCandidate:
+            // Signalling never reaches the game: the WebRTC transport
+            // consumes it on the signalling socket, and NetClient only ever
+            // sees the DataChannel. One arriving here means a server sent
+            // signalling down a connection that was not negotiating.
+            break;
     }
 }
 

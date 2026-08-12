@@ -1,5 +1,7 @@
 #include "game/shared/protocol.h"
 
+#include <string_view>
+
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
@@ -10,6 +12,36 @@ std::vector<std::uint8_t> encode(const Message& message) {
     eng::ByteWriter writer;
     game::write(writer, message);
     return {writer.data().begin(), writer.data().end()};
+}
+
+// The reason byte used to go nowhere: the client logged it as an integer and
+// showed every refusal as "server rejected the connection". It now decides
+// behaviour -- VersionMismatch means wait for the other half of the deploy and
+// retry, the others mean stop -- so the value has to survive the wire intact.
+TEST_CASE("ServerReject carries which refusal it was", "[protocol]") {
+    for (const game::RejectReason reason :
+         {game::RejectReason::VersionMismatch, game::RejectReason::ServerFull,
+          game::RejectReason::BadName}) {
+        const auto bytes = encode(game::ServerReject{reason});
+        eng::ByteReader r{{bytes.data(), bytes.size()}};
+        REQUIRE(game::read_message_type(r) == game::MessageType::ServerReject);
+        const auto m = game::read_server_reject(r);
+        REQUIRE(m.has_value());
+        CHECK(m->reason == reason);
+    }
+}
+
+TEST_CASE("every reject reason has a name a player could read", "[protocol]") {
+    CHECK(std::string_view{game::reject_reason_name(game::RejectReason::VersionMismatch)} ==
+          "version mismatch");
+    CHECK(std::string_view{game::reject_reason_name(game::RejectReason::ServerFull)} ==
+          "server full");
+    CHECK(std::string_view{game::reject_reason_name(game::RejectReason::BadName)} == "bad name");
+    // A value off the end of the enum must still produce a string: this is
+    // reached from a decoded packet, and the alternative is falling off the
+    // end of a function that returns a pointer someone then prints.
+    CHECK(std::string_view{game::reject_reason_name(static_cast<game::RejectReason>(200))} ==
+          "unknown");
 }
 
 TEST_CASE("hello/welcome/joined/left round-trip", "[protocol]") {
@@ -428,6 +460,81 @@ TEST_CASE("the killcam round-trips and rejects hostile input", "[protocol]") {
         game::read_message_type(reader);
         CHECK(game::read_kill_cam(reader) == std::nullopt);
     }
+}
+
+// --- WebRTC signalling (M19b) ----------------------------------------------
+// These three are the only messages the game layer never sees; a signalling
+// router in front of ServerGame consumes them. That makes their framing the
+// only thing standing between a hostile browser and the SDP parser.
+
+TEST_CASE("rtc offer and answer round-trip a realistic SDP", "[protocol]") {
+    const std::string sdp =
+        "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\n" + std::string(3000, 'a');
+
+    eng::ByteWriter w;
+    write(w, game::RtcOfferMsg{sdp});
+    eng::ByteReader r{w.data()};
+    REQUIRE(game::read_message_type(r) == game::MessageType::RtcOffer);
+    const auto offer = game::read_rtc_offer(r);
+    REQUIRE(offer);
+    CHECK(offer->sdp == sdp);
+
+    eng::ByteWriter w2;
+    write(w2, game::RtcAnswerMsg{sdp});
+    eng::ByteReader r2{w2.data()};
+    REQUIRE(game::read_message_type(r2) == game::MessageType::RtcAnswer);
+    const auto answer = game::read_rtc_answer(r2);
+    REQUIRE(answer);
+    CHECK(answer->sdp == sdp);
+}
+
+TEST_CASE("rtc candidate round-trips", "[protocol]") {
+    eng::ByteWriter w;
+    write(w, game::RtcCandidateMsg{"candidate:1 1 UDP 2130706431 192.168.1.2 54321 typ host", "0"});
+    eng::ByteReader r{w.data()};
+    REQUIRE(game::read_message_type(r) == game::MessageType::RtcCandidate);
+    const auto candidate = game::read_rtc_candidate(r);
+    REQUIRE(candidate);
+    CHECK(candidate->candidate == "candidate:1 1 UDP 2130706431 192.168.1.2 54321 typ host");
+    CHECK(candidate->mid == "0");
+}
+
+TEST_CASE("an oversized SDP is rejected rather than allocated", "[protocol]") {
+    // Hand-framed: the writer would never produce this, but a peer can.
+    eng::ByteWriter w;
+    w.u8(static_cast<std::uint8_t>(game::MessageType::RtcOffer));
+    w.u16(60000);  // claims 60 KB, sends none
+    eng::ByteReader r{w.data()};
+    REQUIRE(game::read_message_type(r) == game::MessageType::RtcOffer);
+    CHECK_FALSE(game::read_rtc_offer(r).has_value());
+}
+
+TEST_CASE("signalling messages reject trailing bytes", "[protocol]") {
+    eng::ByteWriter w;
+    write(w, game::RtcAnswerMsg{"v=0"});
+    std::vector<std::uint8_t> raw{w.data().begin(), w.data().end()};
+    raw.push_back(0x00);  // one byte too many
+
+    eng::ByteReader r{raw};
+    REQUIRE(game::read_message_type(r) == game::MessageType::RtcAnswer);
+    CHECK_FALSE(game::read_rtc_answer(r).has_value());
+}
+
+TEST_CASE("the signalling types are inside the accepted type range", "[protocol]") {
+    // read_message_type bounds-checks against the LAST enumerator, so adding
+    // a message without moving that bound silently makes it unreadable.
+    for (const auto type : {game::MessageType::RtcOffer, game::MessageType::RtcAnswer,
+                            game::MessageType::RtcCandidate}) {
+        eng::ByteWriter w;
+        w.u8(static_cast<std::uint8_t>(type));
+        eng::ByteReader r{w.data()};
+        CHECK(game::read_message_type(r) == type);
+    }
+    // ...and one past the end is still refused.
+    eng::ByteWriter w;
+    w.u8(static_cast<std::uint8_t>(game::MessageType::RtcCandidate) + 1);
+    eng::ByteReader r{w.data()};
+    CHECK_FALSE(game::read_message_type(r).has_value());
 }
 
 }  // namespace

@@ -195,12 +195,28 @@ void write(eng::ByteWriter& w, const WeaponStatusMsg& m) {
     w.u8(m.switching ? 1u : 0u);
 }
 
+void write(eng::ByteWriter& w, const RtcOfferMsg& m) {
+    w.u8(static_cast<std::uint8_t>(MessageType::RtcOffer));
+    w.long_str(m.sdp);
+}
+
+void write(eng::ByteWriter& w, const RtcAnswerMsg& m) {
+    w.u8(static_cast<std::uint8_t>(MessageType::RtcAnswer));
+    w.long_str(m.sdp);
+}
+
+void write(eng::ByteWriter& w, const RtcCandidateMsg& m) {
+    w.u8(static_cast<std::uint8_t>(MessageType::RtcCandidate));
+    w.long_str(m.candidate);
+    w.str(m.mid);
+}
+
 // --- decode -----------------------------------------------------------------
 
 std::optional<MessageType> read_message_type(eng::ByteReader& r) {
     const auto value = r.u8();
     if (!value || *value < static_cast<std::uint8_t>(MessageType::ClientHello) ||
-        *value > static_cast<std::uint8_t>(MessageType::KillCam)) {
+        *value > static_cast<std::uint8_t>(MessageType::RtcCandidate)) {
         return std::nullopt;
     }
     return static_cast<MessageType>(*value);
@@ -491,6 +507,31 @@ std::optional<WeaponStatusMsg> read_weapon_status(eng::ByteReader& r) {
         return std::nullopt;
     }
     return WeaponStatusMsg{*ammo, *reloading == 1, *slot, *magazine, *switching == 1};
+}
+
+std::optional<RtcOfferMsg> read_rtc_offer(eng::ByteReader& r) {
+    const auto sdp = r.long_str(kMaxSdpLength);
+    if (!sdp || !r.finished()) {
+        return std::nullopt;
+    }
+    return RtcOfferMsg{*sdp};
+}
+
+std::optional<RtcAnswerMsg> read_rtc_answer(eng::ByteReader& r) {
+    const auto sdp = r.long_str(kMaxSdpLength);
+    if (!sdp || !r.finished()) {
+        return std::nullopt;
+    }
+    return RtcAnswerMsg{*sdp};
+}
+
+std::optional<RtcCandidateMsg> read_rtc_candidate(eng::ByteReader& r) {
+    const auto candidate = r.long_str(kMaxCandidateLength);
+    const auto mid = r.str(kMaxMidLength);
+    if (!candidate || !mid || !r.finished()) {
+        return std::nullopt;
+    }
+    return RtcCandidateMsg{*candidate, *mid};
 }
 
 }  // namespace game

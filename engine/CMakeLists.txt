@@ -81,6 +81,15 @@ if(FPS_ENABLE_WEBRTC)
     target_compile_definitions(engine PUBLIC FPS_HAS_WEBRTC)
 endif()
 
+# The BROWSER half of WebRTC is not gated on FPS_ENABLE_WEBRTC, and needs no
+# libdatachannel: a browser already has an RTCPeerConnection, so this is
+# hand-written JS behind a C boundary. Gating it would mean the web client
+# could only speak WebRTC in a configuration that fetches a large native
+# dependency it never links.
+if(EMSCRIPTEN)
+    target_sources(engine PRIVATE net/webrtc_client.cpp net/webrtc_client.h)
+endif()
+
 fps_set_warnings(engine)
 fps_enable_sanitizers(engine)
 

@@ -1,12 +1,15 @@
 #include "engine/assets/gltf_loader.h"
 
 #include <algorithm>
+#include <optional>
+#include <string>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include "engine/assets/asset_cache.h"
 #include "engine/assets/paths.h"
+#include "game/shared/weapon.h"
 
 namespace {
 
@@ -97,24 +100,143 @@ TEST_CASE("every shipped map satisfies what the server relies on", "[gltf]") {
     }
 }
 
+// The viewmodel reads three things out of a weapon asset and nothing else:
+// geometry, a grip at the origin, and a `muzzle` marker. All three are silent
+// when they go wrong -- a regenerated weapon that lost its marker still loads,
+// still draws, and simply never flashes again -- so they are asserted here
+// rather than left to whoever next edits gen_weapons.py.
+//
+// Whether a weapon HAS a muzzle is not a property of its slot: it is the
+// weapon's own melee flag, which is exactly the rule the client implements by
+// keying the flash off the marker's presence.
+TEST_CASE("every shipped weapon satisfies what the viewmodel relies on", "[gltf]") {
+    static eng::AssetCache cache{*eng::find_assets_root()};
+    const auto assets_root = eng::find_assets_root();
+    REQUIRE(assets_root.has_value());
+
+    for (const char* name : {"rifle", "smg", "shotgun", "sniper", "knife"}) {
+        CAPTURE(name);
+        const auto config_text =
+            eng::read_text_file(*assets_root / "weapons" / (std::string(name) + ".cfg"));
+        REQUIRE(config_text.has_value());
+        const auto config = game::parse_weapon_config(*config_text);
+        REQUIRE(config.has_value());
+
+        const eng::GltfModel* model = cache.model("weapons/" + std::string(name) + ".glb");
+        REQUIRE(model != nullptr);
+
+        std::optional<glm::vec3> muzzle;
+        glm::vec3 lo{1e9f};
+        glm::vec3 hi{-1e9f};
+        std::size_t boxes = 0;
+        for (const eng::GltfNode& node : model->nodes) {
+            if (node.mesh < 0) {
+                if (node.name == "muzzle") {
+                    muzzle = glm::vec3(node.transform[3]);
+                }
+                continue;
+            }
+            ++boxes;
+            for (const eng::GltfPrimitive& primitive :
+                 model->meshes[static_cast<std::size_t>(node.mesh)].primitives) {
+                // Every material must resolve, or the box draws untinted white
+                // and the whole "dark gun against a pale world" read is gone.
+                CHECK(primitive.material >= 0);
+                for (const eng::Vertex& vertex : primitive.mesh.vertices) {
+                    const glm::vec3 local =
+                        glm::vec3(node.transform * glm::vec4(vertex.position, 1.0f));
+                    lo = glm::min(lo, local);
+                    hi = glm::max(hi, local);
+                }
+            }
+        }
+        CHECK(boxes >= 5);
+
+        // The grip IS the origin: both the viewmodel and any future hand-joint
+        // attach add the same offset and no per-weapon correction.
+        CHECK(lo.x <= 0.0f);
+        CHECK(hi.x >= 0.0f);
+        CHECK(lo.y <= 0.0f);
+        CHECK(hi.y >= 0.0f);
+        CHECK(lo.z <= 0.0f);
+        CHECK(hi.z >= 0.0f);
+
+        if (config->melee) {
+            // A knife with a muzzle node would spit fire out of its blade.
+            CHECK_FALSE(muzzle.has_value());
+            continue;
+        }
+        REQUIRE(muzzle.has_value());
+        // Ahead of every box, so the additive flash is not born inside the
+        // barrel and half depth-rejected by it -- but only just ahead, or it
+        // detaches from the gun it is supposed to be leaving.
+        CHECK(muzzle->z < lo.z);
+        CHECK(muzzle->z > lo.z - 0.05f);
+        // On the weapon's centreline and on the shared bore axis: the hold is
+        // one offset for the arsenal, so a bore that moved per weapon would
+        // move the barrel up and down the screen on every switch.
+        CHECK(muzzle->x == Catch::Approx(0.0f).margin(1e-4f));
+        CHECK(muzzle->y == Catch::Approx(0.105f).margin(1e-4f));
+    }
+}
+
 TEST_CASE("arena materials reference decoded textures", "[gltf]") {
     const eng::GltfModel* model = load_arena();
     REQUIRE(model != nullptr);
 
-    REQUIRE(model->images.size() == 4);
+    // An albedo and a normal map per material.
+    REQUIRE(model->images.size() == 8);
     for (const eng::GltfImage& image : model->images) {
         CHECK(image.valid());
-        CHECK(image.width == 256);
-        CHECK(image.height == 256);
+        CHECK(image.width == image.height);
         // RGBA8, tightly packed.
         CHECK(image.pixels.size() ==
               static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height) * 4);
     }
 
     for (const eng::GltfMaterial& material : model->materials) {
+        CAPTURE(material.name);
         REQUIRE(material.base_color_image >= 0);
         CHECK(static_cast<std::size_t>(material.base_color_image) < model->images.size());
         CHECK(material.roughness > 0.0f);
+
+        // Every arena material is normal-mapped, and never by the same image
+        // it uses for albedo: the two are uploaded with different sRGB
+        // settings, so sharing one would have to be wrong for one of them.
+        REQUIRE(material.normal_image >= 0);
+        CHECK(static_cast<std::size_t>(material.normal_image) < model->images.size());
+        CHECK(material.normal_image != material.base_color_image);
+        CHECK(material.normal_scale == Catch::Approx(1.0f));
+
+        // Normal maps ship at half the albedo's resolution to keep the
+        // browser download down; if that ratio ever changes, the size budget
+        // in tools/gen_textures.py changed with it.
+        const eng::GltfImage& albedo =
+            model->images[static_cast<std::size_t>(material.base_color_image)];
+        const eng::GltfImage& normal =
+            model->images[static_cast<std::size_t>(material.normal_image)];
+        CHECK(albedo.width == 512);
+        CHECK(normal.width == 256);
+    }
+}
+
+TEST_CASE("arena geometry carries a usable tangent frame", "[gltf]") {
+    const eng::GltfModel* model = load_arena();
+    REQUIRE(model != nullptr);
+
+    for (const eng::GltfMesh& mesh : model->meshes) {
+        CAPTURE(mesh.name);
+        for (const eng::GltfPrimitive& primitive : mesh.primitives) {
+            for (const eng::Vertex& vertex : primitive.mesh.vertices) {
+                // Unit length, perpendicular to the normal, and a handedness
+                // of exactly +/-1: anything else and the shader's TBN is not
+                // orthonormal, which shears the normal map.
+                CHECK(glm::length(glm::vec3(vertex.tangent)) == Catch::Approx(1.0f));
+                CHECK(glm::dot(glm::vec3(vertex.tangent), vertex.normal) ==
+                      Catch::Approx(0.0f).margin(1e-5));
+                CHECK(std::abs(vertex.tangent.w) == Catch::Approx(1.0f));
+            }
+        }
     }
 }
 
@@ -176,7 +298,7 @@ TEST_CASE("image decoding can be skipped for headless loads", "[gltf]") {
 
     // The slots survive so material image indices stay meaningful, but
     // nothing was decoded into them.
-    REQUIRE(model->images.size() == 4);
+    REQUIRE(model->images.size() == 8);
     for (const eng::GltfImage& image : model->images) {
         CHECK_FALSE(image.valid());
         CHECK(image.pixels.empty());

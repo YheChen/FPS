@@ -205,6 +205,25 @@ exposed.
 
 </details>
 
+### Optional: accept WebRTC clients
+
+Browsers reach the server over WebSockets, which is TCP and head-of-line
+blocks. `--webrtc` also accepts DataChannel clients, which gives browsers real
+UDP semantics (docs/networking.md). It needs `--ws-port`, because signalling
+rides that connection:
+
+```bash
+./build/release/game/fps_server --ws-port 7778 --no-enet --webrtc --bots 2
+```
+
+**The deployed stack does not run this.** `deploy/Dockerfile` builds with
+`FPS_ENABLE_WEBRTC=OFF`, so the image has no `--webrtc` at all and browsers on
+the live site connect over `wss://`. Turning it on means fetching
+libdatachannel (five submodules and a TLS backend) into the image and opening
+a UDP port range on the router — a deployment change, not a flag. Until then
+`rtc://` works against a locally built server, which is what it was verified
+against.
+
 ## 2. Keep the laptop awake
 
 This applies either way, Docker or not. A closed lid suspends the machine on a
@@ -692,6 +711,59 @@ Run it by hand first — it says exactly what it would do and changes nothing:
 ~/GitHub/FPS/tools/server_autodeploy.sh --dry-run
 ```
 
+### What is deployed is tracked, not inferred
+
+The first version asked *"does `HEAD` equal `origin/main`?"* and treated yes as
+"nothing to do". That is a different question. `HEAD` is where the **checkout**
+points; it says nothing about what is **running**. On 2026-08-09 that gap took
+the live game down twice in one afternoon:
+
+1. A `git pull` by hand moved `HEAD` to `main` without building anything.
+   Every run afterwards saw `HEAD == origin/main` and did nothing, while the
+   container kept serving the old build — silently, indefinitely.
+2. A `docker compose down` left the stack stopped. `HEAD` still equalled
+   `origin/main`, so the script still did nothing, and the thing whose job is
+   keeping the server up watched it stay down.
+
+So the two questions are now asked separately, against evidence:
+
+| Question | Answered by |
+|---|---|
+| What is deployed? | `~/.local/state/fps/deployed-commit`, written **only** after a deploy came up healthy. |
+| Is it serving? | `docker compose ps` + `docker inspect` on **both** `server` and `caddy`, every run. |
+
+An unhealthy or missing container is redeployed **regardless of any SHA** — a
+running server behind a stopped proxy is unreachable from the internet, which
+is the only place players are.
+
+`tests/deploy/autodeploy_test.sh` is the decision table as fourteen cases,
+with `docker` stubbed and a temp repository standing in for GitHub. Cases 3
+and 4 are the two outages above, and they fail against the old script. It runs
+in CI, in about a second.
+
+Two state files, both under `${XDG_STATE_HOME:-~/.local/state}/fps`
+(override with `FPS_STATE_DIR`) — outside the clone, so they cannot trip the
+dirty-worktree refusal:
+
+- **`deployed-commit`** — the last commit proven to serve. Also the rollback
+  target when a deploy fails, which is *not* the same as `HEAD`: after a
+  manual `git pull`, `HEAD` is the build that was never proven and the stamp
+  is the one that was.
+- **`recovery-attempts`** — `<count> <unix-time>`. After five consecutive
+  failed recoveries the script backs off to one an hour and says so (exit 2),
+  so a server that crashes on startup does not get rebuilt every ten minutes
+  forever with the real error buried under identical journal entries. Delete
+  the file to retry immediately.
+
+**The first run after installing this rebuilds once**, on purpose: there is no
+stamp yet, so nothing knows what is running, and guessing is the bug being
+fixed. If you would rather not rebuild at that moment — and you are confident
+the container matches the checkout — write the stamp yourself:
+
+```bash
+mkdir -p ~/.local/state/fps && git -C ~/GitHub/FPS rev-parse HEAD > ~/.local/state/fps/deployed-commit
+```
+
 ### Pull, not push
 
 The obvious design is CI reaching in over SSH. That would mean storing a
@@ -714,28 +786,26 @@ green build. So the script:
 | Situation | What happens |
 |---|---|
 | Protocol unchanged | Deploy. This is almost every commit. |
-| Protocol changed, live client speaks the new version | Deploy. |
-| Protocol changed, live client speaks something else | **Refuse**, exit 2. |
-| Protocol changed, client version unknown | **Refuse**, exit 2. |
+| Protocol changed, published client speaks the new version | Deploy. |
+| Protocol changed, published client speaks something else | **Refuse**, exit 2. |
+| Protocol changed, no client published at all | **Refuse**, exit 2. |
+| No deploy stamp *and* no client published at all | Deploy — a host being set up, with nothing live to break. |
+| Redeploying the same commit to recover | Deploy. The protocol cannot move, so the guard does not apply. |
 
-It learns what the live client speaks from `version.json`, which the
-`deploy-web` CI job publishes beside the client. The client is the only half
-that can honestly declare this, because it is the half that gets published to
-a URL.
+It learns what the published client speaks from the **`client-live` git tag**,
+which `deploy-web` moves after it has verified the deploy. That was originally
+read from `https://<client>/version.json` over HTTP, and it refused four runs
+in a row saying the file could not be read. A tag rides the `git fetch` the
+script already does, needs no credential, and nothing can interpose on it.
+`version.json` is still published — it is genuinely useful from a browser
+console — but nothing depends on it.
 
-This is not theoretical. Run against the live host while `main` carried M29:
+That last table row matters more than it looks. Refusing during a *recovery*
+would mean that if the stack went down while the client happened to be
+lagging, the guard would keep the server switched off — turning a protection
+against outages into one.
 
-```
-[autodeploy] 876d857 -> 8343da3
-[autodeploy] protocol 4 -> 5; checking what the live client speaks
-[autodeploy] REFUSING: protocol moved to 5 and https://fps.yanzhenchen.ca/version.json
-[autodeploy]           could not be read, so the published client's version is unknown.
-```
-
-Which is correct — the Vercel secrets are not set, so no client has been
-published, so nothing can vouch for protocol 5. **The guard will keep refusing
-M29 until the client pipeline works.** `--force` skips it; the only good reason
-is a server-only rollback.
+`--force` skips the guard; the only good reason is a server-only rollback.
 
 The unit sets `SuccessExitStatus=2` so a refusal does not leave it `failed`.
 Refusing is the *expected* answer for as long as the client lags, and a unit
@@ -748,6 +818,61 @@ Other refusals, both deliberate:
 - **A failed health check** rolls back to the previous commit and rebuilds.
   `compose up --wait` blocks on the container's own healthcheck, which is
   `ws_smoke.py` speaking the real protocol to itself.
+
+### The guard points both ways now
+
+The server guard stops a server outrunning the published client. Nothing
+stopped the reverse — and on 2026-08-09 that is what happened: CI published a
+protocol 6 client against a protocol 4 server, and every connection was
+rejected until someone noticed and ran `--force` on the host.
+
+So `deploy-web` asks the live server whether it can talk to the client it is
+about to publish, using `tools/ws_smoke.py` — the same tool the container's
+own healthcheck runs, over the real TLS proxy. No credential, no new endpoint,
+and not a record of what somebody believes is deployed: the answer comes from
+the process that would be doing the rejecting.
+
+`ws_smoke.py` exits **3** when the server is up and speaking a different
+version, and **1** when it could not be reached. Those need opposite responses
+and both look like failure to a caller that only checks for zero.
+
+| This client vs the published one | Probe | What happens |
+|---|---|---|
+| Unchanged (almost every commit) | any | **Publish.** A warning if the probe failed — an identical protocol cannot make anything worse. |
+| Changed | speaks it (0) | **Publish.** The server already moved; this is step 2 below. |
+| Changed | mismatch (3) or unreachable (1) | **Refuse.** |
+
+The gate is only *enforced* on a protocol change. Blocking every routine
+client deploy on whether a laptop at the end of a home connection is reachable
+from a GitHub runner would fail far more often, and for reasons that have
+nothing to do with whether the client is safe to publish.
+
+### A protocol bump is a deliberate two-step
+
+With both guards in place a protocol bump **holds** — the server will not go
+first, the client will not go first, and neither will move until you say so.
+That is not a deadlock; it is the game staying up on the old protocol, on both
+sides, while nothing ships. Everything else deploys normally in the meantime.
+
+Break the tie **server first**:
+
+```bash
+# 1. On the server host, once you have decided:
+~/GitHub/FPS/tools/server_autodeploy.sh --force
+```
+
+Then re-run the `deploy-web` job (Actions → the run → *Re-run failed jobs*).
+Its probe now succeeds, and the client publishes.
+
+Server first because the operator is already at the keyboard on the host and
+can trigger the client immediately; client first would leave the fix waiting
+on a ten-minute timer. Between the two steps **there is an outage window** —
+the live client cannot join the new server, and no ordering avoids that, since
+there is no in-protocol compatibility to fall back on. What the client does
+with that window is the other half of this: a `ServerReject(VersionMismatch)`
+puts it in "Server is updating — retrying…" with a countdown, and on the web
+build a **Reload for the updated client** button, rather than a dead end that
+says the server refused it.
 
 ## 6. End-to-end check
 

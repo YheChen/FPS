@@ -174,11 +174,54 @@ ship for no visual difference at these sizes.
   nothing cosmetic should be able to reach into it. Particles also advance
   on the render clock, not the fixed tick, for the same reason.
 
-Muzzle flash needs its own tuning: the muzzle sits ~0.5 m from the near
-plane, so sizes and speeds that look right out in the arena become
-screen-filling drifting orbs there. It is also offset forward/right/down,
-since there is no first-person weapon model and a flash at dead centre reads
-as a light in the player's face.
+Muzzle flash needs its own tuning: the muzzle sits well under a metre from
+the camera, so sizes and speeds that look right out in the arena become
+screen-filling drifting orbs there. Where it spawns is not a constant — it
+comes from the held weapon's own `muzzle` marker node (see below).
+
+## First-person viewmodel (M46)
+
+The held weapon is drawn from the camera basis: local +X is the camera's
+right, +Y its up, -Z where it is looking, and the origin is the grip. Bob,
+sway, recoil, reload and switch are all offsets and rotations **about the
+grip** on top of that, which is why one set of them serves five weapons —
+every model in `assets/weapons/*.glb` puts its origin in the hand.
+
+Right and down are fixed for the arsenal; **forward is not**. The arm
+extends until the weapon's business end is a fixed distance from the eye, so
+a 1.30 m sniper is held at the shoulder and a 0.33 m knife out in front,
+with no per-weapon constant. Reach comes from the model's own bounds.
+
+Four rendering decisions worth keeping:
+
+- **Its own projection, after a depth clear.** Same FOV and aspect as the
+  camera, near plane 0.01 instead of 0.05. The clear is the anti-clipping
+  mechanism — there is no world depth left to lose against, so walking into
+  a wall puts the gun in front of the wall rather than a barrel through it.
+  The FOV *must* match, or a point projects to a different pixel in the two
+  matrices and the flash lands somewhere other than the drawn muzzle.
+- **After the particles and debug lines, not before.** They still need the
+  world's depth buffer to be occluded by the world; clearing it first would
+  put impact sparks through pillars. The cost is that the gun overdraws the
+  part of its own flash that falls on the barrel, which is what a real flash
+  does anyway.
+- **Inside the HDR target**, so the flash still feeds bloom.
+- **Casts no shadow, receives them.** It is not in `draw_items`, so the
+  depth pass never sees it — a gun-shaped shadow on the floor beside a
+  player who cannot see their own body would be worse than none. Its
+  transform is a genuine world position, so the lit pass shadows it for
+  free and the gun darkens when you step into a pillar's shade.
+
+The **`muzzle` marker node** is what keeps weapon identity out of the
+client: a mesh-less node read by name, exactly like a map's `spawn_N`. Its
+absence is meaningful — a melee weapon has none, and that is the whole
+mechanism preventing a knife swing from spitting fire. Recoil is scaled from
+the weapon's own config (damage × pellets), so a new `.cfg` gets a kick that
+matches its stats without a line of code.
+
+Everything here is **render-clock cosmetic** and must never feed the fixed
+tick — the same rule particles follow. Recoil deliberately does not move the
+camera: aim punch would change where bullets go, which is simulation.
 
 ## Shadows (M13)
 
@@ -289,6 +332,15 @@ direction so a screenshot run can aim at whatever the change under test
 needs to show. Both apply offline and online. Pointing them at
 `normalize(-kSunDirection)` — `--fixed-yaw 2.2143 --fixed-pitch 1.107` for
 the current sun — is how the sky's agreement with the light gets checked.
+
+`--weapon <1-5>` seeds the requested slot, which is the only way to put a
+chosen gun in front of an automated screenshot — the 1-5 keys need a
+keyboard. `--auto-walk` holds forward, which the viewmodel's bob needs
+because the bob is driven by distance travelled and a stationary player has
+none. `--auto-fire` PULLS the trigger every other tick rather than holding
+it down: held, a semi-automatic weapon fires exactly once and then sits
+there, so nothing that needed a shotgun or a sniper to keep shooting could
+be verified at all. All three apply offline and online.
 
 **A clean emcc build does not mean the web client works.** Shader
 compilation happens at runtime, so GLSL ES errors only surface in a browser.

@@ -105,16 +105,16 @@ void AudioEngine::set_listener(const glm::vec3& position, const glm::vec3& forwa
     ma_engine_listener_set_world_up(&impl_->engine, 0, up.x, up.y, up.z);
 }
 
-void AudioEngine::play(const std::filesystem::path& path, float volume) {
-    start(path, volume, nullptr);
+void AudioEngine::play(const std::filesystem::path& path, float volume, float pitch) {
+    start(path, volume, pitch, nullptr);
 }
 
 void AudioEngine::play_at(const std::filesystem::path& path, const glm::vec3& position,
-                          float volume) {
-    start(path, volume, &position);
+                          float volume, float pitch) {
+    start(path, volume, pitch, &position);
 }
 
-void AudioEngine::start(const std::filesystem::path& path, float volume,
+void AudioEngine::start(const std::filesystem::path& path, float volume, float pitch,
                         const glm::vec3* position) {
     if (!impl_->engine_ready) {
         return;
@@ -175,6 +175,13 @@ void AudioEngine::start(const std::filesystem::path& path, float volume,
             glm::length(local));
     }
     ma_sound_set_volume(instance.get(), volume);
+    // Guarded rather than clamped: a pitch of zero stalls the resampler and
+    // the instance never reaches its end, so it would sit in `playing`
+    // forever. Anything outside a musically sane range is a caller bug, and
+    // playing it straight is the most debuggable answer.
+    if (pitch > 0.0f && pitch != 1.0f) {
+        ma_sound_set_pitch(instance.get(), pitch);
+    }
     ma_sound_start(instance.get());
     impl_->playing.push_back(std::move(instance));
 }

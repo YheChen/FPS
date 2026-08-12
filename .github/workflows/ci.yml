@@ -269,6 +269,92 @@ jobs:
           name: web-client
           path: dist
 
+      # The other half of the autodeploy protocol guard, pointing the other
+      # way. That one refuses to ship a SERVER the published client cannot
+      # talk to; nothing refused to ship a CLIENT the live server cannot talk
+      # to -- and on 2026-08-09 that is exactly what happened: the client went
+      # out at protocol 6 against a protocol 4 server, and every connection
+      # was rejected until someone noticed and ran `--force` on the host.
+      #
+      # It asks the live server directly, with the same tool the container's
+      # own healthcheck uses, over the real TLS proxy. No credential, no new
+      # endpoint, and no record of what someone believes is deployed -- the
+      # answer comes from the process that would be doing the rejecting.
+      #
+      # ENFORCED ONLY WHEN THE PROTOCOL ACTUALLY MOVED, which is a handful of
+      # commits out of hundreds. Blocking every routine client deploy on
+      # whether a laptop at the end of a home connection is reachable from a
+      # GitHub runner would fail far more often, and for reasons that have
+      # nothing to do with whether the client is safe to publish.
+      - name: Can the live server talk to this client?
+        id: protocol
+        if: steps.gate.outputs.ready == 'true'
+        run: |
+          built=$(grep -oE 'kProtocolVersion = [0-9]+' game/shared/protocol.h | grep -oE '[0-9]+')
+          [ -n "$built" ] || { echo "::error::could not read kProtocolVersion"; exit 1; }
+
+          # What the currently-published client speaks. `client-live` is not
+          # fetched by a default checkout, and its absence is meaningful -- no
+          # client has ever been published -- so failing to get it is not an
+          # error here.
+          git fetch --depth=1 origin +refs/tags/client-live:refs/tags/client-live 2>/dev/null || true
+          published=$(git show client-live:game/shared/protocol.h 2>/dev/null \
+                      | grep -oE 'kProtocolVersion = [0-9]+' | grep -oE '[0-9]+' || true)
+          echo "built protocol: $built | published: ${published:-<none>}"
+
+          # wss://host[:port] -> host, port, and whether to wrap in TLS.
+          url="$FPS_WEB_SERVER_URL"
+          scheme=${url%%://*}
+          hostport=${url#*://}; hostport=${hostport%%/*}
+          host=${hostport%%:*}; port=${hostport##*:}
+          if [ "$port" = "$host" ]; then
+            if [ "$scheme" = "wss" ]; then port=443; else port=80; fi
+          fi
+          if [ "$scheme" = "wss" ]; then tls=--tls; else tls=--no-tls; fi
+
+          # `|| probe=$?` rather than checking $? afterwards: this step runs
+          # under bash -e, where a non-zero exit IS the answer we want and
+          # would otherwise kill the step before we could read it.
+          echo "probing $scheme://$host:$port with protocol $built"
+          probe=0
+          python3 tools/ws_smoke.py "$host" "$port" "$tls" --protocol "$built" || probe=$?
+
+          if [ "$probe" -eq 0 ]; then
+            echo "the live server speaks protocol $built"
+            exit 0
+          fi
+
+          # 3 means the server answered and speaks something else; anything
+          # else means no answer at all. Only the first is evidence.
+          if [ "$probe" -eq 3 ]; then
+            detail="the live server is up and does NOT speak protocol $built"
+          else
+            detail="the live server could not be reached (ws_smoke exit $probe)"
+          fi
+
+          if [ "$built" = "${published:-$built}" ]; then
+            echo "::warning::$detail, but this client's protocol ($built) is unchanged since the published one, so publishing it cannot make anything worse."
+            exit 0
+          fi
+
+          {
+            echo "### Client deploy held"
+            echo
+            echo "This client speaks protocol \`$built\`, the published one speaks \`${published:-none}\`, and $detail."
+            echo
+            echo "A protocol bump is a deliberate two-step, **server first**:"
+            echo
+            echo '1. On the server host: `tools/server_autodeploy.sh --force`'
+            echo '2. Re-run this job. The probe passes and the client publishes.'
+            echo
+            echo "Both guards refuse until one is told to go first. That is the hold working:"
+            echo "the game stays up on the old protocol, on both sides, until you break the tie."
+            echo "Between step 1 and step 2 players get \`ServerReject(VersionMismatch)\`; the"
+            echo "client waits that out and offers a reload rather than erroring."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::$detail; deploy the server first (see the job summary)"
+          exit 1
+
       # Pinned like every other dependency. `--yes` skips the interactive
       # project prompt; ORG/PROJECT ids in the environment are what tell the
       # CLI which project this is, with no `vercel link` and no committed
@@ -422,6 +508,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # First, because it takes a second and the image build takes minutes.
+      #
+      # server_autodeploy.sh is the only thing here that has taken the live
+      # game down -- twice on 2026-08-09 -- and both times the bug was in its
+      # decision table, which no build could have caught. The test stubs
+      # `docker` and uses a temp repository as "GitHub", so it needs neither.
+      - name: The autodeploy decision table
+        run: |
+          shellcheck tools/*.sh tests/deploy/*.sh
+          tests/deploy/autodeploy_test.sh
 
       - name: Build the server image
         run: docker build -f deploy/Dockerfile -t fps-server:ci .

@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <limits>
+#include <string>
 
 namespace {
 
@@ -77,6 +78,44 @@ TEST_CASE("non-finite floats are rejected on read", "[net]") {
     eng::ByteReader r{w.data()};
     CHECK(r.f32() == std::nullopt);
     CHECK_FALSE(r.ok());
+}
+
+TEST_CASE("long_str carries a payload no u8 length could describe", "[net]") {
+    // The reason it exists: an SDP session description is kilobytes, and
+    // str() caps at 255 bytes.
+    const std::string sdp(4000, 'x');
+    eng::ByteWriter w;
+    w.long_str(sdp);
+    w.str("0");
+
+    eng::ByteReader r{w.data()};
+    CHECK(r.long_str(8192) == sdp);
+    CHECK(r.str(64) == "0");
+    CHECK(r.finished());
+}
+
+TEST_CASE("long_str rejects a length the caller did not allow", "[net]") {
+    eng::ByteWriter w;
+    w.long_str(std::string(500, 'x'));
+
+    eng::ByteReader r{w.data()};
+    CHECK_FALSE(r.long_str(499).has_value());
+    CHECK_FALSE(r.ok());  // and the reader stays poisoned
+}
+
+TEST_CASE("long_str rejects an empty payload and a truncated one", "[net]") {
+    {
+        eng::ByteWriter w;
+        w.long_str("");
+        eng::ByteReader r{w.data()};
+        CHECK_FALSE(r.long_str(64).has_value());
+    }
+    {
+        // Claims 300 bytes, carries 2.
+        const std::vector<std::uint8_t> raw{0x2C, 0x01, 'a', 'b'};
+        eng::ByteReader r{raw};
+        CHECK_FALSE(r.long_str(1024).has_value());
+    }
 }
 
 }  // namespace

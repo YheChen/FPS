@@ -19,6 +19,7 @@ add_executable(engine_tests
     core/version_tests.cpp
     game/arsenal_tests.cpp
     game/bot_tests.cpp
+    game/footsteps_tests.cpp
     game/hitscan_tests.cpp
     game/interpolation_tests.cpp
     game/kill_cam_tests.cpp
@@ -52,7 +53,8 @@ add_executable(engine_tests
 if(NOT EMSCRIPTEN)
     target_sources(engine_tests PRIVATE
         server/server_game_tests.cpp
-        server/stats_store_tests.cpp
+        server/signalling_router_tests.cpp
+    server/stats_store_tests.cpp
     )
     target_link_libraries(engine_tests PRIVATE fps::game_server)
 else()

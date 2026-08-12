@@ -3,6 +3,8 @@
 add_library(game_shared STATIC
     shared/bot.cpp
     shared/bot.h
+    shared/footsteps.cpp
+    shared/footsteps.h
     shared/health.h
     shared/hitscan.h
     shared/input_command.h
@@ -32,6 +34,10 @@ add_executable(fps_client
     client/main.cpp
     client/net_client.cpp
     client/net_client.h
+    # Browser-only, and guarded by #if __EMSCRIPTEN__ so a native build
+    # compiles it away to nothing rather than needing a second source list.
+    client/rtc_transport.cpp
+    client/rtc_transport.h
 )
 target_link_libraries(fps_client PRIVATE fps::engine_platform fps::game_shared)
 fps_set_warnings(fps_client)
@@ -52,6 +58,25 @@ if(EMSCRIPTEN)
         "SHELL:-s STACK_SIZE=4MB"
         "SHELL:-s EXIT_RUNTIME=0"
         "SHELL:-s DISABLE_EXCEPTION_CATCHING=0"
+        # miniaudio's JS glue reaches for `Module.HEAPF32.buffer` in its audio
+        # callback. Emscripten stopped putting the heap views on Module by
+        # default, so that read throws -- every callback, uncaught, inside the
+        # audio device. Verified in the browser: before this flag
+        # `Module.HEAPF32` is undefined and the console fills with
+        # "Cannot read properties of undefined (reading 'buffer')"; after it,
+        # the view is there and the errors stop.
+        #
+        # It shipped: the client live on Vercel has the same call, so the web
+        # build has had no working audio.
+        #
+        # The browser smoke test did NOT miss this by ignoring the console --
+        # it already fails on any uncaught page exception. It missed it
+        # because headless Chrome has no audio output device and no user
+        # gesture, so miniaudio's callback never runs there and never throws.
+        # Catching this in CI means giving that browser an audio device
+        # (--use-fake-device-for-media-stream and friends), not teaching the
+        # test to listen.
+        "SHELL:-s EXPORTED_RUNTIME_METHODS=HEAPF32"
         "SHELL:-l websocket.js"
         --preload-file "${CMAKE_SOURCE_DIR}/assets@/assets"
         --shell-file "${CMAKE_SOURCE_DIR}/web/shell.html"
@@ -88,6 +113,12 @@ if(NOT EMSCRIPTEN)
     add_library(game_server STATIC
         server/server_game.cpp
         server/server_game.h
+        # Deliberately NOT gated on FPS_ENABLE_WEBRTC: the router talks to a
+        # narrow SignallingHost interface, not to libdatachannel, so it builds
+        # and is tested in the default configuration -- which is the one CI
+        # runs and therefore the only one whose tests are ever green.
+        server/signalling_router.cpp
+        server/signalling_router.h
         server/stats_store.cpp
         server/stats_store.h
     )

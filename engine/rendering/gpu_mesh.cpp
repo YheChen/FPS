@@ -47,6 +47,12 @@ GpuMesh GpuMesh::upload(const MeshData& mesh) {
     glEnableVertexAttribArray(4);
     glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, stride,
                           reinterpret_cast<const void*>(offsetof(Vertex, weights)));
+    // Tangent + handedness. Enabled for every mesh because there is one
+    // vertex format; the depth shader simply never declares it, and geometry
+    // with no tangent frame ships a zero here for the lit shader to detect.
+    glEnableVertexAttribArray(5);
+    glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, stride,
+                          reinterpret_cast<const void*>(offsetof(Vertex, tangent)));
 
     glBindVertexArray(0);
 

@@ -571,32 +571,144 @@ void step_playback(ReplayPlayback& playback, eng::PhysicsWorld& world) {
     }
 }
 
+// What the animation state machine needs to know about a figure this frame.
+// Bundled because the same facts arrive from three unrelated places --
+// snapshots, re-simulated replay actors, and the offline mannequin -- and a
+// free function taking eight scalars invites callers to swap two of them.
+struct CharacterMotion {
+    glm::vec3 position{0.0f};
+    glm::vec3 velocity{0.0f};
+    float yaw = 0.0f;
+    bool on_ground = true;
+    bool crouching = false;
+    bool alive = true;
+};
+
+// Any time past the land clip's duration. A figure that appears already
+// standing has not just landed, so `land_time` starts here rather than at 0.
+constexpr float kLandingSettled = 10.0f;
+
+// How long a death takes to blend out of whatever the figure was doing.
+// Short: the point is to hide the seam, not to animate the transition.
+constexpr float kDeathBlendSeconds = 0.15f;
+
 // Animation state for one figure. Cosmetic, like particles: driven by the
 // render clock and never fed back into the simulation.
 struct CharacterAnimation {
-    float clip_time = 0.0f;   // position within idle/run
-    float run_weight = 0.0f;  // 0 = idle, 1 = run
-    float air_time = 0.0f;    // position within the jump clip
+    // Two cycle phases, not one. `cycle_time` always runs forward and drives
+    // the side-step and crouch-shuffle loops; `run_time` runs BACKWARDS when
+    // the figure is backpedalling, which is the cheapest honest way to show
+    // it. Sharing one phase would freeze the side-step whenever the forward
+    // component passed through zero.
+    float cycle_time = 0.0f;
+    float run_time = 0.0f;
+    float move_weight = 0.0f;    // 0 = standing still, 1 = at full speed
+    float strafe = 0.0f;         // -1 = stepping left, +1 = stepping right
+    float crouch_weight = 0.0f;  // 0 = standing, 1 = squatting
+    float air_time = 0.0f;       // position within the jump clip
     bool airborne = false;
+    float land_time = kLandingSettled;  // seconds since touchdown
+    float death_time = 0.0f;            // position within the death clip
+    bool dead = false;
+    // Where the figure was when it died. A corpse is drawn here rather than
+    // at the snapshot position, because the server teleports the player to a
+    // spawn point on respawn and the interpolation buffer would otherwise
+    // drag the body halfway across the arena on its way out.
+    glm::vec3 death_position{0.0f};
+    float death_yaw = 0.0f;
 };
 
-// Blends toward running with horizontal speed and switches to the jump clip
-// off the ground. `run_speed` is the speed at which the run blend saturates.
-void update_character_animation(CharacterAnimation& animation, const glm::vec3& velocity,
-                                bool on_ground, float run_speed, float dt) {
-    const float horizontal = glm::length(glm::vec2{velocity.x, velocity.z});
-    const float target = glm::clamp(horizontal / std::max(run_speed, 0.01f), 0.0f, 1.0f);
+// Advances one figure's animation. `run_speed` is the speed at which the
+// locomotion blend saturates.
+void update_character_animation(CharacterAnimation& animation, const CharacterMotion& motion,
+                                float run_speed, float dt) {
+    if (!motion.alive) {
+        if (!animation.dead) {
+            animation.dead = true;
+            animation.death_time = 0.0f;
+            animation.death_position = motion.position;
+            animation.death_yaw = motion.yaw;
+        }
+        animation.death_time += dt;
+        return;  // a corpse has no stance, no stride and no landing
+    }
+    if (animation.dead) {
+        // Respawn. Reset rather than easing out of the corpse's frozen blend
+        // weights: the player has just been teleported to a spawn point, so
+        // the velocity estimated across that jump is meaningless and the
+        // stance the body died in has nothing to do with where it now stands.
+        animation = CharacterAnimation{};
+    }
+
+    const glm::vec2 horizontal{motion.velocity.x, motion.velocity.z};
+    const float speed = glm::length(horizontal);
+    const float target = glm::clamp(speed / std::max(run_speed, 0.01f), 0.0f, 1.0f);
     // Ease toward the target so a stop does not snap mid-stride.
-    animation.run_weight += (target - animation.run_weight) * std::min(1.0f, dt * 9.0f);
+    animation.move_weight += (target - animation.move_weight) * std::min(1.0f, dt * 9.0f);
+
+    const float crouch_target = motion.crouching ? 1.0f : 0.0f;
+    animation.crouch_weight +=
+        (crouch_target - animation.crouch_weight) * std::min(1.0f, dt * 12.0f);
+
+    // Direction of travel RELATIVE TO FACING, which is the only frame in
+    // which "is this player strafing" has an answer. In world space a figure
+    // running north and a figure sidestepping north are indistinguishable,
+    // and picking a clip from that is how a sidestepping player ends up
+    // playing a forward run -- an animation that lies about which way a body
+    // is going is worse than no animation, because opponents lead their shots
+    // with it.
+    const glm::vec2 forward{std::sin(motion.yaw), -std::cos(motion.yaw)};
+    const glm::vec2 right{std::cos(motion.yaw), std::sin(motion.yaw)};
+    float lateral = 0.0f;
+    float along = 1.0f;
+    if (speed > 0.05f) {
+        const glm::vec2 direction = horizontal / speed;
+        lateral = glm::dot(direction, right);
+        along = glm::dot(direction, forward);
+    }
+    // Eased for the same reason the move blend is: a player flicking between
+    // strafing and running should cross between the cycles, not cut.
+    animation.strafe += (lateral - animation.strafe) * std::min(1.0f, dt * 10.0f);
 
     // The cycle advances with speed, so the feet do not appear to slide: a
     // fixed playback rate looks wrong at every speed but one.
-    const float rate = glm::mix(1.0f, std::max(1.0f, horizontal / 3.0f), animation.run_weight);
-    animation.clip_time += dt * rate;
+    const float rate = glm::mix(1.0f, std::max(1.0f, speed / 3.0f), animation.move_weight);
+    animation.cycle_time += dt * rate;
+    // Scaled rather than sign-flipped so it passes smoothly through zero;
+    // a hard flip would jitter whenever the forward component hovered near
+    // it, which is exactly what a strafing player's does.
+    animation.run_time += dt * rate * glm::clamp(along * 3.0f, -1.0f, 1.0f);
 
-    animation.airborne = !on_ground;
-    animation.air_time = on_ground ? 0.0f : animation.air_time + dt;
+    const bool was_airborne = animation.airborne;
+    animation.airborne = !motion.on_ground;
+    animation.air_time = motion.on_ground ? 0.0f : animation.air_time + dt;
+    animation.land_time = was_airborne && motion.on_ground ? 0.0f : animation.land_time + dt;
 }
+
+// The offline mannequin's demo loop: every state the machine can be in, in
+// order, so the whole set can be looked at without a server. Without it the
+// only way to see a strafe or a death is to arrange for someone to strafe or
+// die in front of you, and a clip nobody looks at is a clip nobody notices is
+// broken. Velocities are in the mannequin's own frame -- it faces -Z and
+// never turns, so +X really is its right.
+struct MannequinPhase {
+    glm::vec3 velocity;
+    bool on_ground;
+    bool crouching;
+    bool alive;
+};
+constexpr float kMannequinPhaseSeconds = 2.0f;
+constexpr std::array<MannequinPhase, 9> kMannequinPhases{{
+    {{0.0f, 0.0f, 0.0f}, true, false, true},    // idle
+    {{0.0f, 0.0f, -5.5f}, true, false, true},   // run forward
+    {{5.5f, 0.0f, 0.0f}, true, false, true},    // strafe right
+    {{-5.5f, 0.0f, 0.0f}, true, false, true},   // strafe left
+    {{0.0f, 0.0f, 0.0f}, true, true, true},     // crouch, still
+    {{0.0f, 0.0f, -2.4f}, true, true, true},    // crouch, moving
+    {{0.0f, 3.0f, -2.0f}, false, false, true},  // airborne
+    {{0.0f, 0.0f, 0.0f}, true, false, true},    // touchdown, then standing
+    {{0.0f, 0.0f, 0.0f}, true, false, false},   // dead; wrapping revives it
+}};
 
 // 2048^2 over a ~45 m arena is roughly 2 cm per texel, which is enough for
 // crisp pillar and player shadows without a cascade split.
@@ -1393,11 +1505,22 @@ int main(int argc, char** argv) {
     }
     const std::vector<eng::AnimationClip> character_clips =
         eng::build_clips(*character_model, *character_skeleton);
+    // Every clip the state machine can reach. Resolved once and required,
+    // because a missing clip would not fail loudly -- find_clip would return
+    // null and the figure would silently lose a state.
     const eng::AnimationClip* clip_idle = eng::find_clip(character_clips, "idle");
     const eng::AnimationClip* clip_run = eng::find_clip(character_clips, "run");
+    const eng::AnimationClip* clip_strafe_right = eng::find_clip(character_clips, "strafe_right");
+    const eng::AnimationClip* clip_strafe_left = eng::find_clip(character_clips, "strafe_left");
+    const eng::AnimationClip* clip_crouch_idle = eng::find_clip(character_clips, "crouch_idle");
+    const eng::AnimationClip* clip_crouch_move = eng::find_clip(character_clips, "crouch_move");
     const eng::AnimationClip* clip_jump = eng::find_clip(character_clips, "jump");
-    if (clip_idle == nullptr || clip_run == nullptr || clip_jump == nullptr) {
-        eng::log::error("Character is missing one of the idle/run/jump clips");
+    const eng::AnimationClip* clip_land = eng::find_clip(character_clips, "land");
+    const eng::AnimationClip* clip_death = eng::find_clip(character_clips, "death");
+    if (clip_idle == nullptr || clip_run == nullptr || clip_strafe_right == nullptr ||
+        clip_strafe_left == nullptr || clip_crouch_idle == nullptr || clip_crouch_move == nullptr ||
+        clip_jump == nullptr || clip_land == nullptr || clip_death == nullptr) {
+        eng::log::error("Character is missing one of the nine animation clips");
         return 1;
     }
     const eng::GpuMesh character_mesh =
@@ -1408,23 +1531,62 @@ int main(int argc, char** argv) {
     // Resolves a CharacterAnimation into joint matrices appended to `pool`,
     // returning the offset. Scratch poses are function-local statics so the
     // per-frame path does not allocate.
+    //
+    // The ground pose is built bottom-up -- direction, then stance -- and a
+    // one-shot (jump, land or death) replaces or layers over the result. All
+    // of it is a blend of authored clips: nothing here invents a pose, so a
+    // wrong-looking frame is always a wrong-looking clip.
     const auto append_character_pose = [&](const CharacterAnimation& animation,
                                            std::vector<glm::mat4>& pool) -> int {
-        static eng::Pose idle_pose;
-        static eng::Pose run_pose;
-        static eng::Pose blended;
+        static eng::Pose clip_a;  // whichever clip is being sampled
+        static eng::Pose clip_b;
+        static eng::Pose directional;  // run vs side-step, by lateral velocity
+        static eng::Pose standing;     // still vs moving, upright
+        static eng::Pose crouched;     // still vs moving, squatting
+        static eng::Pose grounded;     // the two stances blended
+        static eng::Pose mixed;        // output of the final one-shot blend
         static std::vector<glm::mat4> matrices;
 
-        eng::sample_clip(*character_skeleton, *clip_idle, animation.clip_time, true, idle_pose);
-        if (animation.airborne) {
-            // Jump does not loop: it holds its last frame while in the air.
-            eng::sample_clip(*character_skeleton, *clip_jump, animation.air_time, false, run_pose);
-            eng::blend_poses(idle_pose, run_pose, 1.0f, blended);
-        } else {
-            eng::sample_clip(*character_skeleton, *clip_run, animation.clip_time, true, run_pose);
-            eng::blend_poses(idle_pose, run_pose, animation.run_weight, blended);
+        const eng::Skeleton& skeleton = *character_skeleton;
+        eng::sample_clip(skeleton, *clip_run, animation.run_time, true, clip_a);
+        eng::sample_clip(skeleton, animation.strafe < 0.0f ? *clip_strafe_left : *clip_strafe_right,
+                         animation.cycle_time, true, clip_b);
+        eng::blend_poses(clip_a, clip_b, std::abs(animation.strafe), directional);
+
+        eng::sample_clip(skeleton, *clip_idle, animation.cycle_time, true, clip_a);
+        eng::blend_poses(clip_a, directional, animation.move_weight, standing);
+
+        // The crouch is a full-body override rather than a lower-body layer,
+        // because the engine has no additive blend. That costs the crouched
+        // strafe its direction, which is the right thing to give up: crouched
+        // movement is 45% of walking speed, and at that speed the stance is
+        // what an opponent reads, not the heading.
+        eng::sample_clip(skeleton, *clip_crouch_idle, animation.cycle_time, true, clip_a);
+        eng::sample_clip(skeleton, *clip_crouch_move, animation.cycle_time, true, clip_b);
+        eng::blend_poses(clip_a, clip_b, animation.move_weight, crouched);
+        eng::blend_poses(standing, crouched, animation.crouch_weight, grounded);
+
+        const eng::Pose* result = &grounded;
+        if (animation.dead) {
+            // One-shot and unlooped: sample_clip clamps past the last key, so
+            // the body holds where it fell instead of dying again.
+            eng::sample_clip(skeleton, *clip_death, animation.death_time, false, clip_a);
+            const float weight = std::min(1.0f, animation.death_time / kDeathBlendSeconds);
+            eng::blend_poses(grounded, clip_a, weight, mixed);
+            result = &mixed;
+        } else if (animation.airborne) {
+            eng::sample_clip(skeleton, *clip_jump, animation.air_time, false, clip_a);
+            result = &clip_a;
+        } else if (animation.land_time < clip_land->duration_seconds) {
+            // Faded out over the clip's own length so the absorb releases
+            // back into the ground pose rather than popping out of it.
+            eng::sample_clip(skeleton, *clip_land, animation.land_time, false, clip_a);
+            const float weight =
+                1.0f - animation.land_time / std::max(clip_land->duration_seconds, 0.01f);
+            eng::blend_poses(grounded, clip_a, glm::clamp(weight, 0.0f, 1.0f), mixed);
+            result = &mixed;
         }
-        eng::pose_to_joint_matrices(*character_skeleton, blended, matrices);
+        eng::pose_to_joint_matrices(skeleton, *result, matrices);
 
         const auto offset = static_cast<int>(pool.size());
         pool.insert(pool.end(), matrices.begin(), matrices.end());
@@ -1440,6 +1602,10 @@ int main(int argc, char** argv) {
     // the whole feature would only be visible in a networked session.
     CharacterAnimation dummy_animation;
     const glm::vec3 dummy_position{11.0f, 0.0f, 10.0f};
+    // The local player's own figure. Only ever drawn during the killcam, but
+    // updated every frame so the death latches the position and facing this
+    // player actually had when the alive flag cleared.
+    CharacterAnimation self_animation;
     // Animation phase has to persist per player across frames, or every
     // figure resets to the start of its cycle every frame and never moves.
     std::unordered_map<std::uint8_t, CharacterAnimation> remote_animations;
@@ -2274,6 +2440,11 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Drives both the camera below and whether the local player's body is
+        // drawn: the two have to agree, because the body is only safe to draw
+        // when the view is somewhere other than inside its head.
+        const bool kill_cam_active = online && !net->self_alive() && !net->kill_cam().empty();
+
         eng::Camera camera;
         if (mode == Mode::Menu) {
             // Slow orbit around the arena behind the menu.
@@ -2298,7 +2469,7 @@ int main(int argc, char** argv) {
             // rather than a debug toggle.
             fly.update(input, static_cast<float>(dt), window->relative_mouse());
             camera = fly.camera;
-        } else if (online && !net->self_alive() && !net->kill_cam().empty()) {
+        } else if (kill_cam_active) {
             // Killcam: the seconds before this death, from the killer's eyes.
             // Driven off wall-clock rather than the simulation tick, because
             // the local player is not being simulated while dead.
@@ -2411,14 +2582,19 @@ int main(int argc, char** argv) {
         });
 
         // Offline: an animated mannequin, so there is something skinned to
-        // look at without a server. It cycles idle -> run -> idle so both the
-        // blend and the cycle rate are visible standing still.
+        // look at without a server. It walks the whole state table above, so
+        // the blends, the cycle rate and every one-shot are visible from the
+        // practice range.
         if (mode == Mode::Offline) {
-            const float phase = std::fmod(static_cast<float>(clock.elapsed()), 8.0f);
-            const glm::vec3 fake_velocity =
-                phase < 4.0f ? glm::vec3{0.0f, 0.0f, -5.5f} : glm::vec3{0.0f};
-            update_character_animation(dummy_animation, fake_velocity, true, game::kMove.max_speed,
-                                       static_cast<float>(dt));
+            const float cycle =
+                kMannequinPhaseSeconds * static_cast<float>(kMannequinPhases.size());
+            const float phase = std::fmod(static_cast<float>(clock.elapsed()), cycle);
+            const MannequinPhase& demo =
+                kMannequinPhases[static_cast<std::size_t>(phase / kMannequinPhaseSeconds)];
+            update_character_animation(dummy_animation,
+                                       CharacterMotion{dummy_position, demo.velocity, 0.0f,
+                                                       demo.on_ground, demo.crouching, demo.alive},
+                                       game::kMove.max_speed, static_cast<float>(dt));
             const int offset = append_character_pose(dummy_animation, joint_pool);
             // Offline has no player ids, so the mannequin borrows slot 0's
             // colour: the practice range should look like the game, and there
@@ -2437,14 +2613,37 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 glm::mat4 model = glm::translate(glm::mat4{1.0f}, actor.state.position);
-                model = glm::rotate(model, actor.yaw, glm::vec3{0.0f, 1.0f, 0.0f});
+                model = glm::rotate(model, -actor.yaw, glm::vec3{0.0f, 1.0f, 0.0f});
 
                 CharacterAnimation& animation = replay_animations[id];
-                update_character_animation(animation, actor.state.velocity, actor.state.on_ground,
-                                           game::kMove.max_speed, static_cast<float>(dt));
+                update_character_animation(
+                    animation,
+                    CharacterMotion{actor.state.position, actor.state.velocity, actor.yaw,
+                                    actor.state.on_ground, actor.state.crouching, true},
+                    game::kMove.max_speed, static_cast<float>(dt));
                 const int offset = append_character_pose(animation, joint_pool);
                 draw_items.push_back({model, DrawKind::Character, -1, game::player_color(id),
                                       offset, static_cast<int>(character_skeleton->joint_count())});
+            }
+        }
+
+        // The local player's own body. Kept up to date whenever online so the
+        // death latches the position and facing it had at the moment the flag
+        // cleared, but only drawn during the killcam -- every other view sits
+        // inside this figure's head.
+        if (online) {
+            update_character_animation(
+                self_animation,
+                CharacterMotion{player.position, player.velocity, view_yaw, player.on_ground,
+                                player.crouching, net->self_alive()},
+                game::kMove.max_speed, static_cast<float>(dt));
+            if (kill_cam_active) {
+                glm::mat4 model = glm::translate(glm::mat4{1.0f}, self_animation.death_position);
+                model = glm::rotate(model, -self_animation.death_yaw, glm::vec3{0.0f, 1.0f, 0.0f});
+                const int offset = append_character_pose(self_animation, joint_pool);
+                draw_items.push_back({model, DrawKind::Character, -1,
+                                      game::player_color(net->my_id()), offset,
+                                      static_cast<int>(character_skeleton->joint_count())});
             }
         }
 
@@ -2455,16 +2654,9 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 const auto pose = remote.history.sample(remote_render_tick);
-                if (!pose || (pose->flags & game::kFlagAlive) == 0) {
-                    continue;  // dead players are not drawn
+                if (!pose) {
+                    continue;
                 }
-                // The character's feet sit at its origin, so the snapshot
-                // position is used directly -- no half-height offset like the
-                // stretched cube needed. Yaw comes from the snapshot, so a
-                // player faces the way they are looking.
-                glm::mat4 model = glm::translate(glm::mat4{1.0f}, pose->position);
-                model = glm::rotate(model, pose->yaw, glm::vec3{0.0f, 1.0f, 0.0f});
-
                 // Snapshots carry no velocity, so it is estimated from two
                 // interpolated samples. That is only used to pick a clip and
                 // a playback rate; nothing depends on it being exact.
@@ -2474,8 +2666,13 @@ int main(int argc, char** argv) {
                     velocity = (pose->position - earlier->position) / (4.0f * game::kTickSeconds);
                 }
                 CharacterAnimation& animation = remote_animations[id];
-                update_character_animation(animation, velocity, std::abs(velocity.y) < 0.6f,
-                                           game::kMove.max_speed, static_cast<float>(dt));
+                update_character_animation(
+                    animation,
+                    CharacterMotion{pose->position, velocity, pose->yaw,
+                                    (pose->flags & game::kFlagOnGround) != 0,
+                                    (pose->flags & game::kFlagCrouching) != 0,
+                                    (pose->flags & game::kFlagAlive) != 0},
+                    game::kMove.max_speed, static_cast<float>(dt));
 
                 // Someone else's boots, at their feet. This is the entire
                 // point of the feature: hearing WHERE an enemy is, from the
@@ -2496,6 +2693,21 @@ int main(int argc, char** argv) {
                     sound_at("land.wav", pose->position, footfall.land_gain);
                 }
 
+                // The character's feet sit at its origin, so the position is
+                // used directly -- no half-height offset like the stretched
+                // cube needed. A corpse is pinned where it fell; everyone else
+                // follows the interpolated snapshot.
+                const bool dead = animation.dead;
+                glm::mat4 model = glm::translate(glm::mat4{1.0f},
+                                                 dead ? animation.death_position : pose->position);
+                // NEGATIVE yaw. The model faces -Z and glm::rotate about +Y
+                // sends -Z to (-sin, 0, -cos), while a player with this yaw
+                // moves and looks along (+sin, 0, -cos): rotating by +yaw
+                // mirrors the figure, so it moonwalked whenever it was not
+                // facing straight down -Z. Nothing showed it while the only
+                // clips were a symmetric idle and run; a side-step does.
+                model = glm::rotate(model, -(dead ? animation.death_yaw : pose->yaw),
+                                    glm::vec3{0.0f, 1.0f, 0.0f});
                 const int offset = append_character_pose(animation, joint_pool);
                 draw_items.push_back({model, DrawKind::Character, -1, game::player_color(id),
                                       offset, static_cast<int>(character_skeleton->joint_count())});

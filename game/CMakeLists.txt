@@ -3,6 +3,8 @@
 add_library(game_shared STATIC
     shared/bot.cpp
     shared/bot.h
+    shared/footsteps.cpp
+    shared/footsteps.h
     shared/health.h
     shared/hitscan.h
     shared/input_command.h

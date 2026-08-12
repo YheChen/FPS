@@ -53,6 +53,7 @@
 
 #include "game/client/fly_camera.h"
 #include "game/client/net_client.h"
+#include "game/shared/footsteps.h"
 #include "game/shared/health.h"
 #include "game/shared/hitscan.h"
 #include "game/shared/input_command.h"
@@ -1133,16 +1134,28 @@ int main(int argc, char** argv) {
     // panning would place somewhere outside their own head. sound_at() is for
     // things that happen ELSEWHERE, where knowing the direction is the whole
     // value of hearing it at all.
-    const auto sound = [&](const char* name, float volume = 1.0f) {
+    const auto sound = [&](const char* name, float volume = 1.0f, float pitch = 1.0f) {
         if (audio) {
-            audio->play(*assets_root / "sounds" / name, volume);
+            audio->play(*assets_root / "sounds" / name, volume, pitch);
         }
     };
-    const auto sound_at = [&](const char* name, const glm::vec3& position, float volume = 1.0f) {
+    const auto sound_at = [&](const char* name, const glm::vec3& position, float volume = 1.0f,
+                              float pitch = 1.0f) {
         if (audio) {
-            audio->play_at(*assets_root / "sounds" / name, position, volume);
+            audio->play_at(*assets_root / "sounds" / name, position, volume, pitch);
         }
     };
+
+    // Footsteps. The one sound in the game that is pure information: an enemy
+    // crossing the arena in silence is a fight you never knew you were in.
+    // Everyone else's steps are positional and are the point of the feature;
+    // your own are 2D and quiet, because they tell you nothing you did not
+    // already know and at full weight would drown out the ones that do.
+    constexpr std::array<const char*, game::kFootstepVariants> kStepSounds{
+        "step1.wav", "step2.wav", "step3.wav", "step4.wav"};
+    constexpr float kSelfStepVolume = 0.45f;
+    game::FootstepState self_footsteps;
+    std::unordered_map<std::uint8_t, game::FootstepState> remote_footsteps;
 
     // Slot order must match the server's: 1=rifle, 2=smg, 3=shotgun, 4=sniper.
     game::Arsenal arsenal;
@@ -1819,6 +1832,25 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Your own boots. On the render clock and outside the tick loop above
+        // on purpose: this reads the simulation and never writes to it, so
+        // prediction and the replay stay bit-exact whatever the frame rate.
+        // Head-relative and quiet -- they are confirmation that you are
+        // moving, not information about where anyone is, and at full weight
+        // they would mask the steps that ARE information.
+        if (!fly_mode && (mode == Mode::Offline || (online && net->self_alive()))) {
+            const game::FootstepEvent footfall =
+                game::update_footsteps(self_footsteps, player.position, player.velocity,
+                                       player.on_ground, player.crouching);
+            if (footfall.stepped) {
+                sound(kStepSounds[footfall.variant], footfall.gain * kSelfStepVolume,
+                      footfall.pitch);
+            }
+            if (footfall.landed) {
+                sound("land.wav", footfall.land_gain * kSelfStepVolume);
+            }
+        }
+
         eng::Camera camera;
         if (mode == Mode::Menu) {
             // Slow orbit around the arena behind the menu.
@@ -1978,6 +2010,25 @@ int main(int argc, char** argv) {
                 CharacterAnimation& animation = remote_animations[id];
                 update_character_animation(animation, velocity, std::abs(velocity.y) < 0.6f,
                                            game::kMove.max_speed, static_cast<float>(dt));
+
+                // Someone else's boots, at their feet. This is the entire
+                // point of the feature: hearing WHERE an enemy is, from the
+                // same interpolated position they are drawn at, so what you
+                // hear and what you see cannot disagree. on_ground and
+                // crouching ride in the snapshot flags, so a player who
+                // crouches really is quieter to everyone else, with no
+                // protocol field of its own.
+                const game::FootstepEvent footfall =
+                    game::update_footsteps(remote_footsteps[id], pose->position, velocity,
+                                           (pose->flags & game::kFlagOnGround) != 0,
+                                           (pose->flags & game::kFlagCrouching) != 0);
+                if (footfall.stepped) {
+                    sound_at(kStepSounds[footfall.variant], pose->position, footfall.gain,
+                             footfall.pitch);
+                }
+                if (footfall.landed) {
+                    sound_at("land.wav", pose->position, footfall.land_gain);
+                }
 
                 const int offset = append_character_pose(animation, joint_pool);
                 draw_items.push_back({model, DrawKind::Character, -1, game::player_color(id),

@@ -34,12 +34,20 @@ public:
     // makes the player's own head seem to be somewhere else.
     // Loads and caches on first use; failures are logged and swallowed
     // (sound is never fatal).
-    void play(const std::filesystem::path& path, float volume = 1.0f);
+    //
+    // `pitch` resamples playback (1.0 = as recorded, 1.05 = 5% up and 5%
+    // shorter). It exists for the sounds that repeat: a footstep set of four
+    // samples gives itself away within seconds when the same file comes back
+    // bit-identical, and a few percent of pitch either way costs nothing and
+    // makes the repeat inaudible. Do not use it to transpose -- a sound
+    // designed at one pitch stops being that sound.
+    void play(const std::filesystem::path& path, float volume = 1.0f, float pitch = 1.0f);
 
     // Plays the same file positioned at `position` in world space: panned and
     // attenuated against the listener. For anything that happens elsewhere in
     // the arena, where the direction is the information.
-    void play_at(const std::filesystem::path& path, const glm::vec3& position, float volume = 1.0f);
+    void play_at(const std::filesystem::path& path, const glm::vec3& position, float volume = 1.0f,
+                 float pitch = 1.0f);
 
     // Reclaims finished sound instances. Call once per frame.
     void update();
@@ -51,7 +59,8 @@ private:
     AudioEngine();
     // Shared body of play()/play_at(); a non-null `position` is what makes an
     // instance spatial.
-    void start(const std::filesystem::path& path, float volume, const glm::vec3* position);
+    void start(const std::filesystem::path& path, float volume, float pitch,
+               const glm::vec3* position);
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

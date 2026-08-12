@@ -471,11 +471,16 @@ enum class DrawKind : std::uint8_t {
     ArenaMesh,  // `mesh` indexes render_meshes
     Cube,       // the unit cube (targets)
     Character,  // the skinned figure, posed by `joint_offset`
+    Weapon,     // a weapon in a character's hand, `mesh` is its arsenal slot
 };
 
 struct DrawItem {
     glm::mat4 model{1.0f};
     DrawKind kind = DrawKind::Cube;
+    // ArenaMesh: which render_meshes entry. Weapon: which ARSENAL SLOT, which
+    // is a different list entirely -- the field is reused rather than doubled
+    // because no item is ever both, and a second index would be -1 on every
+    // draw in the frame but one kind.
     int mesh = -1;
     glm::vec3 tint{1.0f};
     // Slice into the frame's joint-matrix pool. Both passes read the same
@@ -514,6 +519,11 @@ struct ReplayActor {
     // so it is carried alongside for rendering.
     float yaw = 0.0f;
     float pitch = 0.0f;
+    // Likewise the weapon, for the model in the hand. This is the slot the
+    // command ASKED for rather than the one a switch has finished raising --
+    // the recording holds inputs, not loadouts -- so a replayed figure swaps
+    // weapons a switch time early. Nothing but the model depends on it.
+    std::uint8_t weapon_slot = 0;
     std::unique_ptr<eng::CharacterController> controller;
 };
 
@@ -565,6 +575,7 @@ void step_playback(ReplayPlayback& playback, eng::PhysicsWorld& world) {
         }
         actor.yaw = entry.command.yaw;
         actor.pitch = entry.command.pitch;
+        actor.weapon_slot = entry.command.weapon_slot;
         game::advance_player(actor.state, entry.command, game::kTickSeconds, *actor.controller,
                              world);
     }
@@ -1004,6 +1015,44 @@ glm::mat4 viewmodel_transform(const ViewmodelState& state, const eng::Camera& ca
     return model;
 }
 
+// --- third-person weapon ---------------------------------------------------
+// The same five models, hung off the character's `hand_marker` joint so an
+// enemy is visibly carrying the gun that is shooting at you. It rides the
+// skinned pose, so it is on the RENDER clock with everything else in this
+// file and feeds nothing back into the tick.
+//
+// ONE offset for the whole arsenal, which is only possible because every
+// weapon puts its origin inside the hand's grasp (gen_weapons.py, family rule
+// 1). A per-weapon correction here would be the same mistake that rule exists
+// to prevent, and would have to be re-tuned every time a model changed.
+//
+// `hand_marker` inherits the forearm's axes, and the forearm hangs: its local
+// -Y runs down the arm toward the fingers, and its -Z is the character's own
+// forward. So a weapon parented with no rotation at all already points where
+// the body is facing -- what is left is to place the grip in the fist rather
+// than at the wrist the joint actually sits on, and to break the barrel out
+// of the hip the arm is hanging beside.
+constexpr float kGripForward = 0.14f;  // along the body's -Z, clear of the hip
+constexpr float kGripDown = 0.04f;     // wrist joint -> the grasp below it
+constexpr float kGripOut = 0.05f;      // away from the body, off the thigh
+// A gun carried at the end of a hanging arm points at the floor two metres
+// ahead unless the wrist lifts it. This is that wrist: enough to bring the
+// bore level with the arena, and it is a rotation of the WEAPON about the
+// hand rather than an arm animation, because the clips in character.glb have
+// no aim pose and inventing one is a rig change, not a render change.
+constexpr float kGripPitchRadians = 0.22f;
+// ...and a little inward yaw, so the stock tucks toward the body instead of
+// swinging out in a line square to the shoulders.
+constexpr float kGripYawRadians = 0.10f;
+
+// Weapon-grip space relative to `hand_marker`. Constant, so it is built once.
+glm::mat4 weapon_grip_offset() {
+    glm::mat4 grip = glm::translate(glm::mat4{1.0f}, {-kGripOut, -kGripDown, -kGripForward});
+    grip = glm::rotate(grip, kGripPitchRadians, glm::vec3{1.0f, 0.0f, 0.0f});
+    grip = glm::rotate(grip, kGripYawRadians, glm::vec3{0.0f, 1.0f, 0.0f});
+    return grip;
+}
+
 void draw_capsule(eng::DebugDraw& draw, const glm::vec3& feet, float radius, float height,
                   const glm::vec3& color) {
     constexpr int kSegments = 16;
@@ -1404,11 +1453,35 @@ int main(int argc, char** argv) {
     eng::log::info("Character: {} joints, {} clips", character_skeleton->joint_count(),
                    character_clips.size());
 
+    // Where a weapon hangs. The rig carries a dedicated joint for it, so
+    // nothing here has to guess at a wrist from the forearm's geometry. -1 on
+    // a character asset without one, which costs the held weapon and nothing
+    // else.
+    const int hand_joint = character_skeleton->find("hand_marker");
+    if (hand_joint < 0) {
+        eng::log::warn("Character has no `hand_marker` joint; weapons will not be held");
+    }
+    // pose_to_joint_matrices produces SKINNING matrices -- global * the
+    // joint's inverse bind -- which is not a transform anything can be
+    // parented to. Undoing the inverse bind recovers the global, and the
+    // inverse bind never changes, so its inverse (the joint's BIND-POSE
+    // global) is inverted here rather than once per figure per frame.
+    const glm::mat4 hand_bind_global =
+        hand_joint < 0 ? glm::mat4{1.0f}
+                       : glm::inverse(character_skeleton->joints()[static_cast<std::size_t>(
+                                                                      hand_joint)]
+                                          .inverse_bind);
+    const glm::mat4 grip_offset = weapon_grip_offset();
+
     // Resolves a CharacterAnimation into joint matrices appended to `pool`,
-    // returning the offset. Scratch poses are function-local statics so the
-    // per-frame path does not allocate.
+    // returning the offset. `hand_out` receives the hand joint's transform in
+    // the figure's own space, ready to be composed with its model matrix --
+    // it is an out-parameter because `matrices` is scratch that the next call
+    // overwrites, so a caller cannot go back for it afterwards. Scratch poses
+    // are function-local statics so the per-frame path does not allocate.
     const auto append_character_pose = [&](const CharacterAnimation& animation,
-                                           std::vector<glm::mat4>& pool) -> int {
+                                           std::vector<glm::mat4>& pool,
+                                           glm::mat4& hand_out) -> int {
         static eng::Pose idle_pose;
         static eng::Pose run_pose;
         static eng::Pose blended;
@@ -1424,6 +1497,10 @@ int main(int argc, char** argv) {
             eng::blend_poses(idle_pose, run_pose, animation.run_weight, blended);
         }
         eng::pose_to_joint_matrices(*character_skeleton, blended, matrices);
+
+        hand_out = hand_joint < 0
+                       ? glm::mat4{1.0f}
+                       : matrices[static_cast<std::size_t>(hand_joint)] * hand_bind_global;
 
         const auto offset = static_cast<int>(pool.size());
         pool.insert(pool.end(), matrices.begin(), matrices.end());
@@ -1442,6 +1519,22 @@ int main(int argc, char** argv) {
     // Animation phase has to persist per player across frames, or every
     // figure resets to the start of its cycle every frame and never moves.
     std::unordered_map<std::uint8_t, CharacterAnimation> remote_animations;
+    // Which weapon each remote player is drawn holding. A snapshot does not
+    // carry a slot -- adding one is a protocol break for a cosmetic, and the
+    // packet is the thing 32 players a tick are paying for -- so this is
+    // inferred from the fire events, which already say who shot with what.
+    // The limitation is honest and visible: a player who has not fired since
+    // they spawned is drawn with slot 0, and someone who switches to the
+    // sniper and never pulls the trigger keeps carrying the rifle. Every
+    // player who is a threat to you has fired recently by definition.
+    // Value-initialized to 0, which is that same default.
+    std::array<std::uint8_t, game::kMaxPlayers> remote_weapon_slots{};
+    // Last frame's hand transform per player, world space, for the muzzle
+    // flash: fire events are handled before the draw list is built, so the
+    // current frame's hand does not exist yet when the flash needs a place to
+    // start. One frame of staleness at 60-plus Hz is under the duration of
+    // the flash itself.
+    std::unordered_map<std::uint8_t, glm::mat4> remote_hand_transforms;
 
     eng::Scene scene;
     std::vector<glm::vec3> spawn_points;
@@ -2104,6 +2197,30 @@ int main(int argc, char** argv) {
                 bool any_hit = false;
                 std::uint32_t ray_index = 0;
                 const bool own_shot = fire.shooter == net->my_id();
+                // The only place a snapshot ever reveals what someone is
+                // holding, so it is the only place the third-person model can
+                // learn it.
+                if (!own_shot && fire.shooter < game::kMaxPlayers) {
+                    remote_weapon_slots[fire.shooter] = fire.slot;
+                }
+                // Where the shooter's barrel was last frame. Resolved once per
+                // event rather than per pellet: a shotgun's eight rays all
+                // leave the same muzzle. A weapon with no `muzzle` node -- the
+                // knife -- suppresses the flash entirely, exactly as it does
+                // for the viewmodel, so this stays one rule for the arsenal
+                // instead of a slot number to remember.
+                const WeaponModel* shooter_weapon =
+                    own_shot ? nullptr : weapon_model_for(arsenal.clamp_slot(fire.slot));
+                const bool shooter_flashes =
+                    shooter_weapon == nullptr || shooter_weapon->muzzle.has_value();
+                std::optional<glm::vec3> shooter_muzzle;
+                if (shooter_weapon != nullptr && shooter_weapon->muzzle) {
+                    if (const auto hand = remote_hand_transforms.find(fire.shooter);
+                        hand != remote_hand_transforms.end()) {
+                        shooter_muzzle =
+                            glm::vec3(hand->second * glm::vec4{*shooter_weapon->muzzle, 1.0f});
+                    }
+                }
                 for (const game::FireRay& ray : fire.rays) {
                     tracers.push_back({fire.from + glm::vec3{0.0f, -0.06f, 0.0f}, ray.to, 0.08f});
                     any_hit = any_hit || ray.hit_player != game::kNoPlayer;
@@ -2125,12 +2242,21 @@ int main(int argc, char** argv) {
                         // Your own flash comes off the viewmodel's muzzle node
                         // below; fire.from is the SERVER's copy of your eye and
                         // is tens of centimetres from your camera, which would
-                        // put your own flash somewhere your gun is not. Remote
-                        // shooters have no viewmodel to hang off, so they keep
-                        // the eye-plus-0.3 m estimate until a weapon is
-                        // attached to their hand joint.
-                        if (ray_index == 0 && !own_shot) {
-                            emit_muzzle_flash(particles, fire.from + unit * 0.3f, unit, seed);
+                        // put your own flash somewhere your gun is not. A
+                        // remote shooter now has a gun in the arena, so their
+                        // flash comes off ITS muzzle node -- and a shooter
+                        // holding the knife has no muzzle node, so a melee
+                        // swing cannot spit fire here either. The eye-plus-0.3
+                        // fallback is for the frame a player fires before they
+                        // have ever been drawn, where the alternative is a
+                        // bang from nowhere. Direction stays the RAY's, not
+                        // the weapon's -Z: the hand only yaws with the body,
+                        // so the gun cannot point up a stairwell even when the
+                        // shot does.
+                        if (ray_index == 0 && !own_shot && shooter_flashes) {
+                            emit_muzzle_flash(particles,
+                                              shooter_muzzle.value_or(fire.from + unit * 0.3f),
+                                              unit, seed);
                         }
                     }
                     ++ray_index;
@@ -2203,6 +2329,16 @@ int main(int argc, char** argv) {
                     prediction->reset(respawn.position);
                     player = prediction->state();
                     previous_player = player;
+                }
+                // Not a guess: the server calls reset_loadout on respawn, so
+                // everyone genuinely does come back on slot 0 until their next
+                // command asks for something else. A JOIN resets the loadout
+                // the same way but announces no event, so a recycled player id
+                // can arm a newcomer with the previous occupant's weapon until
+                // they fire or die once -- the same class of staleness the
+                // whole inference has, and not worth a message to fix.
+                if (respawn.player < game::kMaxPlayers) {
+                    remote_weapon_slots[respawn.player] = 0;
                 }
             }
             for (KillFeedEntry& entry : kill_feed) {
@@ -2387,13 +2523,21 @@ int main(int argc, char** argv) {
                 phase < 4.0f ? glm::vec3{0.0f, 0.0f, -5.5f} : glm::vec3{0.0f};
             update_character_animation(dummy_animation, fake_velocity, true, game::kMove.max_speed,
                                        static_cast<float>(dt));
-            const int offset = append_character_pose(dummy_animation, joint_pool);
+            glm::mat4 hand{1.0f};
+            const int offset = append_character_pose(dummy_animation, joint_pool, hand);
             // Offline has no player ids, so the mannequin borrows slot 0's
             // colour: the practice range should look like the game, and there
             // is nobody else here for it to be confused with.
-            draw_items.push_back({glm::translate(glm::mat4{1.0f}, dummy_position),
-                                  DrawKind::Character, -1, game::player_color(0), offset,
-                                  static_cast<int>(character_skeleton->joint_count())});
+            const glm::mat4 dummy_model = glm::translate(glm::mat4{1.0f}, dummy_position);
+            draw_items.push_back({dummy_model, DrawKind::Character, -1, game::player_color(0),
+                                  offset, static_cast<int>(character_skeleton->joint_count())});
+            // ...but it carries the weapon YOU are carrying, not slot 0's.
+            // Offline is where a weapon is looked at rather than fought with,
+            // and the mannequin is the only third-person figure in it, so
+            // --weapon showing both ends of the same gun is the whole point.
+            draw_items.push_back({dummy_model * hand * grip_offset, DrawKind::Weapon,
+                                  static_cast<int>(arsenal.clamp_slot(loadout.slot)),
+                                  glm::vec3{1.0f}, -1, 0});
         }
 
         // Replayed players: re-simulated, so drawn straight from their
@@ -2405,14 +2549,19 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 glm::mat4 model = glm::translate(glm::mat4{1.0f}, actor.state.position);
-                model = glm::rotate(model, actor.yaw, glm::vec3{0.0f, 1.0f, 0.0f});
+                // Negated for the same reason as the remote player below.
+                model = glm::rotate(model, -actor.yaw, glm::vec3{0.0f, 1.0f, 0.0f});
 
                 CharacterAnimation& animation = replay_animations[id];
                 update_character_animation(animation, actor.state.velocity, actor.state.on_ground,
                                            game::kMove.max_speed, static_cast<float>(dt));
-                const int offset = append_character_pose(animation, joint_pool);
+                glm::mat4 hand{1.0f};
+                const int offset = append_character_pose(animation, joint_pool, hand);
                 draw_items.push_back({model, DrawKind::Character, -1, game::player_color(id),
                                       offset, static_cast<int>(character_skeleton->joint_count())});
+                draw_items.push_back({model * hand * grip_offset, DrawKind::Weapon,
+                                      static_cast<int>(arsenal.clamp_slot(actor.weapon_slot)),
+                                      glm::vec3{1.0f}, -1, 0});
             }
         }
 
@@ -2430,8 +2579,16 @@ int main(int argc, char** argv) {
                 // position is used directly -- no half-height offset like the
                 // stretched cube needed. Yaw comes from the snapshot, so a
                 // player faces the way they are looking.
+                //
+                // NEGATED, and it has to be. A view yaw points at
+                // (sin y, -cos y) -- hitscan.h and the camera both say so --
+                // but a rotation of +y about +Y sends the model's -Z to
+                // (-sin y, -cos y), which is that direction mirrored in x. A
+                // blank symmetric figure could be drawn backwards forever
+                // without anyone being able to tell; put a gun in its hand
+                // and it points away from the player it is killing.
                 glm::mat4 model = glm::translate(glm::mat4{1.0f}, pose->position);
-                model = glm::rotate(model, pose->yaw, glm::vec3{0.0f, 1.0f, 0.0f});
+                model = glm::rotate(model, -pose->yaw, glm::vec3{0.0f, 1.0f, 0.0f});
 
                 // Snapshots carry no velocity, so it is estimated from two
                 // interpolated samples. That is only used to pick a clip and
@@ -2445,9 +2602,22 @@ int main(int argc, char** argv) {
                 update_character_animation(animation, velocity, std::abs(velocity.y) < 0.6f,
                                            game::kMove.max_speed, static_cast<float>(dt));
 
-                const int offset = append_character_pose(animation, joint_pool);
+                glm::mat4 hand{1.0f};
+                const int offset = append_character_pose(animation, joint_pool, hand);
                 draw_items.push_back({model, DrawKind::Character, -1, game::player_color(id),
                                       offset, static_cast<int>(character_skeleton->joint_count())});
+
+                // An id the server has no business sending falls back to the
+                // same slot 0 a player who has not fired yet gets.
+                const std::uint8_t slot =
+                    id < game::kMaxPlayers ? remote_weapon_slots[id] : std::uint8_t{0};
+                const glm::mat4 weapon_model = model * hand * grip_offset;
+                draw_items.push_back({weapon_model, DrawKind::Weapon,
+                                      static_cast<int>(arsenal.clamp_slot(slot)), glm::vec3{1.0f},
+                                      -1, 0});
+                // Kept for the NEXT frame's fire events, which are drained
+                // before this list exists.
+                remote_hand_transforms[id] = weapon_model;
             }
         }
 
@@ -2515,6 +2685,18 @@ int main(int argc, char** argv) {
                         primitive.gpu.draw();
                     }
                     break;
+                case DrawKind::Weapon:
+                    // A held weapon DOES cast, unlike the viewmodel: this one
+                    // is a real object in the arena, and a figure whose shadow
+                    // is empty-handed is the tell that the gun is a decal.
+                    if (const WeaponModel* weapon =
+                            weapon_model_for(static_cast<std::uint8_t>(item.mesh))) {
+                        for (const WeaponModel::Box& box : weapon->boxes) {
+                            depth_shader->set_mat4("u_model", item.model * box.local);
+                            weapon->primitives[static_cast<std::size_t>(box.primitive)].gpu.draw();
+                        }
+                    }
+                    break;
             }
         }
         glCullFace(GL_BACK);
@@ -2576,6 +2758,29 @@ int main(int argc, char** argv) {
             lit_shader->set_mat3("u_normal_matrix",
                                  glm::mat3(glm::transpose(glm::inverse(item.model))));
             bind_joints(*lit_shader, item);
+            if (item.kind == DrawKind::Weapon) {
+                // Untextured like the character, and for the same reason it
+                // matters more here: the loader gives every weapon box a
+                // tangent frame, so without the "no map" bind it would wear
+                // whichever arena normal map the last wall left on unit 3.
+                // The viewmodel below hits the identical trap.
+                bind_material(-1, -1, 1.0f);
+                if (const WeaponModel* weapon =
+                        weapon_model_for(static_cast<std::uint8_t>(item.mesh))) {
+                    for (const WeaponModel::Box& box : weapon->boxes) {
+                        const glm::mat4 model = item.model * box.local;
+                        lit_shader->set_mat4("u_model", model);
+                        lit_shader->set_mat3("u_normal_matrix",
+                                             glm::mat3(glm::transpose(glm::inverse(model))));
+                        const RenderPrimitive& primitive =
+                            weapon->primitives[static_cast<std::size_t>(box.primitive)];
+                        lit_shader->set_vec3("u_tint", primitive.color);
+                        primitive.gpu.draw();
+                        ++draw_calls;
+                    }
+                }
+                continue;
+            }
             if (item.kind != DrawKind::ArenaMesh) {
                 // Characters and targets are untextured, so they get the
                 // white albedo and the flat normal.

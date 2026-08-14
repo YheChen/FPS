@@ -133,3 +133,27 @@ wire keeps its one-byte prefix, so a 300-byte player name stays impossible.
 
 A hostile peer can claim 60 KB and send none; the reader rejects any length
 past the caller's own limit rather than allocating on the claim.
+
+## Text chat (M50): ChatSend 20, ChatMessage 21
+
+| Field | Type | Notes |
+|---|---|---|
+| **ChatSend** (client -> server) | | |
+| text | str | u8 length prefix, <= 120 bytes |
+| **ChatMessage** (server -> everyone) | | |
+| sender | u8 | < 8; the SERVER's answer, not the client's |
+| text | str | u8 length prefix, <= 120 bytes, already sanitized |
+
+`ChatSend` carries **no sender field**. There is nothing to forge: the server
+stamps the id of the connection the message arrived on. A client that could
+name its own sender could put words in another player's mouth.
+
+Over-length is **rejected, not truncated** — `str(kMaxChatLength)` refuses a
+length past the cap, so a hostile 200-byte message is dropped at the reader
+rather than silently shortened.
+
+`sanitize_chat()` then removes C0 controls and DEL. A newline is the one that
+matters: it would let a single message forge a second line in the chat log
+*and* in the server's own log, and an ESC could rewrite the terminal of
+whoever is tailing `journalctl`. Bytes >= 0x80 are kept so accented names
+survive, and truncation never splits a UTF-8 sequence.

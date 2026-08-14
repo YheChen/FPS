@@ -948,3 +948,48 @@ otherwise.
 **Tests:** 275 (+8), covering the raise/lower ramp, the cone the server
 actually rolls, sights collapsing on a weapon switch, melee never aiming,
 sprint beating aim, and configs that would make aiming *worse* being rejected.
+
+## M50 — text chat ✅
+
+T or Enter opens a chat box; Enter sends, Esc cancels. Lines appear bottom
+left, fade after eight seconds, and stay up while the box is open so you can
+see what you are replying to.
+
+**ChatSend is the only message whose payload a player composes by hand**,
+which makes it the only one where the *content* is hostile input rather than
+just the framing. Two layers:
+
+- The wire **rejects** anything past 120 bytes rather than truncating it.
+- `sanitize_chat()` strips C0 controls and DEL. The newline is the dangerous
+  one: it forges a second line in the chat log *and* in the server's log,
+  where an ESC could rewrite the terminal of whoever is tailing `journalctl`.
+
+**The sender is the server's answer.** `ChatSend` carries no sender field at
+all, so there is nothing to forge -- the server stamps the id of the
+connection it arrived on.
+
+**Rate limited to one message per 45 ticks (0.75 s), per player**, in ticks
+rather than wall clock so it shares the simulation's one source of time. A
+flood from one player cannot silence another. Throttled messages are dropped
+silently, because telling a spammer they were throttled is a second message
+per attempt.
+
+**Typing is not playing.** While the box is open, buttons are zeroed and the
+view is frozen -- otherwise "reload in 3" reloads, walks forward and switches
+weapons. Esc closes the box before it would toggle mouse capture.
+
+**A bug the tests caught.** The first `sanitize_chat` trimmed trailing UTF-8
+continuation bytes unconditionally, to avoid ending mid-character. That ate
+the last character of every accented word -- "café" became "caf" -- because a
+complete two-byte sequence also ends in a continuation byte. It now only
+repairs the tail when the cap actually cut something.
+
+**Verified over the real wire**, not only in tests: a client joined a running
+server, sent `"hello\nadmin: banned"`, and the server relayed
+`sender=1 text='helloadmin: banned'` and logged the same -- no forged second
+line in either place.
+
+**Tests:** 287 (+12). Round-trip, an impossible sender id refused, control
+stripping, trimming, the UTF-8 cap, relay-to-everyone-including-the-sender,
+per-player rate limiting, server-side sanitization, empty messages dropped,
+and chat from a peer that never joined ignored.

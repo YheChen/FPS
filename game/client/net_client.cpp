@@ -110,6 +110,17 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
             }
             break;
         }
+        case MessageType::ChatMessage: {
+            if (const auto chat = read_chat_message(reader)) {
+                const auto it = players_.find(chat->sender);
+                chat_lines_.push_back({chat->sender,
+                                       it != players_.end() ? it->second.name : std::string("?"),
+                                       chat->text});
+            }
+            break;
+        }
+        case MessageType::ChatSend:
+            break;  // client-to-server only; a server sending this is broken
         case MessageType::Leaderboard: {
             if (const auto board = read_leaderboard(reader)) {
                 leaderboard_ = board->entries;
@@ -252,6 +263,20 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
             // signalling down a connection that was not negotiating.
             break;
     }
+}
+
+void NetClient::send_chat(std::string_view text) {
+    const std::string clean = sanitize_chat(text);
+    if (clean.empty() || state_ != State::InGame) {
+        return;
+    }
+    eng::ByteWriter writer;
+    write(writer, ChatSendMsg{clean});
+    transport_->send(writer.data(), eng::NetChannel::Reliable, true);
+}
+
+std::vector<NetClient::ChatLine> NetClient::take_chat_lines() {
+    return std::exchange(chat_lines_, {});
 }
 
 std::vector<FireEventMsg> NetClient::take_fire_events() {

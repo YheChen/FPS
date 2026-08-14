@@ -25,6 +25,8 @@ std::optional<Key> translate_scancode(SDL_Scancode scancode) {
             return Key::D;
         case SDL_SCANCODE_R:
             return Key::R;
+        case SDL_SCANCODE_T:
+            return Key::T;
         case SDL_SCANCODE_SPACE:
             return Key::Space;
         case SDL_SCANCODE_LSHIFT:

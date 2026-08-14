@@ -117,9 +117,16 @@ private:
         // Basic abuse accounting.
         int input_packets_this_second = 0;
         int bad_messages = 0;
+        // Chat is rate limited per player, in ticks rather than wall clock so
+        // it shares the simulation's one source of time. A player who talks
+        // faster than this is simply not relayed -- silently, because telling
+        // a spammer they were throttled is a second message per attempt.
+        std::uint32_t last_chat_tick = 0;
+        bool has_chatted = false;
     };
 
     void handle_hello(std::uint32_t peer, eng::ByteReader& reader, eng::IServerTransport& net);
+    void handle_chat(std::uint8_t sender, eng::ByteReader& reader, eng::IServerTransport& net);
     void handle_input(Player& player, eng::ByteReader& reader, eng::IServerTransport& net);
     // Gathers what a bot can perceive. Lives here, not in decide(), so the
     // decision layer stays a pure function with no world access.

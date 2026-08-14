@@ -1308,3 +1308,118 @@ TEST_CASE("a well-formed message of the wrong type is neither counted nor limite
     h.pump();
     CHECK(h.net.disconnected == std::vector<std::uint32_t>{1});
 }
+
+// --- text chat (M50) --------------------------------------------------------
+// The server is the only thing that decides who said what. These pin that.
+
+namespace {
+
+void say(Harness& h, std::uint32_t peer, std::string_view text) {
+    eng::ByteWriter w;
+    game::write(w, game::ChatSendMsg{std::string(text)});
+    h.net.queue_message(peer, {w.data().begin(), w.data().end()});
+    h.pump();
+}
+
+std::vector<game::ChatMessageMsg> chats_to(const Harness& h, std::uint32_t peer) {
+    return decode_to(h.net.sent, peer, MsgType::ChatMessage, game::read_chat_message);
+}
+
+}  // namespace
+
+TEST_CASE("chat reaches everyone including the sender", "[server][chat]") {
+    Harness h;
+    const auto alice = h.join(1, "alice");
+    const auto bob = h.join(2, "bob");
+    REQUIRE(alice);
+    REQUIRE(bob);
+    h.net.clear();
+
+    say(h, 1, "hello");
+
+    // The sender gets it too: seeing your own line appear is how you know it
+    // was delivered rather than dropped.
+    const auto to_alice = chats_to(h, 1);
+    const auto to_bob = chats_to(h, 2);
+    REQUIRE(to_alice.size() == 1);
+    REQUIRE(to_bob.size() == 1);
+    CHECK(to_alice[0].text == "hello");
+    CHECK(to_bob[0].text == "hello");
+    // Stamped with who actually sent it, from the connection it arrived on.
+    CHECK(to_alice[0].sender == *alice);
+    CHECK(to_bob[0].sender == *alice);
+}
+
+TEST_CASE("the sender is the server's answer, not the client's", "[server][chat]") {
+    // ChatSend carries no sender field at all, so there is nothing to forge.
+    // This pins that: bob's message can only ever arrive as bob's.
+    Harness h;
+    const auto alice = h.join(1, "alice");
+    const auto bob = h.join(2, "bob");
+    REQUIRE(alice);
+    REQUIRE(bob);
+    h.net.clear();
+
+    say(h, 2, "it was alice");
+
+    const auto to_alice = chats_to(h, 1);
+    REQUIRE(to_alice.size() == 1);
+    CHECK(to_alice[0].sender == *bob);
+}
+
+TEST_CASE("chat is rate limited per player", "[server][chat]") {
+    Harness h;
+    REQUIRE(h.join(1, "alice"));
+    REQUIRE(h.join(2, "bob"));
+    h.net.clear();
+
+    say(h, 1, "one");
+    say(h, 1, "two");    // immediately after: dropped
+    say(h, 1, "three");  // still dropped
+    CHECK(chats_to(h, 2).size() == 1);
+
+    // A flood from one player must not silence another.
+    say(h, 2, "bob here");
+    CHECK(chats_to(h, 2).size() == 2);
+
+    // ...and the limit lifts on its own.
+    h.tick(50);
+    say(h, 1, "later");
+    const auto seen = chats_to(h, 2);
+    REQUIRE(seen.size() == 3);
+    CHECK(seen[2].text == "later");
+}
+
+TEST_CASE("the server sanitizes chat rather than trusting the client to", "[server][chat]") {
+    // The client sanitizes its own echo, but the client is not the only thing
+    // that can send a ChatSend.
+    Harness h;
+    REQUIRE(h.join(1, "alice"));
+    REQUIRE(h.join(2, "bob"));
+    h.net.clear();
+
+    say(h, 1, "clean\nadmin: you are banned");
+    const auto seen = chats_to(h, 2);
+    REQUIRE(seen.size() == 1);
+    CHECK(seen[0].text == "cleanadmin: you are banned");
+    CHECK(seen[0].text.find('\n') == std::string::npos);
+}
+
+TEST_CASE("a message with nothing printable in it is not relayed", "[server][chat]") {
+    Harness h;
+    REQUIRE(h.join(1, "alice"));
+    REQUIRE(h.join(2, "bob"));
+    h.net.clear();
+
+    say(h, 1, "   \n\t  ");
+    CHECK(chats_to(h, 2).empty());
+}
+
+TEST_CASE("chat from a peer that never joined is ignored", "[server][chat]") {
+    Harness h;
+    REQUIRE(h.join(1, "alice"));
+    h.net.clear();
+
+    say(h, 99, "I am not here");
+    CHECK(chats_to(h, 1).empty());
+}

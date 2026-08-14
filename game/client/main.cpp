@@ -1912,6 +1912,28 @@ int main(int argc, char** argv) {
     Mode mode = Mode::Menu;
     std::string menu_error;
 
+    // --- chat (M50) -------------------------------------------------------
+    // One line as it will be drawn, plus when it arrived so the log can fade
+    // out of the way instead of sitting on top of the game forever.
+    struct ChatEntry {
+        std::string name;
+        std::string text;
+        double received = 0.0;
+        bool mine = false;
+    };
+    // Six lines is what fits above the HUD without covering the arena, and
+    // eight seconds is long enough to read a sentence you were not watching
+    // for. Both are display limits; the wire cap is kMaxChatLength.
+    constexpr std::size_t kChatLogLines = 6;
+    constexpr double kChatVisibleSeconds = 8.0;
+    constexpr double kChatFadeSeconds = 1.5;
+    std::deque<ChatEntry> chat_log;
+    bool chat_open = false;
+    char chat_input[128]{};
+    // Set on the frame chat opens so the text box can take focus once, and
+    // so the keystroke that OPENED chat cannot also land inside it.
+    bool chat_focus_pending = false;
+
     // A ServerReject(VersionMismatch) is not a dead end, it is a race. Client
     // and server ship separately and there is no in-protocol compatibility,
     // so a protocol bump has a window -- minutes, while the other half
@@ -2083,7 +2105,7 @@ int main(int argc, char** argv) {
         if (!window->poll(input, &*imgui)) {
             running = false;
         }
-        if (input.was_pressed(eng::Key::Escape) && mode != Mode::Menu) {
+        if (input.was_pressed(eng::Key::Escape) && !chat_open && mode != Mode::Menu) {
             window->set_relative_mouse(!window->relative_mouse());
         }
         if (input.was_pressed(eng::Key::F1)) {
@@ -2095,7 +2117,7 @@ int main(int argc, char** argv) {
         }
         // Weapon selection is state, not an edge: we keep sending the chosen
         // slot every tick so a dropped packet cannot lose the switch.
-        if (mode != Mode::Menu) {
+        if (mode != Mode::Menu && !chat_open) {
             const std::array<eng::Key, 5> slot_keys = {
                 eng::Key::Num1, eng::Key::Num2, eng::Key::Num3, eng::Key::Num4, eng::Key::Num5};
             for (std::uint8_t i = 0; i < slot_keys.size(); ++i) {
@@ -2109,7 +2131,24 @@ int main(int argc, char** argv) {
 
         // View angles update every render frame for minimal aim latency;
         // simulation consumes the latest angles at each fixed tick.
-        if (window->relative_mouse() && !fly_mode && mode != Mode::Menu) {
+        // Chat opens on T or Enter, and only online -- there is nobody to talk
+        // to in offline practice, and a stray T there would silently eat the
+        // player's next few keystrokes.
+        if (online && !chat_open && mode != Mode::Menu &&
+            (input.was_pressed(eng::Key::T) || input.was_pressed(eng::Key::Enter))) {
+            chat_open = true;
+            chat_focus_pending = true;
+            chat_input[0] = '\0';
+        }
+        // Esc closes chat FIRST, before it would toggle mouse capture: with
+        // the box open, Esc means "never mind", not "release the mouse".
+        if (chat_open && input.was_pressed(eng::Key::Escape)) {
+            chat_open = false;
+        }
+
+        // Aim is frozen while typing. Otherwise moving the mouse to reach for
+        // a key drags the view across the arena.
+        if (window->relative_mouse() && !fly_mode && !chat_open && mode != Mode::Menu) {
             // Scale look speed with the zoom, so a given mouse movement
             // sweeps the same distance ON SCREEN whether or not the sights
             // are up. Without this, scoping the sniper to a third of the FOV
@@ -2241,6 +2280,12 @@ int main(int argc, char** argv) {
                 if (!window->relative_mouse() && !args.auto_fire) {
                     game::set_button(command, game::Button::Fire, false);  // menu clicks
                 }
+                // Typing is not playing: "reload in 3" must not reload, walk
+                // forward and fire. The view angles are already frozen above;
+                // this is the other half.
+                if (chat_open) {
+                    command.buttons = 0;
+                }
                 if (args.auto_fire) {
                     game::set_button(command, game::Button::Fire, auto_fire_now);
                 }
@@ -2267,6 +2312,9 @@ int main(int argc, char** argv) {
 
             game::InputCommand command =
                 make_command(input, view_yaw, view_pitch, input_sequence++, desired_slot);
+            if (chat_open) {
+                command.buttons = 0;
+            }
             if (args.auto_fire) {
                 game::set_button(command, game::Button::Fire, auto_fire_now);
             }
@@ -2519,6 +2567,15 @@ int main(int argc, char** argv) {
                 if (own_shot && any_hit) {
                     sound("hit.wav", 0.8f);  // hit confirm
                     hitmarker = {0.18f, false};
+                }
+            }
+            for (auto& line : net->take_chat_lines()) {
+                const bool mine = line.sender == net->my_id();
+                chat_log.push_back({std::move(line.name), std::move(line.text), sim_time, mine});
+                // Bounded: a long match should not accumulate an unbounded
+                // history of strings nobody can scroll back to anyway.
+                while (chat_log.size() > kChatLogLines) {
+                    chat_log.pop_front();
                 }
             }
             for (const auto& damage : net->take_damage_events()) {
@@ -3448,8 +3505,66 @@ int main(int argc, char** argv) {
         }
         ImGui::TextDisabled(
             "Esc: capture | WASD+Space | Shift: sprint | Ctrl: crouch | 1-5: weapon | LMB "
-            "fire | RMB aim | R reload");
+            "fire | RMB aim | R reload | T chat");
         ImGui::End();
+
+        // --- chat (M50) ---------------------------------------------------
+        // Bottom left, above the HUD line. Old lines fade rather than vanish,
+        // and everything stays visible while the box is open so you can see
+        // what you are replying to.
+        if (online && mode != Mode::Menu && (!chat_log.empty() || chat_open)) {
+            const ImVec2 display = ImGui::GetIO().DisplaySize;
+            ImDrawList* overlay = ImGui::GetForegroundDrawList();
+            const float line_height = ImGui::GetTextLineHeightWithSpacing();
+            float y = display.y - 140.0f - line_height * static_cast<float>(chat_log.size());
+            for (const ChatEntry& entry : chat_log) {
+                const double age = sim_time - entry.received;
+                float fade = 1.0f;
+                if (!chat_open && age > kChatVisibleSeconds) {
+                    fade =
+                        1.0f - static_cast<float>((age - kChatVisibleSeconds) / kChatFadeSeconds);
+                }
+                if (fade <= 0.0f) {
+                    y += line_height;
+                    continue;
+                }
+                const int a = static_cast<int>(std::clamp(fade, 0.0f, 1.0f) * 255.0f);
+                const std::string text = entry.name + ": " + entry.text;
+                // A shadow, because chat lands over whatever the arena
+                // happens to be showing and white on concrete is unreadable.
+                overlay->AddText({25.0f, y + 1.0f}, IM_COL32(0, 0, 0, a * 3 / 4), text.c_str());
+                overlay->AddText(
+                    {24.0f, y},
+                    entry.mine ? IM_COL32(255, 226, 140, a) : IM_COL32(235, 235, 235, a),
+                    text.c_str());
+                y += line_height;
+            }
+
+            if (chat_open) {
+                ImGui::SetNextWindowPos({20.0f, display.y - 130.0f}, ImGuiCond_Always);
+                ImGui::SetNextWindowSize({std::min(560.0f, display.x - 40.0f), 0});
+                ImGui::Begin("chat", nullptr,
+                             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar |
+                                 ImGuiWindowFlags_AlwaysAutoResize);
+                if (chat_focus_pending) {
+                    ImGui::SetKeyboardFocusHere();
+                    chat_focus_pending = false;
+                }
+                ImGui::SetNextItemWidth(-1.0f);
+                // kMaxChatLength + 1 is enforced by the buffer itself, so the
+                // box cannot accept what the wire would refuse.
+                if (ImGui::InputText("##chat", chat_input,
+                                     std::min(sizeof(chat_input), game::kMaxChatLength + 1),
+                                     ImGuiInputTextFlags_EnterReturnsTrue)) {
+                    net->send_chat(chat_input);
+                    chat_input[0] = '\0';
+                    chat_open = false;
+                }
+                ImGui::TextDisabled("Enter to send, Esc to cancel");
+                ImGui::End();
+            }
+        }
 
         // --- match UI (online) ---------------------------------------------
         if (online) {

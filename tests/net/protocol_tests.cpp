@@ -520,11 +520,19 @@ TEST_CASE("signalling messages reject trailing bytes", "[protocol]") {
     CHECK_FALSE(game::read_rtc_answer(r).has_value());
 }
 
-TEST_CASE("the signalling types are inside the accepted type range", "[protocol]") {
+TEST_CASE("every message type is inside the accepted type range", "[protocol]") {
     // read_message_type bounds-checks against the LAST enumerator, so adding
     // a message without moving that bound silently makes it unreadable.
-    for (const auto type : {game::MessageType::RtcOffer, game::MessageType::RtcAnswer,
-                            game::MessageType::RtcCandidate}) {
+    //
+    // THIS TEST IS SUPPOSED TO FAIL when a message is added and the bound is
+    // not moved with it -- and it did exactly that when M50 added ChatSend
+    // past what was then the end. Update kLastMessageType below along with
+    // the enum; that is the point of it being written down twice.
+    constexpr auto kLastMessageType = game::MessageType::ChatMessage;
+
+    for (const auto type :
+         {game::MessageType::ClientHello, game::MessageType::RtcOffer, game::MessageType::RtcAnswer,
+          game::MessageType::RtcCandidate, game::MessageType::ChatSend, kLastMessageType}) {
         eng::ByteWriter w;
         w.u8(static_cast<std::uint8_t>(type));
         eng::ByteReader r{w.data()};
@@ -532,9 +540,76 @@ TEST_CASE("the signalling types are inside the accepted type range", "[protocol]
     }
     // ...and one past the end is still refused.
     eng::ByteWriter w;
-    w.u8(static_cast<std::uint8_t>(game::MessageType::RtcCandidate) + 1);
+    w.u8(static_cast<std::uint8_t>(kLastMessageType) + 1);
     eng::ByteReader r{w.data()};
     CHECK_FALSE(game::read_message_type(r).has_value());
+}
+
+// --- text chat (M50) --------------------------------------------------------
+// ChatSend is the only message whose PAYLOAD a player composes, so it is the
+// only one where the content, not just the framing, is hostile input.
+
+TEST_CASE("chat messages round-trip", "[protocol][chat]") {
+    eng::ByteWriter w;
+    write(w, game::ChatMessageMsg{3, "nice shot"});
+    eng::ByteReader r{w.data()};
+    REQUIRE(game::read_message_type(r) == game::MessageType::ChatMessage);
+    const auto message = game::read_chat_message(r);
+    REQUIRE(message);
+    CHECK(message->sender == 3);
+    CHECK(message->text == "nice shot");
+}
+
+TEST_CASE("a chat message claiming an impossible sender is rejected", "[protocol][chat]") {
+    eng::ByteWriter w;
+    w.u8(static_cast<std::uint8_t>(game::MessageType::ChatMessage));
+    w.u8(200);  // no such player
+    w.str("hello");
+    eng::ByteReader r{w.data()};
+    REQUIRE(game::read_message_type(r) == game::MessageType::ChatMessage);
+    CHECK_FALSE(game::read_chat_message(r).has_value());
+}
+
+TEST_CASE("sanitize_chat strips control characters", "[protocol][chat]") {
+    // A newline would let one message forge a second chat line -- and a
+    // second line in the server's log, which is where this gets dangerous.
+    CHECK(game::sanitize_chat("hello\nadmin: banned") == "helloadmin: banned");
+    CHECK(game::sanitize_chat("a\rb") == "ab");
+    CHECK(game::sanitize_chat("a\tb") == "ab");
+    CHECK(game::sanitize_chat("\x1b[31mred") == "[31mred");  // ESC removed, text kept
+    CHECK(game::sanitize_chat(std::string("nul\0here", 8)) == "nulhere");
+}
+
+TEST_CASE("sanitize_chat trims and rejects the empty", "[protocol][chat]") {
+    CHECK(game::sanitize_chat("  spaced  ") == "spaced");
+    CHECK(game::sanitize_chat("").empty());
+    CHECK(game::sanitize_chat("      ").empty());
+    CHECK(game::sanitize_chat("\n\n\n").empty());
+}
+
+TEST_CASE("sanitize_chat caps length without splitting a character", "[protocol][chat]") {
+    const std::string plain(300, 'x');
+    CHECK(game::sanitize_chat(plain).size() == game::kMaxChatLength);
+
+    // 'é' is two bytes. Filling to exactly one byte past the cap must drop
+    // the whole character rather than leave half of it: a lone continuation
+    // byte is invalid UTF-8, and the renderer would be handed it purely
+    // because of where the cap happened to fall.
+    std::string accented;
+    while (accented.size() < game::kMaxChatLength + 4) {
+        accented += "\xC3\xA9";
+    }
+    const std::string clean = game::sanitize_chat(accented);
+    CHECK(clean.size() <= game::kMaxChatLength);
+    CHECK(clean.size() % 2 == 0);  // only whole two-byte characters survived
+    // ...and nothing left dangling at either end.
+    CHECK((static_cast<unsigned char>(clean.back()) & 0xC0) == 0x80);
+}
+
+TEST_CASE("chat keeps text a player would legitimately type", "[protocol][chat]") {
+    CHECK(game::sanitize_chat("gg wp :)") == "gg wp :)");
+    CHECK(game::sanitize_chat("caf\xC3\xA9") == "caf\xC3\xA9");
+    CHECK(game::sanitize_chat("<b>not html</b>") == "<b>not html</b>");
 }
 
 }  // namespace

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -19,7 +20,7 @@
 // returning nullopt means "hostile or corrupt packet - drop it".
 namespace game {
 
-inline constexpr std::uint16_t kProtocolVersion = 8;
+inline constexpr std::uint16_t kProtocolVersion = 9;
 inline constexpr std::uint8_t kMaxPlayers = 8;
 inline constexpr std::size_t kMaxNameLength = 16;
 inline constexpr int kSnapshotDivisor = 3;  // 60 Hz ticks -> 20 Hz snapshots
@@ -63,6 +64,11 @@ enum class MessageType : std::uint8_t {
     RtcOffer = 17,      // client -> server, SDP
     RtcAnswer = 18,     // server -> client, SDP
     RtcCandidate = 19,  // both ways, ICE candidate + media id
+    // Text chat (M50). ChatSend is the ONLY message whose payload a player
+    // composes by hand, which makes it the only one where the content -- not
+    // just the framing -- is hostile input.
+    ChatSend = 20,     // client -> server, what the player typed
+    ChatMessage = 21,  // server -> everyone, stamped with who actually sent it
 };
 
 // An SDP session description runs to a couple of kilobytes -- by far the
@@ -91,6 +97,32 @@ struct RtcCandidateMsg {
 inline constexpr std::size_t kLeaderboardSize = 10;
 
 inline constexpr std::uint8_t kNoPlayer = 255;  // "no player" id (world/none)
+
+// Long enough for a sentence, short enough that a full lobby spamming the cap
+// is still a rounding error against one snapshot.
+inline constexpr std::size_t kMaxChatLength = 120;
+
+struct ChatSendMsg {
+    std::string text;
+};
+
+// The sender is the SERVER's answer, never the client's: a player id the
+// server filled in from the connection it arrived on. A client that could
+// name its own sender could put words in another player's mouth.
+struct ChatMessageMsg {
+    std::uint8_t sender = kNoPlayer;
+    std::string text;
+};
+
+// Strips what must never reach a renderer or a log, and truncates to the cap.
+// Returns an empty string when nothing printable survives -- the caller drops
+// those rather than broadcasting a blank line.
+//
+// Control characters are removed rather than escaped: a newline would let one
+// message forge several lines in the chat log (and in the server's log), and
+// an ESC could rewrite a terminal that is tailing journalctl. Truncation is
+// by BYTES and deliberately does not split a UTF-8 sequence.
+std::string sanitize_chat(std::string_view text);
 
 // Snapshot player flags.
 inline constexpr std::uint8_t kFlagOnGround = 1u << 0;
@@ -280,6 +312,8 @@ void write(eng::ByteWriter& w, const WeaponStatusMsg& m);
 void write(eng::ByteWriter& w, const RtcOfferMsg& m);
 void write(eng::ByteWriter& w, const RtcAnswerMsg& m);
 void write(eng::ByteWriter& w, const RtcCandidateMsg& m);
+void write(eng::ByteWriter& w, const ChatSendMsg& m);
+void write(eng::ByteWriter& w, const ChatMessageMsg& m);
 
 // --- decode (after the type byte has been consumed) -------------------------
 std::optional<ClientHello> read_client_hello(eng::ByteReader& r);
@@ -301,6 +335,8 @@ std::optional<WeaponStatusMsg> read_weapon_status(eng::ByteReader& r);
 std::optional<RtcOfferMsg> read_rtc_offer(eng::ByteReader& r);
 std::optional<RtcAnswerMsg> read_rtc_answer(eng::ByteReader& r);
 std::optional<RtcCandidateMsg> read_rtc_candidate(eng::ByteReader& r);
+std::optional<ChatSendMsg> read_chat_send(eng::ByteReader& r);
+std::optional<ChatMessageMsg> read_chat_message(eng::ByteReader& r);
 
 // Reads and validates the leading type byte.
 std::optional<MessageType> read_message_type(eng::ByteReader& r);

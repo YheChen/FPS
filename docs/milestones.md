@@ -901,3 +901,50 @@ The Windows OpenSSL question stays open — likely answered by
 `-DUSE_MBEDTLS=ON`. The deployed server does not run `--webrtc` yet: the
 Docker image builds with `FPS_ENABLE_WEBRTC=OFF`, so browsers on the live site
 still connect over `wss://`.
+
+## M49 — aim down sights ✅
+
+Right mouse raises the sights: a per-weapon FOV narrowing, a per-weapon cone
+multiplier, and a transition both halves of the game run identically.
+
+**It is not a zoom effect.** The server owns the cone, so the server runs the
+same `ads_fraction` transition the client predicts, from the same button and
+the same sprint state, and rolls `effective_spread_degrees()` at the moment of
+the shot. A client-reported aim flag would be a client-reported spread.
+
+**No protocol bump.** `buttons` was already a `u16` on the wire with nine bits
+used; `Button::Aim` is the tenth. An older server reads the field it always
+read and ignores a bit it does not know.
+
+**The cost of aiming is sprint, not speed.** `wants_ads()` lets sprinting win,
+and that rule lives in shared code. The obvious alternative -- a movement
+multiplier -- would mean threading aim state through `advance_player`, which
+prediction, reconciliation and replay determinism all depend on. Not worth it
+for a number that can be tuned later.
+
+| Weapon | FOV scale | Cone scale | Raise |
+|---|---|---|---|
+| rifle | 0.75 | 0.35 | 0.20 s |
+| smg | 0.85 | 0.50 | 0.15 s |
+| shotgun | 0.90 | 0.70 | 0.25 s |
+| sniper | 0.35 | — (its cone is already 0) | 0.35 s |
+| knife | melee: never aims | | |
+
+Look sensitivity scales with the zoom, or scoping to a third of the FOV would
+make the sniper three times twitchier exactly when precision is the point.
+
+**Two things the screenshots decided, not the code review.** A weapon that
+more than halves the FOV stops being drawn once the sights are up -- you are
+looking *through* it. And sliding the model onto the centre line, which is
+what a real ADS pose does, was tried and reverted: correct placement aligns
+the weapon's SIGHTS with the camera axis, and the meshes carry only a
+`muzzle` node, so centring just put the breech in the camera's face and filled
+half the screen. Doing it properly is asset work in the weapon generator.
+
+`--aim` holds the sights from a command line, for the same reason
+`--auto-fire` exists: none of the above could be captured in a screenshot
+otherwise.
+
+**Tests:** 275 (+8), covering the raise/lower ramp, the cone the server
+actually rolls, sights collapsing on a weapon switch, melee never aiming,
+sprint beating aim, and configs that would make aiming *worse* being rejected.

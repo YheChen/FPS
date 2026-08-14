@@ -86,6 +86,12 @@ std::optional<WeaponConfig> parse_weapon_config(std::string_view text) {
             ok = parse_float(value, config.range);
         } else if (key == "spread_degrees") {
             ok = parse_float(value, config.spread_degrees);
+        } else if (key == "ads_fov_scale") {
+            ok = parse_float(value, config.ads_fov_scale);
+        } else if (key == "ads_spread_scale") {
+            ok = parse_float(value, config.ads_spread_scale);
+        } else if (key == "ads_seconds") {
+            ok = parse_float(value, config.ads_seconds);
         } else if (key == "pellets") {
             ok = parse_int(value, config.pellets);
         } else if (key == "head_multiplier") {
@@ -139,6 +145,18 @@ std::optional<WeaponConfig> parse_weapon_config(std::string_view text) {
         config.spread_degrees < 0.0f || config.spread_degrees > 45.0f ||
         config.switch_seconds < 0.0f) {
         eng::log::error("weapon config: values out of range");
+        return std::nullopt;
+    }
+    // Both scales are 1.0-relative and may only narrow. A value above 1 would
+    // mean aiming makes you WORSE, which is never the intent and reads as a
+    // sign typo; 0 would be an infinitely thin FOV. ads_seconds of 0 is
+    // allowed and means instant sights.
+    if (config.ads_fov_scale <= 0.0f || config.ads_fov_scale > 1.0f ||
+        config.ads_spread_scale < 0.0f || config.ads_spread_scale > 1.0f ||
+        config.ads_seconds < 0.0f) {
+        eng::log::error(
+            "weapon config: ads_fov_scale/ads_spread_scale must be in (0,1] and "
+            "ads_seconds >= 0");
         return std::nullopt;
     }
     return config;
@@ -199,7 +217,7 @@ void reset_loadout(Loadout& loadout, const Arsenal& arsenal) {
 }
 
 WeaponTickResult update_loadout(Loadout& loadout, const Arsenal& arsenal, std::uint8_t desired_slot,
-                                bool fire_held, bool reload_requested, float dt) {
+                                bool fire_held, bool reload_requested, float dt, bool aim_held) {
     WeaponTickResult result;
     if (arsenal.empty()) {
         return result;
@@ -214,11 +232,24 @@ WeaponTickResult update_loadout(Loadout& loadout, const Arsenal& arsenal, std::u
         // Switching interrupts a reload on the weapon being stowed; the new
         // weapon comes up in whatever state it was left in.
         loadout.weapons[loadout.slot].trigger_was_held = true;  // require a fresh pull
+        // Sights come down instantly on a switch. Easing them out would mean
+        // the new weapon's first moments are rendered through the old one's
+        // zoom, and a knife would briefly be scoped.
+        loadout.ads_fraction = 0.0f;
         result.switched = true;
     }
 
     WeaponState& state = loadout.weapons[loadout.slot];
     const WeaponConfig& config = arsenal.at(loadout.slot);
+
+    // Sights track toward held/released every tick, including while the
+    // weapon is still being raised and while reloading -- both of which are
+    // states you can be aiming through, and neither of which should strand
+    // the fraction part-way.
+    const bool aiming = aim_held && supports_ads(config);
+    const float ads_step = config.ads_seconds > 0.0f ? dt / config.ads_seconds : 1.0f;
+    loadout.ads_fraction =
+        std::clamp(loadout.ads_fraction + (aiming ? ads_step : -ads_step), 0.0f, 1.0f);
 
     if (loadout.switch_remaining_seconds > 0.0f) {
         loadout.switch_remaining_seconds = std::max(0.0f, loadout.switch_remaining_seconds - dt);

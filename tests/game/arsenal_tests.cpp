@@ -225,4 +225,131 @@ TEST_CASE("zero spread returns the exact aim direction", "[rng]") {
     CHECK(dir.z == forward.z);
 }
 
+// --- aim down sights (M49) --------------------------------------------------
+// ADS is the first thing the client predicts that changes what the SERVER
+// rolls, so the transition has to be identical on both sides. These pin the
+// rules that make that true.
+
+namespace {
+
+game::Arsenal ads_arsenal() {
+    game::Arsenal arsenal;
+    game::WeaponConfig scoped;
+    scoped.name = "scoped";
+    scoped.spread_degrees = 4.0f;
+    scoped.ads_fov_scale = 0.5f;
+    scoped.ads_spread_scale = 0.25f;
+    scoped.ads_seconds = 0.1f;  // 6 ticks
+    scoped.switch_seconds = 0.0f;
+    arsenal.weapons.push_back(scoped);
+
+    game::WeaponConfig blade;
+    blade.name = "blade";
+    blade.melee = true;
+    blade.magazine_size = 0;
+    blade.spread_degrees = 0.0f;
+    blade.switch_seconds = 0.0f;
+    arsenal.weapons.push_back(blade);
+    return arsenal;
+}
+
+}  // namespace
+
+TEST_CASE("sights raise and lower over the configured time", "[weapon][ads]") {
+    const game::Arsenal arsenal = ads_arsenal();
+    game::Loadout loadout;
+    game::reset_loadout(loadout, arsenal);
+
+    CHECK(loadout.ads_fraction == 0.0f);
+    for (int tick = 0; tick < 6; ++tick) {
+        game::update_loadout(loadout, arsenal, 0, false, false, kTick, /*aim_held=*/true);
+    }
+    CHECK(loadout.ads_fraction == Approx(1.0f));
+
+    // ...and holding longer cannot push it past fully aimed.
+    game::update_loadout(loadout, arsenal, 0, false, false, kTick, true);
+    CHECK(loadout.ads_fraction == Approx(1.0f));
+
+    for (int tick = 0; tick < 6; ++tick) {
+        game::update_loadout(loadout, arsenal, 0, false, false, kTick, /*aim_held=*/false);
+    }
+    CHECK(loadout.ads_fraction == Approx(0.0f));
+}
+
+TEST_CASE("the cone the server rolls follows the sights", "[weapon][ads]") {
+    const game::Arsenal arsenal = ads_arsenal();
+    const game::WeaponConfig& scoped = arsenal.at(0);
+
+    CHECK(game::effective_spread_degrees(scoped, 0.0f) == Approx(4.0f));
+    CHECK(game::effective_spread_degrees(scoped, 1.0f) == Approx(1.0f));  // 4 * 0.25
+    CHECK(game::effective_spread_degrees(scoped, 0.5f) == Approx(2.5f));  // halfway
+}
+
+TEST_CASE("switching weapons drops the sights instantly", "[weapon][ads]") {
+    // Otherwise the new weapon's first moments render through the old
+    // weapon's zoom, and a knife comes up scoped.
+    const game::Arsenal arsenal = ads_arsenal();
+    game::Loadout loadout;
+    game::reset_loadout(loadout, arsenal);
+    for (int tick = 0; tick < 6; ++tick) {
+        game::update_loadout(loadout, arsenal, 0, false, false, kTick, true);
+    }
+    REQUIRE(loadout.ads_fraction == Approx(1.0f));
+
+    game::update_loadout(loadout, arsenal, 1, false, false, kTick, true);
+    CHECK(loadout.ads_fraction == 0.0f);
+}
+
+TEST_CASE("a melee weapon never raises sights", "[weapon][ads]") {
+    const game::Arsenal arsenal = ads_arsenal();
+    CHECK_FALSE(game::supports_ads(arsenal.at(1)));
+
+    game::Loadout loadout;
+    game::reset_loadout(loadout, arsenal);
+    game::update_loadout(loadout, arsenal, 1, false, false, kTick, true);
+    for (int tick = 0; tick < 20; ++tick) {
+        game::update_loadout(loadout, arsenal, 1, false, false, kTick, /*aim_held=*/true);
+    }
+    CHECK(loadout.ads_fraction == 0.0f);
+}
+
+TEST_CASE("a weapon with no sights to raise does not pretend to have them", "[weapon][ads]") {
+    game::WeaponConfig plain;  // both scales default to 1.0
+    CHECK_FALSE(game::supports_ads(plain));
+    plain.ads_spread_scale = 0.5f;
+    CHECK(game::supports_ads(plain));
+}
+
+TEST_CASE("sprinting wins over aiming", "[weapon][ads]") {
+    // The entire cost of aiming: you cannot be sprinting and aimed at once.
+    // This rule lives in shared code precisely so the client's prediction and
+    // the server's authority cannot disagree about it.
+    game::InputCommand command;
+    game::set_button(command, game::Button::Aim, true);
+    CHECK(game::wants_ads(command, /*sprinting=*/false));
+    CHECK_FALSE(game::wants_ads(command, /*sprinting=*/true));
+
+    game::set_button(command, game::Button::Aim, false);
+    CHECK_FALSE(game::wants_ads(command, false));
+}
+
+TEST_CASE("ads_seconds of zero means instant sights", "[weapon][ads]") {
+    game::Arsenal arsenal = ads_arsenal();
+    arsenal.weapons[0].ads_seconds = 0.0f;
+    game::Loadout loadout;
+    game::reset_loadout(loadout, arsenal);
+    game::update_loadout(loadout, arsenal, 0, false, false, kTick, true);
+    CHECK(loadout.ads_fraction == Approx(1.0f));
+}
+
+TEST_CASE("ads config rejects values that would make aiming worse", "[weapon][ads]") {
+    // Above 1.0 means aiming widens the cone or the FOV, which is never the
+    // intent and reads as a sign typo.
+    CHECK_FALSE(game::parse_weapon_config("name=x\nads_fov_scale=1.4\n").has_value());
+    CHECK_FALSE(game::parse_weapon_config("name=x\nads_spread_scale=2.0\n").has_value());
+    CHECK_FALSE(game::parse_weapon_config("name=x\nads_fov_scale=0\n").has_value());
+    CHECK_FALSE(game::parse_weapon_config("name=x\nads_seconds=-1\n").has_value());
+    CHECK(game::parse_weapon_config("name=x\nads_fov_scale=0.5\nads_seconds=0\n").has_value());
+}
+
 }  // namespace

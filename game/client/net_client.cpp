@@ -119,6 +119,17 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
             }
             break;
         }
+        case MessageType::MapChange: {
+            if (const auto change = read_map_change(reader)) {
+                eng::log::info("Server rotated the map to '{}'", change->map);
+                // server_map_ moves with it, or the client's own
+                // "am I on the right map?" check would fire on the next
+                // frame using the map named in a welcome from ago.
+                server_map_ = change->map;
+                pending_map_change_ = change->map;
+            }
+            break;
+        }
         case MessageType::ChatSend:
             break;  // client-to-server only; a server sending this is broken
         case MessageType::Leaderboard: {
@@ -273,6 +284,10 @@ void NetClient::send_chat(std::string_view text) {
     eng::ByteWriter writer;
     write(writer, ChatSendMsg{clean});
     transport_->send(writer.data(), eng::NetChannel::Reliable, true);
+}
+
+std::optional<std::string> NetClient::take_map_change() {
+    return std::exchange(pending_map_change_, std::nullopt);
 }
 
 std::vector<NetClient::ChatLine> NetClient::take_chat_lines() {

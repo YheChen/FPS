@@ -35,12 +35,36 @@ inline constexpr float kMatchSeconds = 300.0f;
 inline constexpr float kRespawnSeconds = 3.0f;
 inline constexpr float kMatchRestartSeconds = 8.0f;
 
+// One map's collision geometry, ready to become the world. Held rather than
+// loaded on demand because ServerGame does no file I/O -- that is main.cpp's
+// job, and keeping it that way is what lets the rotation be tested without an
+// assets directory (M34).
+//
+// Two arenas of collision meshes is a few MB. Loading them all at startup
+// costs that memory once; loading on rotation would cost a stall in the
+// middle of a match handover, on the tick everyone is being respawned.
+struct MapGeometry {
+    std::string name;  // asset path, e.g. "maps/arena02.glb"
+    std::vector<std::pair<eng::MeshData, glm::mat4>> meshes;
+    std::vector<glm::vec3> spawns;
+};
+
 class ServerGame {
 public:
     // `map_meshes` are (mesh, world transform) pairs for static collision;
     // `spawns` are the map's spawn points.
     ServerGame(std::vector<std::pair<eng::MeshData, glm::mat4>> map_meshes,
                std::vector<glm::vec3> spawns, std::string map_name, Arsenal arsenal);
+
+    // The maps to cycle through at match end, in order. The FIRST entry must
+    // be the map this was constructed with -- the rotation advances from
+    // wherever it currently is, and a list that does not contain the current
+    // map would jump on the very first handover.
+    //
+    // Fewer than two entries means no rotation, which is the default and what
+    // every existing deployment does.
+    void set_map_rotation(std::vector<MapGeometry> rotation);
+    const std::string& map_name() const { return map_name_; }
 
     // Handles one transport event (connect/message/disconnect).
     void handle_event(const eng::NetEvent& event, eng::IServerTransport& net);
@@ -126,6 +150,10 @@ private:
     };
 
     void handle_hello(std::uint32_t peer, eng::ByteReader& reader, eng::IServerTransport& net);
+    // Swaps in the next map: rebuilds the collision world, re-seats every
+    // player's controller in it, and tells the clients. Returns false when
+    // there is no rotation to advance.
+    bool advance_map(eng::IServerTransport& net);
     void handle_chat(std::uint8_t sender, eng::ByteReader& reader, eng::IServerTransport& net);
     void handle_input(Player& player, eng::ByteReader& reader, eng::IServerTransport& net);
     // Gathers what a bot can perceive. Lives here, not in decide(), so the
@@ -151,6 +179,8 @@ private:
     eng::PhysicsWorld world_;
     std::vector<glm::vec3> spawns_;
     std::string map_name_;
+    std::vector<MapGeometry> rotation_;
+    std::size_t rotation_index_ = 0;
     Arsenal arsenal_;
     std::array<std::optional<Player>, kMaxPlayers> players_;
     BotConfig bot_config_;

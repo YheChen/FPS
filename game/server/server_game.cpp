@@ -770,6 +770,71 @@ void ServerGame::update_match(eng::IServerTransport& net) {
     }
 }
 
+void ServerGame::set_map_rotation(std::vector<MapGeometry> rotation) {
+    rotation_ = std::move(rotation);
+    rotation_index_ = 0;
+    // Start the cycle wherever the current map sits in the list, so the first
+    // handover moves to the NEXT one rather than jumping to entry 1 from a
+    // map that might be entry 3.
+    for (std::size_t i = 0; i < rotation_.size(); ++i) {
+        if (rotation_[i].name == map_name_) {
+            rotation_index_ = i;
+            break;
+        }
+    }
+    if (rotation_.size() > 1) {
+        eng::log::info("Map rotation: {} maps, currently {}", rotation_.size(), map_name_);
+    }
+}
+
+bool ServerGame::advance_map(eng::IServerTransport& net) {
+    if (rotation_.size() < 2) {
+        return false;
+    }
+    rotation_index_ = (rotation_index_ + 1) % rotation_.size();
+    const MapGeometry& next = rotation_[rotation_index_];
+
+    // Rebuild the collision world. Move-assigning a fresh PhysicsWorld drops
+    // every body of the old one in one step; adding to the existing world
+    // would stack two arenas on top of each other.
+    world_ = eng::PhysicsWorld{};
+    for (const auto& [mesh, transform] : next.meshes) {
+        world_.add_static_mesh(mesh, transform);
+    }
+    world_.optimize();
+
+    spawns_ = next.spawns;
+    if (spawns_.empty()) {
+        spawns_.push_back({0.0f, 1.0f, 0.0f});
+    }
+    map_name_ = next.name;
+    next_spawn_ = 0;
+
+    // EVERY controller referenced the old world and is now pointing at freed
+    // Jolt bodies. They have to be rebuilt before anything steps, which is
+    // why this runs before the respawns in restart_match rather than after.
+    for (std::uint8_t id = 0; id < kMaxPlayers; ++id) {
+        if (!players_[id]) {
+            continue;
+        }
+        const glm::vec3 spawn = spawns_[next_spawn_++ % spawns_.size()];
+        players_[id]->state = PlayerState{};
+        players_[id]->state.position = spawn;
+        players_[id]->controller = std::make_unique<eng::CharacterController>(world_, spawn);
+        // Position history describes a map that no longer exists; rewinding
+        // into it would lag-compensate against the old arena's geometry.
+        players_[id]->history = PositionHistory{};
+        players_[id]->trail = ViewTrail{};
+    }
+
+    // Told BEFORE any snapshot of the new arena: a client that stepped its
+    // prediction through the old collision using new positions would fall
+    // through the floor.
+    broadcast_reliable(encode(MapChangeMsg{map_name_}), net);
+    eng::log::info("Map rotated to '{}'", map_name_);
+    return true;
+}
+
 void ServerGame::restart_match(eng::IServerTransport& net) {
     // Before the reset below wipes them: whoever was here played this match.
     if (stats_enabled_) {
@@ -783,6 +848,9 @@ void ServerGame::restart_match(eng::IServerTransport& net) {
     }
     phase_ = MatchPhase::Playing;
     match_remaining_ = kMatchSeconds;
+    // Rotate first: advance_map re-seats every controller in the new world,
+    // and respawn_player below steps a controller.
+    advance_map(net);
     for (std::uint8_t id = 0; id < kMaxPlayers; ++id) {
         if (!players_[id]) {
             continue;

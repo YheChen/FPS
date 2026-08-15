@@ -3614,11 +3614,12 @@ int main(int argc, char** argv) {
             // one. The two cross-fade on ads_fraction so neither is ever
             // drawn on top of the other.
             const float scope = hud_weapon.ads_fov_scale <= 0.5f ? loadout.ads_fraction : 0.0f;
-            const auto alpha = [](float a) {
+            const auto reticle_alpha = [](float a) {
                 return static_cast<int>(std::clamp(a, 0.0f, 1.0f) * 255.0f);
             };
 
-            const ImU32 cross_color = IM_COL32(240, 240, 240, alpha(0.86f * (1.0f - scope)));
+            const ImU32 cross_color =
+                IM_COL32(240, 240, 240, reticle_alpha(0.86f * (1.0f - scope)));
             constexpr float kArm = 9.0f;
             overlay->AddLine({center.x - gap - kArm, center.y}, {center.x - gap, center.y},
                              cross_color, 2.0f);
@@ -3636,9 +3637,10 @@ int main(int argc, char** argv) {
                 // reads as an optic without pretending to be real vignetting
                 // -- which would need a shader pass, and this draws over the
                 // already-resolved frame.
-                overlay->AddCircle(center, radius, IM_COL32(10, 10, 12, alpha(0.92f * scope)), 96,
+                overlay->AddCircle(center, radius,
+                                   IM_COL32(10, 10, 12, reticle_alpha(0.92f * scope)), 96,
                                    std::max(6.0f, radius * 0.06f));
-                const ImU32 hair = IM_COL32(20, 22, 20, alpha(0.85f * scope));
+                const ImU32 hair = IM_COL32(20, 22, 20, reticle_alpha(0.85f * scope));
                 overlay->AddLine({center.x - radius, center.y}, {center.x - gap * 1.5f, center.y},
                                  hair, 1.5f);
                 overlay->AddLine({center.x + gap * 1.5f, center.y}, {center.x + radius, center.y},
@@ -3647,7 +3649,8 @@ int main(int argc, char** argv) {
                                  hair, 1.5f);
                 overlay->AddLine({center.x, center.y + gap * 1.5f}, {center.x, center.y + radius},
                                  hair, 1.5f);
-                overlay->AddCircleFilled(center, 1.6f, IM_COL32(230, 40, 40, alpha(scope)), 12);
+                overlay->AddCircleFilled(center, 1.6f, IM_COL32(230, 40, 40, reticle_alpha(scope)),
+                                         12);
             }
 
             // Hitmarker: a short X over the crosshair. Red for a kill, amber

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "game/shared/hitscan.h"
+#include "game/shared/input_command.h"
 
 // Data-driven hitscan weapons: config parsed from key=value text assets, plus
 // a deterministic tick-based state machine shared by client (prediction /
@@ -46,6 +47,18 @@ struct WeaponConfig {
     float falloff_start_meters = 0.0f;
     float falloff_end_meters = 0.0f;
     float falloff_min_fraction = 1.0f;
+
+    // --- aim down sights (M49) -------------------------------------------
+    // Narrows the field of view and tightens the cone. Both default to 1.0,
+    // meaning "this weapon has no sights", so a config written before ADS
+    // existed behaves exactly as it did.
+    //
+    // ads_spread_scale is why this is not a client-side zoom effect: the
+    // server owns the cone, so it has to know the aim state and run the same
+    // transition the client predicts.
+    float ads_fov_scale = 1.0f;     // 0.6 = a 40% narrower FOV while aimed
+    float ads_spread_scale = 1.0f;  // multiplies spread_degrees while aimed
+    float ads_seconds = 0.22f;      // time to raise and to lower the sights
 
     // Automatic weapons keep firing while held; semi-automatic ones require
     // a fresh trigger pull per shot.
@@ -146,6 +159,12 @@ struct Loadout {
     // > 0 while a weapon is being raised; blocks firing (but not reloading
     // progress on the newly held weapon).
     float switch_remaining_seconds = 0.0f;
+    // How far into the sights the player is, 0 (hip) to 1 (fully aimed).
+    // Lives on the loadout rather than the weapon because it is a property of
+    // the player's posture, and it must collapse to 0 the moment a different
+    // weapon comes up -- otherwise switching from a scoped sniper to a knife
+    // would leave the world zoomed.
+    float ads_fraction = 0.0f;
 };
 
 // The weapons available in a match, in slot order.
@@ -166,7 +185,40 @@ void reset_loadout(Loadout& loadout, const Arsenal& arsenal);
 // Advances the held weapon, handling switches. `desired_slot` is the client's
 // requested slot (validated/clamped here); switching starts a raise timer and
 // cancels any in-progress reload.
+// `aim_held` defaults to false so that every caller written before ADS
+// existed -- including the tests -- keeps its old meaning exactly.
 WeaponTickResult update_loadout(Loadout& loadout, const Arsenal& arsenal, std::uint8_t desired_slot,
-                                bool fire_held, bool reload_requested, float dt);
+                                bool fire_held, bool reload_requested, float dt,
+                                bool aim_held = false);
+
+// True when this weapon has sights worth raising. A weapon that neither zooms
+// nor tightens its cone would otherwise play the whole raise/lower animation
+// to accomplish nothing -- and the knife would slow you down for free.
+constexpr bool supports_ads(const WeaponConfig& config) {
+    return !config.melee && (config.ads_fov_scale < 1.0f || config.ads_spread_scale < 1.0f);
+}
+
+// The rule for whether the player is aiming this tick, in shared code so the
+// client's prediction and the server's authority cannot drift apart.
+//
+// Sprinting wins. That is the whole cost of aiming: not a speed penalty
+// bolted onto the movement code, but the fact that you cannot be sprinting
+// and aimed at the same time.
+constexpr bool wants_ads(const InputCommand& command, bool sprinting) {
+    return has_button(command, Button::Aim) && !sprinting;
+}
+
+// Interpolates between the hip and aimed values of a scale, both of which are
+// 1.0-relative. Used for FOV on the client and for the cone on the server,
+// from the SAME ads_fraction, so what the crosshair promises is what the
+// server rolls.
+constexpr float ads_lerp(float scale_at_full_aim, float fraction) {
+    return 1.0f + (scale_at_full_aim - 1.0f) * fraction;
+}
+
+// The cone half-angle to actually roll, in degrees.
+constexpr float effective_spread_degrees(const WeaponConfig& config, float ads_fraction) {
+    return config.spread_degrees * ads_lerp(config.ads_spread_scale, ads_fraction);
+}
 
 }  // namespace game

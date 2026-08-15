@@ -404,8 +404,14 @@ void ServerGame::tick(eng::IServerTransport& net) {
         if (phase_ == MatchPhase::Playing) {
             const bool fire_held = has_button(command, Button::Fire);
             const bool reload = has_button(command, Button::Reload);
-            const WeaponTickResult shot = update_loadout(
-                player.loadout, arsenal_, command.weapon_slot, fire_held, reload, kTickSeconds);
+            // The server runs the SAME sights transition the client predicts,
+            // from the same button and the same sprint state, because the
+            // cone it rolls below depends on it. Trusting a client-reported
+            // aim flag would be trusting a client-reported spread.
+            const bool aim = wants_ads(command, player.state.sprinting);
+            const WeaponTickResult shot =
+                update_loadout(player.loadout, arsenal_, command.weapon_slot, fire_held, reload,
+                               kTickSeconds, aim);
             if (shot.fired) {
                 fire_hitscan(id, command, net);
             }
@@ -548,7 +554,10 @@ void ServerGame::fire_hitscan(std::uint8_t shooter_id, const InputCommand& comma
     std::array<HitZone, kMaxPlayers> zone_by_victim{};
     std::array<bool, kMaxPlayers> hit_any{};
 
-    const float spread = glm::radians(weapon.spread_degrees);
+    // The cone the shooter had raised at the moment of the shot, not the
+    // weapon's hip-fire cone. This is the authoritative half of ADS.
+    const float spread =
+        glm::radians(effective_spread_degrees(weapon, shooter.loadout.ads_fraction));
     for (int pellet = 0; pellet < weapon.pellets; ++pellet) {
         // Deterministic per-pellet spread: a pure hash of tick, shooter and
         // pellet index, so a recorded match replays identically (M17).

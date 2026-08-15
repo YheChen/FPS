@@ -18,6 +18,11 @@ enum class Button : std::uint16_t {
     Reload = 1u << 6,
     Sprint = 1u << 7,
     Crouch = 1u << 8,
+    // Aim down sights (M49). A new bit in a field that was already a u16 on
+    // the wire, so this needs no protocol bump: an older server reads the
+    // byte it always read and ignores a bit it does not know, and a newer
+    // one simply never sees the bit set by an older client.
+    Aim = 1u << 9,
 };
 
 struct InputCommand {

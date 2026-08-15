@@ -305,7 +305,12 @@ struct ClientArgs {
                                 // block on swap (macOS throttles occluded windows)
     eng::NetSimConfig net_sim;  // --fake-latency/--fake-jitter/--fake-loss
     // Automated-verification hooks (harmless in normal play):
-    bool auto_fire = false;                  // pull the trigger every other tick
+    bool auto_fire = false;  // pull the trigger every other tick
+    // --aim: hold the sights up. Exists for the same reason --auto-fire
+    // does: aim down sights changes the FOV, the cone and the reticle,
+    // and none of that could be captured in a screenshot without a way
+    // to hold the right mouse button from a command line.
+    bool aim = false;
     bool auto_walk = false;                  // hold W: bob needs distance actually travelled
     std::optional<std::uint8_t> weapon;      // start on this slot (1-based, as the keys are)
     std::optional<float> fixed_yaw;          // lock the view yaw (radians)
@@ -395,6 +400,8 @@ ClientArgs parse_args(int argc, char** argv) {
             }
         } else if (arg == "--auto-fire") {
             args.auto_fire = true;
+        } else if (arg == "--aim") {
+            args.aim = true;
         } else if (arg == "--auto-walk") {
             args.auto_walk = true;
         } else if (arg == "--weapon") {
@@ -877,6 +884,19 @@ struct WeaponModel {
 // with the barrel still climbing toward it.
 constexpr float kViewmodelRight = 0.20f;
 constexpr float kViewmodelDown = 0.34f;
+// Aiming steadies the hands: bob and sway are damped, not removed, because a
+// perfectly rigid weapon reads as a frozen frame.
+constexpr float kAimSteadiness = 0.22f;
+// A weapon that more than halves the FOV is being looked THROUGH, so the
+// model stops being drawn once the sights are most of the way up.
+//
+// The obvious alternative -- slide the model onto the centre line -- was
+// tried and looks worse than doing nothing: correct ADS placement aligns the
+// weapon's SIGHTS with the camera axis, and with no `sight` node on the mesh
+// (the models only carry `muzzle`) centring just puts the breech in the
+// camera's face, filling half the screen. Doing that properly is asset work
+// in tools/gen_weapons, not a constant to guess at here.
+constexpr float kScopeHidesModelAbove = 0.55f;
 
 // Forward is NOT fixed, because the arm is not: a short weapon is presented
 // out in front and a long one is drawn back against the shoulder, which is
@@ -1060,30 +1080,33 @@ void update_viewmodel(ViewmodelState& state, const game::WeaponConfig& config, s
 // ABOUT THE GRIP on top of that, which is why every weapon can share them --
 // the grip is the one point all five models agree on.
 glm::mat4 viewmodel_transform(const ViewmodelState& state, const eng::Camera& camera, float reach,
-                              bool melee) {
+                              bool melee, float ads_fraction) {
     const glm::vec3 forward = camera.forward();
     const glm::vec3 right = camera.right();
     const glm::vec3 up = glm::cross(right, forward);
 
+    const float aim = glm::clamp(ads_fraction, 0.0f, 1.0f);
     glm::vec3 offset{
         kViewmodelRight, -kViewmodelDown,
         glm::clamp(kViewmodelBusinessEnd - reach, kViewmodelForwardMin, kViewmodelForwardMax)};
+    // Everything below adds motion to that rest pose; aiming scales it down.
+    const float motion = glm::mix(1.0f, kAimSteadiness, aim);
     float pitch_kick = 0.0f;
     float yaw_kick = 0.0f;
     float roll_kick = 0.0f;
 
     const float bob_phase = state.bob_distance / kBobStrideMeters * std::numbers::pi_v<float>;
-    offset.x += std::sin(bob_phase) * kBobLateral * state.bob_weight;
+    offset.x += std::sin(bob_phase) * kBobLateral * state.bob_weight * motion;
     // abs() halves the period against the lateral swing and puts a hard
     // bottom on the dip, which is the frame the foot lands.
-    offset.y -= std::abs(std::sin(bob_phase)) * kBobVertical * state.bob_weight;
+    offset.y -= std::abs(std::sin(bob_phase)) * kBobVertical * state.bob_weight * motion;
 
     const float lag_yaw = glm::clamp(shortest_yaw_delta(state.sway_yaw, camera.yaw),
                                      -kSwayMaxRadians, kSwayMaxRadians);
     const float lag_pitch =
         glm::clamp(camera.pitch - state.sway_pitch, -kSwayMaxRadians, kSwayMaxRadians);
-    offset.x -= lag_yaw * kSwayMeters;
-    offset.y -= lag_pitch * kSwayMeters;
+    offset.x -= lag_yaw * kSwayMeters * motion;
+    offset.y -= lag_pitch * kSwayMeters * motion;
     yaw_kick += lag_yaw * kSwayRotate;
     pitch_kick += lag_pitch * kSwayRotate;
 
@@ -1388,6 +1411,7 @@ game::InputCommand make_command(const eng::InputState& input, float yaw, float p
     game::set_button(command, game::Button::Reload, input.is_down(eng::Key::R));
     game::set_button(command, game::Button::Sprint, input.is_down(eng::Key::LeftShift));
     game::set_button(command, game::Button::Crouch, input.is_down(eng::Key::LeftControl));
+    game::set_button(command, game::Button::Aim, input.is_down(eng::MouseButton::Right));
     return command;
 }
 
@@ -2086,8 +2110,16 @@ int main(int argc, char** argv) {
         // View angles update every render frame for minimal aim latency;
         // simulation consumes the latest angles at each fixed tick.
         if (window->relative_mouse() && !fly_mode && mode != Mode::Menu) {
-            view_yaw += input.mouse_dx() * settings.sensitivity;
-            view_pitch -= input.mouse_dy() * settings.sensitivity;
+            // Scale look speed with the zoom, so a given mouse movement
+            // sweeps the same distance ON SCREEN whether or not the sights
+            // are up. Without this, scoping the sniper to a third of the FOV
+            // would make it three times twitchier exactly when precision is
+            // the entire point of having scoped.
+            const float aim_sensitivity =
+                settings.sensitivity *
+                game::ads_lerp(arsenal.at(loadout.slot).ads_fov_scale, loadout.ads_fraction);
+            view_yaw += input.mouse_dx() * aim_sensitivity;
+            view_pitch -= input.mouse_dy() * aim_sensitivity;
             view_pitch = std::clamp(view_pitch, -eng::Camera::kMaxPitchRadians,
                                     eng::Camera::kMaxPitchRadians);
         }
@@ -2212,6 +2244,9 @@ int main(int argc, char** argv) {
                 if (args.auto_fire) {
                     game::set_button(command, game::Button::Fire, auto_fire_now);
                 }
+                if (args.aim) {
+                    game::set_button(command, game::Button::Aim, true);
+                }
                 if (args.auto_walk) {
                     game::set_button(command, game::Button::Forward, true);
                 }
@@ -2235,6 +2270,9 @@ int main(int argc, char** argv) {
             if (args.auto_fire) {
                 game::set_button(command, game::Button::Fire, auto_fire_now);
             }
+            if (args.aim) {
+                game::set_button(command, game::Button::Aim, true);
+            }
             if (args.auto_walk) {
                 game::set_button(command, game::Button::Forward, true);
             }
@@ -2257,9 +2295,13 @@ int main(int argc, char** argv) {
             // --auto-fire is an explicit request and bypasses that.
             const bool fire_held = game::has_button(command, game::Button::Fire) &&
                                    (window->relative_mouse() || args.auto_fire);
-            const game::WeaponTickResult shot =
-                game::update_loadout(loadout, arsenal, desired_slot, fire_held,
-                                     reload_requested && !reload_consumed, game::kTickSeconds);
+            // Same gate as firing: the right mouse button is a menu click
+            // until the mouse is captured.
+            const bool aim_held = game::wants_ads(command, player.sprinting) &&
+                                  (window->relative_mouse() || args.aim);
+            const game::WeaponTickResult shot = game::update_loadout(
+                loadout, arsenal, desired_slot, fire_held, reload_requested && !reload_consumed,
+                game::kTickSeconds, aim_held);
             const game::WeaponConfig& weapon_config = arsenal.at(loadout.slot);
             reload_consumed = true;
             if (shot.reload_started) {
@@ -2278,7 +2320,8 @@ int main(int argc, char** argv) {
                 const glm::vec3 eye =
                     player.position + glm::vec3{0.0f, game::eye_height_for(player), 0.0f};
                 const glm::vec3 aim = game::view_direction(command.yaw, command.pitch);
-                const float spread = glm::radians(weapon_config.spread_degrees);
+                const float spread = glm::radians(
+                    game::effective_spread_degrees(weapon_config, loadout.ads_fraction));
 
                 // Same pellet loop the server runs, so offline practice and
                 // online play behave identically.
@@ -2656,7 +2699,12 @@ int main(int argc, char** argv) {
             camera.pitch = view_pitch;
         }
         camera.aspect = window->aspect();
-        camera.fov_y_degrees = settings.fov_degrees;
+        // Sights narrow the FOV. Driven by the SAME ads_fraction the server
+        // uses for the cone, so the zoom and the accuracy it implies arrive
+        // together rather than the picture leading the bullets.
+        camera.fov_y_degrees =
+            settings.fov_degrees *
+            game::ads_lerp(arsenal.at(loadout.slot).ads_fov_scale, loadout.ads_fraction);
 
         // The ears ride the camera rather than the player, so what you hear
         // always agrees with what you see -- in the killcam and the replay
@@ -2674,12 +2722,18 @@ int main(int argc, char** argv) {
         // the fly camera, the replay chase cam and the killcam are all looking
         // through someone else's head (or nobody's), and a gun pinned to the
         // corner of those frames would belong to no one.
-        const bool viewmodel_visible =
-            !fly_mode && (mode == Mode::Offline || (online && net->self_alive()));
         // The raised weapon, and the same answer the HUD gives: online that is
         // the server's, offline the local loadout's.
         const std::uint8_t viewmodel_slot = online ? net->self_weapon_slot() : loadout.slot;
         const game::WeaponConfig& viewmodel_config = arsenal.at(viewmodel_slot);
+        // Looking through a scope means not looking at the weapon. The cut is
+        // hidden by the zoom happening at the same time, and it only applies
+        // to true scopes -- iron sights keep the model, because at a 0.75 FOV
+        // scale it is still most of what tells you what you are holding.
+        const bool scoped_away =
+            viewmodel_config.ads_fov_scale <= 0.5f && loadout.ads_fraction > kScopeHidesModelAbove;
+        const bool viewmodel_visible =
+            !fly_mode && !scoped_away && (mode == Mode::Offline || (online && net->self_alive()));
         const WeaponModel* held = weapon_model_for(arsenal.clamp_slot(viewmodel_slot));
         glm::mat4 viewmodel_model{1.0f};
         if (viewmodel_visible) {
@@ -2689,8 +2743,9 @@ int main(int argc, char** argv) {
                              player.position, player.velocity, player.on_ground,
                              game::kMove.max_speed, camera.yaw, camera.pitch,
                              static_cast<float>(dt));
-            viewmodel_model = viewmodel_transform(
-                viewmodel, camera, held != nullptr ? held->reach : 0.0f, viewmodel_config.melee);
+            viewmodel_model =
+                viewmodel_transform(viewmodel, camera, held != nullptr ? held->reach : 0.0f,
+                                    viewmodel_config.melee, loadout.ads_fraction);
         } else {
             // Hidden means dead, in the menu, or watching someone else. Forget
             // everything, so coming back raises the weapon rather than
@@ -3392,8 +3447,8 @@ int main(int argc, char** argv) {
             ImGui::SliderFloat("halo intensity", &sky_params.halo_intensity, 0.0f, 0.5f);
         }
         ImGui::TextDisabled(
-            "Esc: capture | WASD+Space | Shift: sprint | Ctrl: crouch | 1-4: weapon | LMB "
-            "fire | R reload");
+            "Esc: capture | WASD+Space | Shift: sprint | Ctrl: crouch | 1-5: weapon | LMB "
+            "fire | RMB aim | R reload");
         ImGui::End();
 
         // --- match UI (online) ---------------------------------------------
@@ -3547,8 +3602,24 @@ int main(int argc, char** argv) {
                 std::clamp(std::hypot(player.velocity.x, player.velocity.z) /
                                (game::kMove.max_speed * game::kMove.sprint_multiplier),
                            0.0f, 1.0f);
-            const float gap = 4.0f + hud_weapon.spread_degrees * 1.6f + speed_frac * 5.0f;
-            const ImU32 cross_color = IM_COL32(240, 240, 240, 220);
+            // The gap tracks the cone the server will actually roll, so
+            // raising the sights visibly tightens the reticle by the same
+            // amount it tightens the shot.
+            const float aimed_spread =
+                game::effective_spread_degrees(hud_weapon, loadout.ads_fraction);
+            const float gap = 4.0f + aimed_spread * 1.6f + speed_frac * 5.0f;
+
+            // A weapon that more than halves the FOV is a scope, not a set of
+            // iron sights, and gets a scope's reticle instead of the hip-fire
+            // one. The two cross-fade on ads_fraction so neither is ever
+            // drawn on top of the other.
+            const float scope = hud_weapon.ads_fov_scale <= 0.5f ? loadout.ads_fraction : 0.0f;
+            const auto reticle_alpha = [](float a) {
+                return static_cast<int>(std::clamp(a, 0.0f, 1.0f) * 255.0f);
+            };
+
+            const ImU32 cross_color =
+                IM_COL32(240, 240, 240, reticle_alpha(0.86f * (1.0f - scope)));
             constexpr float kArm = 9.0f;
             overlay->AddLine({center.x - gap - kArm, center.y}, {center.x - gap, center.y},
                              cross_color, 2.0f);
@@ -3558,6 +3629,29 @@ int main(int argc, char** argv) {
                              cross_color, 2.0f);
             overlay->AddLine({center.x, center.y + gap}, {center.x, center.y + gap + kArm},
                              cross_color, 2.0f);
+
+            if (scope > 0.0f) {
+                const ImVec2 display = ImGui::GetIO().DisplaySize;
+                const float radius = std::min(display.x, display.y) * 0.42f;
+                // Heavy ring plus hairlines out to the edges. Cheap, and it
+                // reads as an optic without pretending to be real vignetting
+                // -- which would need a shader pass, and this draws over the
+                // already-resolved frame.
+                overlay->AddCircle(center, radius,
+                                   IM_COL32(10, 10, 12, reticle_alpha(0.92f * scope)), 96,
+                                   std::max(6.0f, radius * 0.06f));
+                const ImU32 hair = IM_COL32(20, 22, 20, reticle_alpha(0.85f * scope));
+                overlay->AddLine({center.x - radius, center.y}, {center.x - gap * 1.5f, center.y},
+                                 hair, 1.5f);
+                overlay->AddLine({center.x + gap * 1.5f, center.y}, {center.x + radius, center.y},
+                                 hair, 1.5f);
+                overlay->AddLine({center.x, center.y - radius}, {center.x, center.y - gap * 1.5f},
+                                 hair, 1.5f);
+                overlay->AddLine({center.x, center.y + gap * 1.5f}, {center.x, center.y + radius},
+                                 hair, 1.5f);
+                overlay->AddCircleFilled(center, 1.6f, IM_COL32(230, 40, 40, reticle_alpha(scope)),
+                                         12);
+            }
 
             // Hitmarker: a short X over the crosshair. Red for a kill, amber
             // and heavier for a headshot -- the shot worth learning to repeat

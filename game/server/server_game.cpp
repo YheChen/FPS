@@ -16,6 +16,9 @@ namespace {
 
 constexpr int kMaxInputPacketsPerSecond = 200;
 constexpr int kMaxBadMessages = 10;
+// One message per 45 ticks (0.75 s). Slow enough that nobody can flood a
+// lobby, fast enough that a real conversation never hits it.
+constexpr std::uint32_t kChatCooldownTicks = 45;
 constexpr int kStarvationJumpTicks = 6;
 
 // One shot reports one zone, but a shotgun's pellets can land in several.
@@ -110,6 +113,8 @@ void ServerGame::handle_event(const eng::NetEvent& event, eng::IServerTransport&
                 handle_hello(event.peer, reader, net);
             } else if (*type == MessageType::Input && player_id) {
                 handle_input(*players_[*player_id], reader, net);
+            } else if (*type == MessageType::ChatSend && player_id) {
+                handle_chat(*player_id, reader, net);
             }
             // Anything else from a client is ignored (and counted).
             break;
@@ -188,6 +193,49 @@ void ServerGame::handle_hello(std::uint32_t peer, eng::ByteReader& reader,
         }
     }
     send_weapon_status(*players_[*slot], net);
+}
+
+// Relays one player's chat to everyone, INCLUDING the sender -- seeing your
+// own line appear is how you know it was delivered rather than dropped.
+//
+// Bots never reach here: they have no peer and no inbound messages at all.
+void ServerGame::handle_chat(std::uint8_t sender, eng::ByteReader& reader,
+                             eng::IServerTransport& net) {
+    Player& player = *players_[sender];
+    const auto message = read_chat_send(reader);
+    if (!message) {
+        if (++player.bad_messages > kMaxBadMessages) {
+            eng::log::warn("Player {}: too many bad messages, kicking", sender);
+            net.disconnect(player.peer);
+        }
+        return;
+    }
+
+    // Rate limit BEFORE sanitizing: the cost of a dropped message should not
+    // depend on how long it was.
+    if (player.has_chatted && tick_ - player.last_chat_tick < kChatCooldownTicks) {
+        return;
+    }
+
+    // The client sanitizes too, for its own echo. This is the copy that
+    // matters: the client is not the only thing that can send a ChatSend.
+    const std::string text = sanitize_chat(message->text);
+    if (text.empty()) {
+        return;  // nothing printable survived; not worth a line in the log
+    }
+    player.has_chatted = true;
+    player.last_chat_tick = tick_;
+
+    eng::log::info("[chat] {}: {}", player.name, text);
+
+    eng::ByteWriter writer;
+    write(writer, ChatMessageMsg{sender, text});
+    const std::vector<std::uint8_t> bytes{writer.data().begin(), writer.data().end()};
+    for (std::size_t id = 0; id < players_.size(); ++id) {
+        if (players_[id] && !players_[id]->is_bot) {
+            net.send(players_[id]->peer, bytes, eng::NetChannel::Reliable, true);
+        }
+    }
 }
 
 void ServerGame::handle_input(Player& player, eng::ByteReader& reader, eng::IServerTransport& net) {

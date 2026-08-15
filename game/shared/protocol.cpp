@@ -211,12 +211,23 @@ void write(eng::ByteWriter& w, const RtcCandidateMsg& m) {
     w.str(m.mid);
 }
 
+void write(eng::ByteWriter& w, const ChatSendMsg& m) {
+    w.u8(static_cast<std::uint8_t>(MessageType::ChatSend));
+    w.str(m.text);
+}
+
+void write(eng::ByteWriter& w, const ChatMessageMsg& m) {
+    w.u8(static_cast<std::uint8_t>(MessageType::ChatMessage));
+    w.u8(m.sender);
+    w.str(m.text);
+}
+
 // --- decode -----------------------------------------------------------------
 
 std::optional<MessageType> read_message_type(eng::ByteReader& r) {
     const auto value = r.u8();
     if (!value || *value < static_cast<std::uint8_t>(MessageType::ClientHello) ||
-        *value > static_cast<std::uint8_t>(MessageType::RtcCandidate)) {
+        *value > static_cast<std::uint8_t>(MessageType::ChatMessage)) {
         return std::nullopt;
     }
     return static_cast<MessageType>(*value);
@@ -523,6 +534,79 @@ std::optional<RtcAnswerMsg> read_rtc_answer(eng::ByteReader& r) {
         return std::nullopt;
     }
     return RtcAnswerMsg{*sdp};
+}
+
+std::string sanitize_chat(std::string_view text) {
+    std::string out;
+    bool truncated = false;
+    out.reserve(std::min(text.size(), kMaxChatLength));
+    for (const char c : text) {
+        const auto byte = static_cast<unsigned char>(c);
+        // Drop C0 controls and DEL. Anything >= 0x80 is a UTF-8 continuation
+        // or lead byte and is kept, so accented names and emoji survive; what
+        // cannot survive is a newline forging a second chat line, a carriage
+        // return overwriting one, a tab derailing alignment, or an ESC
+        // rewriting the terminal of whoever is tailing the server log.
+        if (byte < 0x20 || byte == 0x7F) {
+            continue;
+        }
+        if (out.size() >= kMaxChatLength) {
+            truncated = true;
+            break;
+        }
+        out.push_back(c);
+    }
+    // Never end mid-character -- but ONLY when the cap actually cut something.
+    // The first version of this trimmed trailing continuation bytes
+    // unconditionally, which ate the last character of every accented word:
+    // "cafe\u0301" ends in a legitimate continuation byte, and nothing was
+    // truncated at all. Caught by a test, not by reading it.
+    if (truncated && !out.empty()) {
+        std::size_t lead = out.size();
+        while (lead > 0 && (static_cast<unsigned char>(out[lead - 1]) & 0xC0) == 0x80) {
+            --lead;
+        }
+        if (lead > 0) {
+            const auto first = static_cast<unsigned char>(out[lead - 1]);
+            std::size_t expected = 1;
+            if ((first & 0xE0) == 0xC0) {
+                expected = 2;
+            } else if ((first & 0xF0) == 0xE0) {
+                expected = 3;
+            } else if ((first & 0xF8) == 0xF0) {
+                expected = 4;
+            }
+            // Drop the sequence only if the cap left it incomplete.
+            if (out.size() - (lead - 1) < expected) {
+                out.resize(lead - 1);
+            }
+        }
+    }
+
+    // Trim surrounding spaces so "   " is not a message.
+    const std::size_t first = out.find_first_not_of(' ');
+    if (first == std::string::npos) {
+        return {};
+    }
+    const std::size_t last = out.find_last_not_of(' ');
+    return out.substr(first, last - first + 1);
+}
+
+std::optional<ChatSendMsg> read_chat_send(eng::ByteReader& r) {
+    const auto text = r.str(kMaxChatLength);
+    if (!text || !r.finished()) {
+        return std::nullopt;
+    }
+    return ChatSendMsg{*text};
+}
+
+std::optional<ChatMessageMsg> read_chat_message(eng::ByteReader& r) {
+    const auto sender = r.u8();
+    const auto text = r.str(kMaxChatLength);
+    if (!sender || *sender >= kMaxPlayers || !text || !r.finished()) {
+        return std::nullopt;
+    }
+    return ChatMessageMsg{*sender, *text};
 }
 
 std::optional<RtcCandidateMsg> read_rtc_candidate(eng::ByteReader& r) {

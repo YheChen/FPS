@@ -5,6 +5,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include <glm/glm.hpp>
 #include <memory>
@@ -116,6 +117,20 @@ public:
     MatchPhase match_phase() const { return match_phase_; }
     std::uint16_t match_seconds() const { return match_seconds_; }
 
+    // One line of chat as the client will show it. The NAME is resolved at
+    // receipt rather than stored as an id: a player who leaves mid-match
+    // should not turn their earlier messages into "unknown".
+    struct ChatLine {
+        std::uint8_t sender = kNoPlayer;
+        std::string name;
+        std::string text;
+    };
+    // Sends what the local player typed. Sanitized here too, so the local
+    // echo cannot show something the server would have stripped -- but the
+    // server's copy is the one that decides what everyone else sees.
+    void send_chat(std::string_view text);
+    std::vector<ChatLine> take_chat_lines();
+
     // Drained event queues (visuals/audio are the caller's job).
     std::vector<FireEventMsg> take_fire_events();
     std::vector<PlayerDamagedMsg> take_damage_events();
@@ -152,6 +167,7 @@ private:
     bool self_alive_ = true;
     MatchPhase match_phase_ = MatchPhase::Playing;
     std::uint16_t match_seconds_ = 0;
+    std::vector<ChatLine> chat_lines_;
     std::vector<FireEventMsg> fire_events_;
     std::vector<PlayerDamagedMsg> damage_events_;
     std::vector<PlayerDiedMsg> death_events_;

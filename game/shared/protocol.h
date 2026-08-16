@@ -20,7 +20,7 @@
 // returning nullopt means "hostile or corrupt packet - drop it".
 namespace game {
 
-inline constexpr std::uint16_t kProtocolVersion = 9;
+inline constexpr std::uint16_t kProtocolVersion = 10;
 inline constexpr std::uint8_t kMaxPlayers = 8;
 inline constexpr std::size_t kMaxNameLength = 16;
 inline constexpr int kSnapshotDivisor = 3;  // 60 Hz ticks -> 20 Hz snapshots
@@ -69,6 +69,12 @@ enum class MessageType : std::uint8_t {
     // just the framing -- is hostile input.
     ChatSend = 20,     // client -> server, what the player typed
     ChatMessage = 21,  // server -> everyone, stamped with who actually sent it
+    // Map rotation (M51), server -> everyone, reliable, at match end.
+    //
+    // The client loads geometry BEFORE it connects and refuses a server on a
+    // different map, so this is the one message that asks it to rebuild the
+    // world it is standing in rather than just to draw something new.
+    MapChange = 22,
 };
 
 // An SDP session description runs to a couple of kilobytes -- by far the
@@ -123,6 +129,14 @@ struct ChatMessageMsg {
 // an ESC could rewrite a terminal that is tailing journalctl. Truncation is
 // by BYTES and deliberately does not split a UTF-8 sequence.
 std::string sanitize_chat(std::string_view text);
+
+// The map the next match will be played on. Sent to everyone at the moment
+// the rotation advances, before any snapshot describing positions in it: a
+// client that stepped a player through the OLD collision using the NEW
+// server positions would fall through the floor.
+struct MapChangeMsg {
+    std::string map;  // e.g. "maps/arena02.glb"
+};
 
 // Snapshot player flags.
 inline constexpr std::uint8_t kFlagOnGround = 1u << 0;
@@ -314,6 +328,7 @@ void write(eng::ByteWriter& w, const RtcAnswerMsg& m);
 void write(eng::ByteWriter& w, const RtcCandidateMsg& m);
 void write(eng::ByteWriter& w, const ChatSendMsg& m);
 void write(eng::ByteWriter& w, const ChatMessageMsg& m);
+void write(eng::ByteWriter& w, const MapChangeMsg& m);
 
 // --- decode (after the type byte has been consumed) -------------------------
 std::optional<ClientHello> read_client_hello(eng::ByteReader& r);
@@ -337,6 +352,7 @@ std::optional<RtcAnswerMsg> read_rtc_answer(eng::ByteReader& r);
 std::optional<RtcCandidateMsg> read_rtc_candidate(eng::ByteReader& r);
 std::optional<ChatSendMsg> read_chat_send(eng::ByteReader& r);
 std::optional<ChatMessageMsg> read_chat_message(eng::ByteReader& r);
+std::optional<MapChangeMsg> read_map_change(eng::ByteReader& r);
 
 // Reads and validates the leading type byte.
 std::optional<MessageType> read_message_type(eng::ByteReader& r);

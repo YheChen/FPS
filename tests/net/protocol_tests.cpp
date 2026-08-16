@@ -528,7 +528,7 @@ TEST_CASE("every message type is inside the accepted type range", "[protocol]") 
     // not moved with it -- and it did exactly that when M50 added ChatSend
     // past what was then the end. Update kLastMessageType below along with
     // the enum; that is the point of it being written down twice.
-    constexpr auto kLastMessageType = game::MessageType::ChatMessage;
+    constexpr auto kLastMessageType = game::MessageType::MapChange;
 
     for (const auto type :
          {game::MessageType::ClientHello, game::MessageType::RtcOffer, game::MessageType::RtcAnswer,

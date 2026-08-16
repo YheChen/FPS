@@ -993,3 +993,57 @@ line in either place.
 stripping, trimming, the UTF-8 cap, relay-to-everyone-including-the-sender,
 per-player rate limiting, server-side sanitization, empty messages dropped,
 and chat from a peer that never joined ignored.
+
+## M51 — map rotation between matches ✅
+
+`--maps maps/arena01.glb,maps/arena02.glb` rotates at the end of every match.
+Without it nothing changes: a single map is the default and no `MapChange` is
+ever sent.
+
+**The client was the hard half, exactly as expected.** It loads geometry
+*before* it connects and refuses a server on a different map, so following a
+rotation means rebuilding the world it is standing in. Everything derived from
+the map -- textures, GPU meshes, the scene graph, the shadow projection, the
+collision world, the controller -- now comes from one `load_arena()` called
+twice: once at startup, once per rotation. Two copies of that would have
+drifted.
+
+`controller` became `std::optional` because a `CharacterController` holds Jolt
+bodies belonging to ONE `PhysicsWorld`; rebuilding the world leaves the old one
+pointing at freed memory. Same reason `prediction` is re-emplaced rather than
+reset.
+
+**Server side**, `advance_map()`:
+
+- move-assigns a **fresh** `PhysicsWorld` (adding to the old one would stack
+  two arenas on top of each other),
+- rebuilds **every** player's controller before anything steps,
+- clears `PositionHistory` and `ViewTrail` -- rewinding into them would
+  lag-compensate against an arena that no longer exists,
+- broadcasts `MapChange` **before** any snapshot of the new map. A client that
+  stepped its prediction through the old collision using new positions would
+  fall through the floor.
+
+The rotation starts from whichever map is actually being played, so a list
+whose first entry is not the current map does not jump on the first handover.
+
+`ServerGame` still does no file I/O: `main.cpp` loads every arena's collision
+at startup and hands it over as `MapGeometry`. That is what keeps the rotation
+testable without an assets directory (M34), and it avoids a load stall on the
+tick everyone is being respawned.
+
+**Verified against a live server**, not only in tests. With the match
+temporarily shortened, a real client followed two rotations:
+
+```
+SERVER  Match ended -> Map rotated to 'maps/arena02.glb' -> Match restarted
+                    -> Map rotated to 'maps/arena01.glb'   (wrapped)
+CLIENT  Server rotated the map to 'maps/arena02.glb'
+        Physics: 18 static bodies        <- was 14 on arena01
+```
+
+14 -> 18 bodies is the collision world genuinely rebuilding rather than a name
+changing, and the HUD read `prediction error: 0.0000 m` afterwards: the
+client's new world agrees with the server's exactly.
+
+**Protocol 10.** Tests: 293 (+6).

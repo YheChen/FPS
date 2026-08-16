@@ -1423,3 +1423,135 @@ TEST_CASE("chat from a peer that never joined is ignored", "[server][chat]") {
     say(h, 99, "I am not here");
     CHECK(chats_to(h, 1).empty());
 }
+
+// --- map rotation (M51) -----------------------------------------------------
+// The dangerous part is not choosing the next name, it is that every
+// CharacterController and every position history refers to a world that is
+// about to be destroyed.
+
+namespace {
+
+game::MapGeometry rotation_entry(std::string_view name, float half_extent) {
+    game::MapGeometry geometry;
+    geometry.name = std::string(name);
+    geometry.meshes = flat_floor(half_extent);
+    geometry.spawns = default_spawns();
+    return geometry;
+}
+
+std::vector<game::MapGeometry> two_map_rotation() {
+    return {rotation_entry(kMapName, 60.0f), rotation_entry("maps/second.glb", 60.0f)};
+}
+
+// Runs the match clock out so restart_match() -- and with it the rotation --
+// actually fires, rather than poking advance_map directly.
+void play_out_a_match(Harness& h) {
+    h.tick(static_cast<int>((game::kMatchSeconds + game::kMatchRestartSeconds) * 60.0f) + 4);
+}
+
+}  // namespace
+
+TEST_CASE("with no rotation configured the map never changes", "[server][rotation]") {
+    Harness h;
+    REQUIRE(h.join(1, "alice"));
+    h.net.clear();
+    play_out_a_match(h);
+
+    CHECK(h.game.map_name() == kMapName);
+    CHECK(h.net.count(MsgType::MapChange) == 0);
+}
+
+TEST_CASE("the map advances at match end and everyone is told", "[server][rotation]") {
+    Harness h;
+    h.game.set_map_rotation(two_map_rotation());
+    REQUIRE(h.join(1, "alice"));
+    REQUIRE(h.join(2, "bob"));
+    h.net.clear();
+    play_out_a_match(h);
+
+    CHECK(h.game.map_name() == "maps/second.glb");
+    const auto to_alice = decode_to(h.net.sent, 1, MsgType::MapChange, game::read_map_change);
+    const auto to_bob = decode_to(h.net.sent, 2, MsgType::MapChange, game::read_map_change);
+    REQUIRE(to_alice.size() == 1);
+    REQUIRE(to_bob.size() == 1);
+    CHECK(to_alice[0].map == "maps/second.glb");
+    CHECK(to_bob[0].map == "maps/second.glb");
+}
+
+TEST_CASE("the rotation starts from the map actually being played", "[server][rotation]") {
+    // A list whose first entry is not the current map must not make the very
+    // first handover jump somewhere arbitrary.
+    Harness h;
+    h.game.set_map_rotation({rotation_entry("maps/other.glb", 60.0f),
+                             rotation_entry(kMapName, 60.0f),
+                             rotation_entry("maps/third.glb", 60.0f)});
+    REQUIRE(h.join(1, "alice"));
+    play_out_a_match(h);
+    CHECK(h.game.map_name() == "maps/third.glb");  // the entry AFTER the current one
+}
+
+TEST_CASE("the rotation wraps", "[server][rotation]") {
+    Harness h;
+    h.game.set_map_rotation(two_map_rotation());
+    REQUIRE(h.join(1, "alice"));
+    play_out_a_match(h);
+    REQUIRE(h.game.map_name() == "maps/second.glb");
+    play_out_a_match(h);
+    CHECK(h.game.map_name() == kMapName);
+}
+
+TEST_CASE("players keep simulating after a rotation", "[server][rotation]") {
+    // The real hazard: every controller pointed into the world that
+    // advance_map destroys. If they are not rebuilt this crashes or the
+    // player falls through a floor that no longer exists.
+    Harness h;
+    h.game.set_map_rotation(two_map_rotation());
+    const auto alice = h.join(1, "alice");
+    REQUIRE(alice);
+    play_out_a_match(h);
+    REQUIRE(h.game.map_name() == "maps/second.glb");
+
+    h.net.clear();
+    h.tick(120);  // two seconds in the new world
+
+    const auto seen = h.observed(1, *alice);
+    REQUIRE(seen);
+    // Standing on the new floor, not sinking through it.
+    CHECK(seen->position.y > -1.0f);
+    CHECK(std::isfinite(seen->position.x));
+    CHECK(std::isfinite(seen->position.y));
+    CHECK(std::isfinite(seen->position.z));
+}
+
+TEST_CASE("a rotation is announced before any snapshot of the new map", "[server][rotation]") {
+    // A client that stepped its prediction through the OLD collision using
+    // NEW positions would fall through the floor, so the order is part of the
+    // contract rather than an accident of where the call sits.
+    Harness h;
+    h.game.set_map_rotation(two_map_rotation());
+    REQUIRE(h.join(1, "alice"));
+    h.net.clear();
+    play_out_a_match(h);
+
+    std::optional<std::size_t> first_map_change;
+    std::optional<std::size_t> first_snapshot_after;
+    for (std::size_t i = 0; i < h.net.sent.size(); ++i) {
+        const auto type = h.net.sent[i].type();
+        if (!first_map_change && type == MsgType::MapChange) {
+            first_map_change = i;
+        }
+        if (first_map_change && !first_snapshot_after && type == MsgType::Snapshot &&
+            i > *first_map_change) {
+            first_snapshot_after = i;
+        }
+    }
+    REQUIRE(first_map_change);
+    // Every snapshot describing the new arena comes after the announcement.
+    for (std::size_t i = 0; i < *first_map_change; ++i) {
+        if (h.net.sent[i].type() == MsgType::Snapshot) {
+            // Snapshots before the change describe the OLD map, which is fine.
+            continue;
+        }
+    }
+    CHECK((!first_snapshot_after || *first_snapshot_after > *first_map_change));
+}

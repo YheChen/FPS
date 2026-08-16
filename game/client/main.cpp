@@ -1474,17 +1474,15 @@ int main(int argc, char** argv) {
         return 1;
     }
     eng::AssetCache assets{*assets_root};
-    const std::string map_path = eng::normalize_asset_path(args.map);
+    // NOT const: the server can rotate the map out from under us between
+    // matches (M51), and everything derived from it below is rebuilt when it
+    // does. The path is still validated on every load, not just this one.
+    std::string map_path = eng::normalize_asset_path(args.map);
     if (map_path.empty() || eng::asset_path_escapes_root(map_path)) {
         eng::log::error("--map '{}' is not a path inside assets/", args.map);
         return 1;
     }
-    const eng::GltfModel* arena = assets.model(map_path);
-    if (arena == nullptr) {
-        eng::log::error("Could not load map '{}'", map_path);
-        return 1;
-    }
-    eng::log::info("Map: {}", map_path);
+    const eng::GltfModel* arena = nullptr;
 
     // Base color images are sRGB-encoded; the shader wants linear values, so
     // GL does the conversion on sample. No vertical flip: glTF's UV origin is
@@ -1496,52 +1494,8 @@ int main(int argc, char** argv) {
     // Normal maps go in the same list but are uploaded as plain RGBA8: they
     // encode directions, and running them through the sRGB decode would bend
     // every one of them toward the surface normal.
-    std::vector<bool> is_normal_map(arena->images.size(), false);
-    for (const eng::GltfMaterial& material : arena->materials) {
-        if (material.normal_image >= 0 &&
-            static_cast<std::size_t>(material.normal_image) < is_normal_map.size()) {
-            is_normal_map[static_cast<std::size_t>(material.normal_image)] = true;
-        }
-    }
     std::vector<eng::Texture2D> arena_textures;
-    arena_textures.reserve(arena->images.size());
-    for (std::size_t i = 0; i < arena->images.size(); ++i) {
-        const eng::GltfImage& image = arena->images[i];
-        if (image.valid()) {
-            arena_textures.push_back(eng::Texture2D::from_pixels(image.width, image.height,
-                                                                 image.pixels, !is_normal_map[i]));
-        } else {
-            eng::log::warn("Arena image '{}' has no pixels; using the missing-texture pattern",
-                           image.name);
-            arena_textures.push_back(
-                eng::Texture2D::checkerboard(64, 8, {255, 0, 255}, {40, 40, 40}));
-        }
-    }
-
     std::vector<std::vector<RenderPrimitive>> render_meshes;
-    render_meshes.reserve(arena->meshes.size());
-    for (const eng::GltfMesh& mesh : arena->meshes) {
-        std::vector<RenderPrimitive> primitives;
-        for (const eng::GltfPrimitive& primitive : mesh.primitives) {
-            RenderPrimitive rp{eng::GpuMesh::upload(primitive.mesh), glm::vec3{1.0f}, -1, -1, 1.0f};
-            if (primitive.material >= 0) {
-                const eng::GltfMaterial& material =
-                    arena->materials[static_cast<std::size_t>(primitive.material)];
-                rp.color = glm::vec3(material.base_color);
-                if (material.base_color_image >= 0 &&
-                    static_cast<std::size_t>(material.base_color_image) < arena_textures.size()) {
-                    rp.texture = material.base_color_image;
-                }
-                if (material.normal_image >= 0 &&
-                    static_cast<std::size_t>(material.normal_image) < arena_textures.size()) {
-                    rp.normal_texture = material.normal_image;
-                    rp.normal_scale = material.normal_scale;
-                }
-            }
-            primitives.push_back(std::move(rp));
-        }
-        render_meshes.push_back(std::move(primitives));
-    }
 
     // Stand-ins for untextured geometry (players, targets) so the lit shader
     // always has something bound to sample. (128,128,255) decodes to a
@@ -1739,53 +1693,140 @@ int main(int argc, char** argv) {
 
     eng::Scene scene;
     std::vector<glm::vec3> spawn_points;
-    for (const eng::GltfNode& node : arena->nodes) {
-        const eng::EntityId id = scene.create(node.name);
-        eng::Entity* entity = scene.get(id);
-        entity->transform = eng::Transform::from_matrix(node.transform);
-        entity->mesh = node.mesh;
-        if (node.name.starts_with("spawn_")) {
-            spawn_points.push_back(entity->transform.position);
-        }
-    }
-
-    // The sun's shadow projection is fitted to the static geometry once:
-    // the arena never moves, and players are always inside it. Raised a
-    // little so a player standing on the tallest platform still casts.
-    eng::Bounds scene_bounds;
-    for (const eng::GltfNode& node : arena->nodes) {
-        if (node.mesh < 0) {
-            continue;
-        }
-        for (const eng::GltfPrimitive& primitive :
-             arena->meshes[static_cast<std::size_t>(node.mesh)].primitives) {
-            eng::Bounds local;
-            for (const eng::Vertex& vertex : primitive.mesh.vertices) {
-                local.expand(vertex.position);
-            }
-            scene_bounds.expand(local, node.transform);
-        }
-    }
-    scene_bounds.max.y += 2.5f;
-    const glm::mat4 light_view_projection =
-        eng::directional_light_view_projection(kSunDirection, scene_bounds);
-
-    // --- physics ------------------------------------------------------------
+    glm::mat4 light_view_projection{1.0f};
     eng::PhysicsWorld world;
-    for (const eng::GltfNode& node : arena->nodes) {
-        if (node.mesh < 0) {
-            continue;
-        }
-        for (const eng::GltfPrimitive& primitive :
-             arena->meshes[static_cast<std::size_t>(node.mesh)].primitives) {
-            world.add_static_mesh(primitive.mesh, node.transform);
-        }
-    }
-    world.optimize();
-    eng::log::info("Physics: {} static bodies", world.body_count());
+    glm::vec3 spawn{0.0f, 1.0f, 0.0f};
+    // Optional because the map can change under it: a CharacterController
+    // holds Jolt bodies belonging to ONE PhysicsWorld, and rebuilding the
+    // world leaves the old controller pointing at freed memory.
+    std::optional<eng::CharacterController> controller;
 
-    const glm::vec3 spawn = spawn_points.empty() ? glm::vec3{0.0f, 1.0f, 0.0f} : spawn_points[0];
-    eng::CharacterController controller{world, spawn};
+    // Loads a map and everything derived from it: textures, GPU meshes, the
+    // scene graph, the shadow projection, the collision world and the
+    // controller standing in it.
+    //
+    // It exists as one function called TWICE -- once at startup and again
+    // whenever the server rotates the map (M51) -- because the alternative is
+    // two copies of this that drift. Order matters at the end: the world is
+    // rebuilt before the controller, which holds Jolt bodies belonging to it.
+    const auto load_arena = [&](const std::string& path) -> bool {
+        if (path.empty() || eng::asset_path_escapes_root(path)) {
+            eng::log::error("Map '{}' is not a path inside assets/", path);
+            return false;
+        }
+        const eng::GltfModel* loaded = assets.model(path);
+        if (loaded == nullptr) {
+            eng::log::error("Could not load map '{}'", path);
+            return false;
+        }
+        arena = loaded;
+        map_path = path;
+        eng::log::info("Map: {}", map_path);
+
+        std::vector<bool> is_normal_map(arena->images.size(), false);
+        for (const eng::GltfMaterial& material : arena->materials) {
+            if (material.normal_image >= 0 &&
+                static_cast<std::size_t>(material.normal_image) < is_normal_map.size()) {
+                is_normal_map[static_cast<std::size_t>(material.normal_image)] = true;
+            }
+        }
+        arena_textures.clear();
+        arena_textures.reserve(arena->images.size());
+        for (std::size_t i = 0; i < arena->images.size(); ++i) {
+            const eng::GltfImage& image = arena->images[i];
+            if (image.valid()) {
+                arena_textures.push_back(eng::Texture2D::from_pixels(
+                    image.width, image.height, image.pixels, !is_normal_map[i]));
+            } else {
+                eng::log::warn("Arena image '{}' has no pixels; using the missing-texture pattern",
+                               image.name);
+                arena_textures.push_back(
+                    eng::Texture2D::checkerboard(64, 8, {255, 0, 255}, {40, 40, 40}));
+            }
+        }
+
+        render_meshes.clear();
+        render_meshes.reserve(arena->meshes.size());
+        for (const eng::GltfMesh& mesh : arena->meshes) {
+            std::vector<RenderPrimitive> primitives;
+            for (const eng::GltfPrimitive& primitive : mesh.primitives) {
+                RenderPrimitive rp{eng::GpuMesh::upload(primitive.mesh), glm::vec3{1.0f}, -1, -1,
+                                   1.0f};
+                if (primitive.material >= 0) {
+                    const eng::GltfMaterial& material =
+                        arena->materials[static_cast<std::size_t>(primitive.material)];
+                    rp.color = glm::vec3(material.base_color);
+                    if (material.base_color_image >= 0 &&
+                        static_cast<std::size_t>(material.base_color_image) <
+                            arena_textures.size()) {
+                        rp.texture = material.base_color_image;
+                    }
+                    if (material.normal_image >= 0 &&
+                        static_cast<std::size_t>(material.normal_image) < arena_textures.size()) {
+                        rp.normal_texture = material.normal_image;
+                        rp.normal_scale = material.normal_scale;
+                    }
+                }
+                primitives.push_back(std::move(rp));
+            }
+            render_meshes.push_back(std::move(primitives));
+        }
+        scene = eng::Scene{};
+        spawn_points.clear();
+        for (const eng::GltfNode& node : arena->nodes) {
+            const eng::EntityId id = scene.create(node.name);
+            eng::Entity* entity = scene.get(id);
+            entity->transform = eng::Transform::from_matrix(node.transform);
+            entity->mesh = node.mesh;
+            if (node.name.starts_with("spawn_")) {
+                spawn_points.push_back(entity->transform.position);
+            }
+        }
+
+        // The sun's shadow projection is fitted to the static geometry once:
+        // the arena never moves, and players are always inside it. Raised a
+        // little so a player standing on the tallest platform still casts.
+        eng::Bounds scene_bounds;
+        for (const eng::GltfNode& node : arena->nodes) {
+            if (node.mesh < 0) {
+                continue;
+            }
+            for (const eng::GltfPrimitive& primitive :
+                 arena->meshes[static_cast<std::size_t>(node.mesh)].primitives) {
+                eng::Bounds local;
+                for (const eng::Vertex& vertex : primitive.mesh.vertices) {
+                    local.expand(vertex.position);
+                }
+                scene_bounds.expand(local, node.transform);
+            }
+        }
+        scene_bounds.max.y += 2.5f;
+        light_view_projection = eng::directional_light_view_projection(kSunDirection, scene_bounds);
+
+        // --- physics ------------------------------------------------------------
+        // A FRESH world: adding to the old one would stack two arenas.
+        world = eng::PhysicsWorld{};
+        for (const eng::GltfNode& node : arena->nodes) {
+            if (node.mesh < 0) {
+                continue;
+            }
+            for (const eng::GltfPrimitive& primitive :
+                 arena->meshes[static_cast<std::size_t>(node.mesh)].primitives) {
+                world.add_static_mesh(primitive.mesh, node.transform);
+            }
+        }
+        world.optimize();
+        eng::log::info("Physics: {} static bodies", world.body_count());
+
+        spawn = spawn_points.empty() ? glm::vec3{0.0f, 1.0f, 0.0f} : spawn_points[0];
+        // Rebuilt LAST: it binds to the world above.
+        controller.emplace(world, spawn);
+        return true;
+    };
+
+    if (!load_arena(map_path)) {
+        return 1;
+    }
     game::PlayerState player;
     player.position = spawn;
     game::PlayerState previous_player = player;
@@ -2173,6 +2214,36 @@ int main(int argc, char** argv) {
                 kill_cam_elapsed = 0.0f;
             }
             // Geometry was loaded before the server could be asked which map
+            // The server rotated between matches (M51): rebuild the world
+            // and everything standing in it. This runs BEFORE the wrong-map
+            // check below, which would otherwise see the new name against the
+            // old geometry and send the player back to the menu for a change
+            // the server just told us how to follow.
+            if (const auto next_map = net->take_map_change()) {
+                if (load_arena(*next_map)) {
+                    // Prediction held a reference into the world that just
+                    // went away, so it is rebuilt rather than reset.
+                    prediction.emplace(world, spawn);
+                    player = {};
+                    player.position = spawn;
+                    previous_player = player;
+                    recent_commands.clear();
+                    remote_render_tick = -1.0;
+                    kill_feed.clear();
+                    eng::log::info("Rotated to '{}'", *next_map);
+                } else {
+                    // The one failure that cannot be recovered from here: we
+                    // are connected to a server simulating geometry we cannot
+                    // load, so every position it sends is meaningless.
+                    menu_error =
+                        "server rotated to " + *next_map + ", which this client cannot load";
+                    net.reset();
+                    prediction.reset();
+                    online = false;
+                    mode = Mode::Menu;
+                    window->set_relative_mouse(false);
+                }
+            }
             // it runs, so the welcome is the first chance to find out. A
             // mismatch is not a degraded match, it is a different world:
             // shots stop at walls the server has never heard of and every
@@ -2325,7 +2396,7 @@ int main(int argc, char** argv) {
                 game::set_button(command, game::Button::Forward, true);
             }
             const bool was_on_ground = player.on_ground;
-            game::advance_player(player, command, game::kTickSeconds, controller, world);
+            game::advance_player(player, command, game::kTickSeconds, *controller, world);
             if (was_on_ground && !player.on_ground && player.velocity.y > 0.0f) {
                 sound("jump.wav", 0.5f);
             }
@@ -3213,8 +3284,8 @@ int main(int argc, char** argv) {
         // ray would just be debug clutter sitting at the default spawn.
         if (draw_physics && mode != Mode::Replay) {
             draw_capsule(
-                *debug_draw, player.position, controller.config().radius,
-                controller.config().height,
+                *debug_draw, player.position, controller->config().radius,
+                controller->config().height,
                 player.on_ground ? glm::vec3{0.2f, 1.0f, 0.3f} : glm::vec3{1.0f, 0.6f, 0.1f});
             debug_draw->line(player.position, player.position + player.velocity * 0.3f,
                              {1.0f, 1.0f, 0.2f});
@@ -3319,8 +3390,8 @@ int main(int argc, char** argv) {
                 player = {};
                 player.position = spawn;
                 previous_player = player;
-                controller.set_position(spawn);
-                controller.set_velocity({0.0f, 0.0f, 0.0f});
+                controller->set_position(spawn);
+                controller->set_velocity({0.0f, 0.0f, 0.0f});
                 view_yaw = 0.0f;
                 view_pitch = 0.0f;
                 input_sequence = 0;

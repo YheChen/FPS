@@ -40,10 +40,13 @@ struct ServerArgs {
     bool webrtc = false;
     std::optional<double> run_seconds;
     bool verbose = false;
-    std::optional<std::string> record_path;             // --record: write a replay
-    std::optional<std::string> replay_path;             // --replay: re-simulate one and exit
-    int bots = 0;                                       // --bots N: fill N slots with AI
-    std::string map = "maps/arena01.glb";               // --map: which arena to host
+    std::optional<std::string> record_path;  // --record: write a replay
+    std::optional<std::string> replay_path;  // --replay: re-simulate one and exit
+    int bots = 0;                            // --bots N: fill N slots with AI
+    std::string map = "maps/arena01.glb";    // --map: which arena to host
+    // --maps a.glb,b.glb: rotate at match end. The first entry is where the
+    // server starts; --map is ignored when this is given.
+    std::vector<std::string> map_rotation;
     game::BotSkill bot_skill = game::BotSkill::Normal;  // --bot-skill
     // --stats PATH: career records that outlive the process. Off by default,
     // because a server that suddenly needs a writable path is a server that
@@ -108,6 +111,22 @@ ServerArgs parse_args(int argc, char** argv) {
         } else if (arg == "--map") {
             if (const auto value = next_value()) {
                 args.map = std::string{*value};
+            }
+        } else if (arg == "--maps") {
+            if (const auto value = next_value()) {
+                std::string_view rest = *value;
+                while (!rest.empty()) {
+                    const std::size_t comma = rest.find(',');
+                    const std::string_view entry = rest.substr(0, comma);
+                    if (!entry.empty()) {
+                        args.map_rotation.emplace_back(entry);
+                    }
+                    rest = (comma == std::string_view::npos) ? std::string_view{}
+                                                             : rest.substr(comma + 1);
+                }
+                if (!args.map_rotation.empty()) {
+                    args.map = args.map_rotation.front();
+                }
             }
         } else if (arg == "--stats") {
             if (i + 1 < argc) {
@@ -357,6 +376,42 @@ int main(int argc, char** argv) {
 
     game::ServerGame server{std::move(collision), std::move(spawns), map_path, std::move(arsenal)};
     server.set_bot_config(game::bot_config_for(args.bot_skill));
+
+    // --maps: load every arena's collision up front. ServerGame does no file
+    // I/O -- that is this file's job -- so the rotation is handed over as
+    // geometry rather than as paths it would have to go and read mid-match.
+    if (args.map_rotation.size() > 1) {
+        std::vector<game::MapGeometry> rotation;
+        for (const std::string& entry : args.map_rotation) {
+            const std::string path = eng::normalize_asset_path(entry);
+            if (path.empty() || eng::asset_path_escapes_root(path)) {
+                eng::log::error("--maps entry '{}' is not a path inside assets/", entry);
+                return 1;
+            }
+            const eng::GltfModel* model = assets.model(path);
+            if (model == nullptr) {
+                eng::log::error("--maps entry '{}' could not be loaded", path);
+                return 1;
+            }
+            game::MapGeometry geometry;
+            geometry.name = path;
+            for (const eng::GltfNode& node : model->nodes) {
+                if (node.name.starts_with("spawn_")) {
+                    geometry.spawns.emplace_back(node.transform[3]);
+                }
+                if (node.mesh < 0) {
+                    continue;
+                }
+                for (const eng::GltfPrimitive& primitive :
+                     model->meshes[static_cast<std::size_t>(node.mesh)].primitives) {
+                    geometry.meshes.emplace_back(primitive.mesh, node.transform);
+                }
+            }
+            eng::log::info("Rotation map '{}': {} spawns", geometry.name, geometry.spawns.size());
+            rotation.push_back(std::move(geometry));
+        }
+        server.set_map_rotation(std::move(rotation));
+    }
     if (args.stats_path) {
         server.set_stats_path(*args.stats_path);
     }

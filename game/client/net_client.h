@@ -129,6 +129,9 @@ public:
     // echo cannot show something the server would have stripped -- but the
     // server's copy is the one that decides what everyone else sees.
     void send_chat(std::string_view text);
+    // The map the server has rotated to, once. Returns a value exactly once
+    // per change; the caller rebuilds the world and everything in it.
+    std::optional<std::string> take_map_change();
     std::vector<ChatLine> take_chat_lines();
 
     // Drained event queues (visuals/audio are the caller's job).
@@ -168,6 +171,7 @@ private:
     MatchPhase match_phase_ = MatchPhase::Playing;
     std::uint16_t match_seconds_ = 0;
     std::vector<ChatLine> chat_lines_;
+    std::optional<std::string> pending_map_change_;
     std::vector<FireEventMsg> fire_events_;
     std::vector<PlayerDamagedMsg> damage_events_;
     std::vector<PlayerDiedMsg> death_events_;

@@ -222,12 +222,17 @@ void write(eng::ByteWriter& w, const ChatMessageMsg& m) {
     w.str(m.text);
 }
 
+void write(eng::ByteWriter& w, const MapChangeMsg& m) {
+    w.u8(static_cast<std::uint8_t>(MessageType::MapChange));
+    w.str(m.map);
+}
+
 // --- decode -----------------------------------------------------------------
 
 std::optional<MessageType> read_message_type(eng::ByteReader& r) {
     const auto value = r.u8();
     if (!value || *value < static_cast<std::uint8_t>(MessageType::ClientHello) ||
-        *value > static_cast<std::uint8_t>(MessageType::ChatMessage)) {
+        *value > static_cast<std::uint8_t>(MessageType::MapChange)) {
         return std::nullopt;
     }
     return static_cast<MessageType>(*value);
@@ -590,6 +595,17 @@ std::string sanitize_chat(std::string_view text) {
     }
     const std::size_t last = out.find_last_not_of(' ');
     return out.substr(first, last - first + 1);
+}
+
+std::optional<MapChangeMsg> read_map_change(eng::ByteReader& r) {
+    // Same 64-byte cap as ServerWelcome's map: this is the same kind of value
+    // arriving by a different route, and the client hands it to the asset
+    // loader either way.
+    const auto map = r.str(64);
+    if (!map || !r.finished()) {
+        return std::nullopt;
+    }
+    return MapChangeMsg{*map};
 }
 
 std::optional<ChatSendMsg> read_chat_send(eng::ByteReader& r) {

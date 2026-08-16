@@ -48,6 +48,13 @@ FAMILY RULES (what makes five separate models read as one armoury):
      smg 0.54 m, shotgun 0.88 m, rifle 0.93 m, sniper 1.30 m, against a
      1.80 m character. The knife is 0.32 m, a quarter of the sniper.
 
+  7. THE SIGHT LINE IS LEVEL AND NOTHING STANDS IN IT. Three guns carry iron
+     sights, and aiming aligns those sights with the eye (see SIGHTS). The
+     line runs level from the eye over the top of the front sight, so any
+     part that reaches above it is standing between the player and what they
+     are shooting at. check_family asserts that, because it is the failure a
+     2 mm edit to a sight box causes and the one a diff cannot show.
+
 THE KNIFE IS NOT A GUN. Slot 5 is melee (assets/weapons/knife.cfg,
 `melee=true`): no magazine, no reload, and arm's-reach range. It gets a
 blade, and it breaks family rule 2 on purpose -- its working edge runs
@@ -66,9 +73,11 @@ of buffer for the whole file. Non-uniform node scale is safe for normals
 because the renderer builds a per-draw inverse-transpose normal matrix, the
 same way every arena box already relies on.
 
-Plus one mesh-less marker node named `muzzle` on each gun, read by name --
-the mechanism gen_arena.py already uses for `spawn_N`. That makes the flash
-position a property of the ASSET, so four weapons of four different lengths
+Plus mesh-less marker nodes named `muzzle` and `sight` on each gun, read by
+name -- the mechanism gen_arena.py already uses for `spawn_N`. `muzzle` is
+where the flash is born, a little AHEAD of the barrel; `sight` is where the
+EYE goes when the weapon is aimed, a little behind the rear sight. Both make
+a placement a property of the ASSET, so weapons of four different lengths
 need zero `if (weapon == ...)` in the client.
 
 Conventions: meters, +Y up, -Z forward (glTF standard), origin at the grip.
@@ -144,8 +153,22 @@ RIFLE = [
     ("muzzle_brake", "mat_gun_bright", (0.000, 0.105, -0.622), (0.040, 0.040, 0.056), 0.0),
     ("stock", "mat_gun_body", (0.000, 0.093, 0.200), (0.046, 0.086, 0.160), 0.0),
     ("magazine", "mat_gun_mag", (0.000, -0.027, -0.115), (0.030, 0.190, 0.070), 15.0),
-    ("front_sight", "mat_gun_steel", (0.000, 0.155, -0.425), (0.018, 0.055, 0.022), 0.0),
-    ("rear_sight", "mat_gun_steel", (0.000, 0.168, -0.105), (0.024, 0.032, 0.020), 0.0),
+    # 1.5 mm taller than first authored, so its top lands on the same 0.184
+    # as the rear notch's shoulders. That equality IS the sight picture --
+    # post tip level with the notch top -- and family rule 7 checks it.
+    ("front_sight", "mat_gun_steel", (0.000, 0.1565, -0.425), (0.018, 0.055, 0.022), 0.0),
+    # The rear sight is a NOTCH, which costs one extra box and is the whole
+    # difference between sights you aim with and a block that hides the post
+    # behind it. The 12 mm gap is wider than the front post SUBTENDS from the
+    # eye (the post is 18 mm but three times further away), so the post sits
+    # in the middle of the gap with daylight either side.
+    #
+    # 20 mm rather than the 32 mm first authored. Height does no work here --
+    # you look OVER these, through the gap -- and at 235 mm from the eye the
+    # taller version stood a third of the way down the screen, which is the
+    # rear sight winning an argument it should not have been in.
+    ("rear_sight_left", "mat_gun_steel", (-0.011, 0.174, -0.105), (0.010, 0.020, 0.020), 0.0),
+    ("rear_sight_right", "mat_gun_steel", (0.011, 0.174, -0.105), (0.010, 0.020, 0.020), 0.0),
 ]
 
 # smg -- the short one. Claims the 0.50-0.60 m band, a deep forward-raked
@@ -167,7 +190,11 @@ SMG = [
     # earns its vertices at viewmodel range.
     ("charging_handle", "mat_gun_steel", (-0.036, 0.128, -0.140), (0.020, 0.016, 0.060), 0.0),
     ("sight_front", "mat_gun_steel", (0.000, 0.152, -0.190), (0.014, 0.020, 0.016), 0.0),
-    ("sight_rear", "mat_gun_steel", (0.000, 0.152, 0.060), (0.024, 0.020, 0.018), 0.0),
+    # A notch, for the reason the rifle's is (see RIFLE). The gap is 10 mm
+    # rather than 12: this rear sight sits well behind the grip, closer to the
+    # eye than the rifle's, so the same gap would open into a canyon.
+    ("sight_rear_left", "mat_gun_steel", (-0.010, 0.154, 0.060), (0.010, 0.016, 0.018), 0.0),
+    ("sight_rear_right", "mat_gun_steel", (0.010, 0.154, 0.060), (0.010, 0.016, 0.018), 0.0),
 ]
 
 # shotgun -- the fat one. Shorter than the rifle but with the largest
@@ -189,7 +216,15 @@ SHOTGUN = [
     ("stock_wrist", "mat_gun_body", (0.000, -0.010, 0.080), (0.050, 0.070, 0.130), 0.0),
     ("stock_butt", "mat_gun_body", (0.000, -0.032, 0.173), (0.056, 0.125, 0.066), 0.0),
     ("butt_plate", "mat_gun_wood", (0.000, -0.032, 0.213), (0.060, 0.129, 0.014), 0.0),
-    ("front_bead", "mat_gun_bright", (0.000, 0.136, -0.646), (0.012, 0.018, 0.016), 0.0),
+    # The bead rides a post rather than sitting straight on the rib, and that
+    # post is what makes the shotgun aimable at all. The receiver is the
+    # TALLEST thing on this weapon -- taller than its own barrel -- so a bead
+    # level with the rib puts the sight line 2.5 mm above the receiver's back
+    # end, and aiming means squinting over a wall that fills the lower half of
+    # the screen. Lifting the bead to 0.161 opens 18.5 mm of daylight, which
+    # is what turns that wall into a ramp running away below the target.
+    ("front_post", "mat_gun_steel", (0.000, 0.136, -0.646), (0.012, 0.030, 0.012), 0.0),
+    ("front_bead", "mat_gun_bright", (0.000, 0.153, -0.646), (0.014, 0.016, 0.016), 0.0),
 ]
 
 # sniper -- the long thin one, and the only weapon in the set with SKY PUNCHED
@@ -270,6 +305,38 @@ WEAPONS = {
     "knife": (KNIFE, None, (35.0, 62.0)),
 }
 
+# name -> (front sight part, eye_z). Emits the `sight` marker: the point the
+# CAMERA is moved to when the weapon is aimed.
+#
+# The sight line is LEVEL at the top of the named front sight, which is the
+# only height the player ever actually aligns anything to. The marker sits on
+# that line, `eye_z` metres behind the grip origin -- +Z is toward the
+# shooter, so this is a positive number and a negative one would put the eye
+# out past the muzzle.
+#
+# Deriving the HEIGHT from the geometry rather than writing it down is what
+# keeps the two honest: move a front sight and the aim moves with it, instead
+# of the model and the number the client aims by drifting apart silently.
+#
+# eye_z is the one figure here that is tuned rather than derived, because it
+# trades off two things only a picture can settle -- too close and the
+# receiver crowds the near plane, too far and the sights shrink to specks.
+# Retune by screenshot, never by arithmetic:
+#
+#   fps_client --weapon N --aim --run-seconds 3 --screenshot /tmp/ads.png
+#
+# The sniper is absent on purpose: it has an optic rather than irons, and the
+# client hides its model at full zoom instead of aligning it -- the scope
+# rides 0.250 above the grip, so putting THAT on the eye line fills half the
+# frame with breech. The knife is absent because it has no sights at all.
+# Both absences work the same way `muzzle`'s does: no marker, old behaviour,
+# and no `if (weapon == ...)` anywhere in the client.
+SIGHTS = {
+    "rifle": ("front_sight", 0.130),
+    "smg": ("sight_front", 0.240),
+    "shotgun": ("front_bead", 0.200),
+}
+
 
 def xrot_quat(degrees):
     a = math.radians(degrees) * 0.5
@@ -341,6 +408,27 @@ def placed_muzzle(name):
     """The muzzle marker in the same held frame the boxes are in."""
     muzzle = WEAPONS[name][1]
     return None if muzzle is None else quat_rotate(hold_quat(name), muzzle)
+
+
+def sight_line(name):
+    """Height of the level sight line, from the front sight's top face.
+
+    Read out of the DESIGN frame, because that is the frame the part tables
+    and the family rules are both written in. The hold is applied afterwards
+    by placed_sight, exactly as it is for the muzzle.
+    """
+    front = SIGHTS[name][0]
+    for part_name, _, center, size, _ in WEAPONS[name][0]:
+        if part_name == front:
+            return center[1] + size[1] * 0.5
+    raise KeyError(f"{name}: no part named {front!r} to take the sight line from")
+
+
+def placed_sight(name):
+    """The eye marker in the same held frame the boxes are in."""
+    if name not in SIGHTS:
+        return None
+    return quat_rotate(hold_quat(name), (0.0, sight_line(name), SIGHTS[name][1]))
 
 
 def unit_cube():
@@ -429,6 +517,7 @@ class GlbBuilder:
 def build_glb(weapon_name):
     parts = placed_parts(weapon_name)
     muzzle = placed_muzzle(weapon_name)
+    sight = placed_sight(weapon_name)
     b = GlbBuilder()
 
     # --- one shared cube, referenced by every box -------------------------
@@ -485,6 +574,8 @@ def build_glb(weapon_name):
 
     if muzzle is not None:
         nodes.append({"name": "muzzle", "translation": list(muzzle)})
+    if sight is not None:
+        nodes.append({"name": "sight", "translation": list(sight)})
 
     # The full palette ships in every file even when a weapon uses four of the
     # six. Six unused JSON objects cost ~600 bytes and keep material indices
@@ -558,6 +649,25 @@ def check_family(name):
         # barrel and half of it is depth-rejected on the first frame.
         assert muzzle[2] < lo[2], f"{name}: muzzle marker is inside the mesh"
         assert muzzle[2] > lo[2] - 0.05, f"{name}: muzzle marker floats too far off the barrel"
+
+    if name in SIGHTS:
+        # Family rule 7. The eye is put ON this line and looks straight down
+        # it, so anything reaching above it is between the player and the
+        # target -- and a box that grew 2 mm looks identical in a diff and in
+        # every screenshot except the one nobody takes.
+        line = sight_line(name)
+        for part in parts:
+            _, part_hi = bounds([part])
+            assert part_hi[1] <= line + 1e-6, (
+                f"{name}: `{part[0]}` tops out at {part_hi[1]:.4f} m, above the "
+                f"{line:.4f} m sight line -- it would stand in the aiming view")
+        # +Z is toward the shooter, so the eye is a POSITIVE offset and it has
+        # to be behind the front sight. Getting this sign wrong puts the
+        # camera out past the muzzle, which renders as an empty screen and
+        # reads as "aiming is broken" rather than "one number is negated".
+        front_z = next(c[2] for n, _, c, _, _ in parts if n == SIGHTS[name][0])
+        assert SIGHTS[name][1] > front_z, \
+            f"{name}: eye marker is in front of the front sight"
     return lo, hi, length
 
 

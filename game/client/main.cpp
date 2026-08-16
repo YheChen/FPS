@@ -2223,7 +2223,9 @@ int main(int argc, char** argv) {
             // the entire point of having scoped.
             const float aim_sensitivity =
                 settings.sensitivity *
-                game::ads_lerp(arsenal.at(loadout.slot).ads_fov_scale, loadout.ads_fraction);
+                game::ads_lerp(
+                    arsenal.at(online ? net->self_weapon_slot() : loadout.slot).ads_fov_scale,
+                    loadout.ads_fraction);
             view_yaw += input.mouse_dx() * aim_sensitivity;
             view_pitch -= input.mouse_dy() * aim_sensitivity;
             view_pitch = std::clamp(view_pitch, -eng::Camera::kMaxPitchRadians,
@@ -2404,6 +2406,24 @@ int main(int argc, char** argv) {
                     remote_render_tick > 0.0 ? static_cast<std::uint32_t>(remote_render_tick) : 0u);
                 player = prediction->state();
                 previous_player = prediction->previous_state();
+                // The sights are the one part of the weapon an online client
+                // still has to run for itself, and the `continue` below is
+                // why: it skips the whole weapon tick, because the server
+                // owns the magazine, the slot and the reload and reports them
+                // in WeaponStatus. ads_fraction is not like those. It drives
+                // the FOV, the viewmodel and the crosshair -- pictures that
+                // must not lag the button by a round trip -- so it is
+                // advanced here from the same shared rule and the same Aim
+                // bit the server is about to apply to its own copy.
+                //
+                // Missing this is what made aiming do nothing online while
+                // working perfectly in offline practice: everything below
+                // this line, update_loadout included, is offline-only.
+                const bool aim_held = game::wants_ads(command, player.sprinting) &&
+                                      (window->relative_mouse() || args.aim);
+                loadout.ads_fraction =
+                    game::advance_ads(loadout.ads_fraction, arsenal.at(net->self_weapon_slot()),
+                                      aim_held, game::kTickSeconds);
                 continue;  // offline gameplay (targets/weapon) stays offline
             }
 
@@ -2856,9 +2876,15 @@ int main(int argc, char** argv) {
         // Sights narrow the FOV. Driven by the SAME ads_fraction the server
         // uses for the cone, so the zoom and the accuracy it implies arrive
         // together rather than the picture leading the bullets.
+        // The slot is the SERVER's answer online, for the same reason the HUD
+        // and the viewmodel take it from there: loadout.slot is never advanced
+        // online (the server owns it), so reading it here would zoom by the
+        // rifle's scale no matter what was actually in your hands.
         camera.fov_y_degrees =
             settings.fov_degrees *
-            game::ads_lerp(arsenal.at(loadout.slot).ads_fov_scale, loadout.ads_fraction);
+            game::ads_lerp(
+                arsenal.at(online ? net->self_weapon_slot() : loadout.slot).ads_fov_scale,
+                loadout.ads_fraction);
 
         // The ears ride the camera rather than the player, so what you hear
         // always agrees with what you see -- in the killcam and the replay

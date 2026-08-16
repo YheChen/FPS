@@ -221,4 +221,24 @@ constexpr float effective_spread_degrees(const WeaponConfig& config, float ads_f
     return config.spread_degrees * ads_lerp(config.ads_spread_scale, ads_fraction);
 }
 
+// Advances the sights one tick toward held or released, and touches nothing
+// else.
+//
+// update_loadout does this as part of a whole weapon tick, which is what the
+// server and offline practice both want. The ONLINE client wants this half
+// and ONLY this half: the server owns the magazine, the slot and the reload
+// and reports them in WeaponStatus, so the client skips the weapon tick
+// entirely -- but ads_fraction drives the FOV, the sights and the crosshair,
+// and a picture that waited for a round trip would be unusable.
+//
+// Existing as a named function is the point. Aiming was invisible online for
+// exactly as long as this logic lived only inside update_loadout, because the
+// online client's one job here was buried in a function it had every reason
+// not to call.
+constexpr float advance_ads(float fraction, const WeaponConfig& config, bool aim_held, float dt) {
+    const bool aiming = aim_held && supports_ads(config);
+    const float step = config.ads_seconds > 0.0f ? dt / config.ads_seconds : 1.0f;
+    return std::clamp(fraction + (aiming ? step : -step), 0.0f, 1.0f);
+}
+
 }  // namespace game

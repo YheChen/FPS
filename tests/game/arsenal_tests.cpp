@@ -276,6 +276,44 @@ TEST_CASE("sights raise and lower over the configured time", "[weapon][ads]") {
     CHECK(loadout.ads_fraction == Approx(0.0f));
 }
 
+// The online client cannot call update_loadout: the server owns its magazine,
+// its slot and its reload, so the whole weapon tick is skipped. But it still
+// has to raise its own sights, or aiming zooms nothing and moves nothing --
+// which is exactly what shipped, and what nobody caught, because offline
+// practice DOES run the full tick and every screenshot taken of the feature
+// was an offline one.
+//
+// So advance_ads is asserted here as its own rule, reachable without a
+// Loadout, and update_loadout is asserted to agree with it tick for tick.
+// Two callers, one answer.
+TEST_CASE("the sights advance identically whoever is driving them", "[weapon][ads]") {
+    const game::Arsenal arsenal = ads_arsenal();
+    const game::WeaponConfig& scoped = arsenal.at(0);
+
+    game::Loadout loadout;
+    game::reset_loadout(loadout, arsenal);
+    float bare = 0.0f;
+    for (int tick = 0; tick < 4; ++tick) {
+        game::update_loadout(loadout, arsenal, 0, false, false, kTick, /*aim_held=*/true);
+        bare = game::advance_ads(bare, scoped, /*aim_held=*/true, kTick);
+        CHECK(bare == Approx(loadout.ads_fraction));
+    }
+    for (int tick = 0; tick < 4; ++tick) {
+        game::update_loadout(loadout, arsenal, 0, false, false, kTick, /*aim_held=*/false);
+        bare = game::advance_ads(bare, scoped, /*aim_held=*/false, kTick);
+        CHECK(bare == Approx(loadout.ads_fraction));
+    }
+
+    // Both ends clamp, so a long hold cannot bank progress that a release
+    // then has to spend before the sights start coming down.
+    CHECK(game::advance_ads(1.0f, scoped, true, kTick) == Approx(1.0f));
+    CHECK(game::advance_ads(0.0f, scoped, false, kTick) == Approx(0.0f));
+
+    // A weapon with nothing to raise never leaves the hip, so a client that
+    // advances it for the knife still renders no zoom.
+    CHECK(game::advance_ads(0.0f, arsenal.at(1), true, kTick) == Approx(0.0f));
+}
+
 TEST_CASE("the cone the server rolls follows the sights", "[weapon][ads]") {
     const game::Arsenal arsenal = ads_arsenal();
     const game::WeaponConfig& scoped = arsenal.at(0);

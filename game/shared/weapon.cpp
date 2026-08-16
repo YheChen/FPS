@@ -246,10 +246,7 @@ WeaponTickResult update_loadout(Loadout& loadout, const Arsenal& arsenal, std::u
     // weapon is still being raised and while reloading -- both of which are
     // states you can be aiming through, and neither of which should strand
     // the fraction part-way.
-    const bool aiming = aim_held && supports_ads(config);
-    const float ads_step = config.ads_seconds > 0.0f ? dt / config.ads_seconds : 1.0f;
-    loadout.ads_fraction =
-        std::clamp(loadout.ads_fraction + (aiming ? ads_step : -ads_step), 0.0f, 1.0f);
+    loadout.ads_fraction = advance_ads(loadout.ads_fraction, config, aim_held, dt);
 
     if (loadout.switch_remaining_seconds > 0.0f) {
         loadout.switch_remaining_seconds = std::max(0.0f, loadout.switch_remaining_seconds - dt);

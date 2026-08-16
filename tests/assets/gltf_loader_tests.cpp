@@ -100,15 +100,18 @@ TEST_CASE("every shipped map satisfies what the server relies on", "[gltf]") {
     }
 }
 
-// The viewmodel reads three things out of a weapon asset and nothing else:
-// geometry, a grip at the origin, and a `muzzle` marker. All three are silent
-// when they go wrong -- a regenerated weapon that lost its marker still loads,
-// still draws, and simply never flashes again -- so they are asserted here
-// rather than left to whoever next edits gen_weapons.py.
+// The viewmodel reads four things out of a weapon asset and nothing else:
+// geometry, a grip at the origin, a `muzzle` marker and a `sight` marker. All
+// four are silent when they go wrong -- a regenerated weapon that lost a
+// marker still loads, still draws, and simply never flashes again (or never
+// aims again) -- so they are asserted here rather than left to whoever next
+// edits gen_weapons.py.
 //
 // Whether a weapon HAS a muzzle is not a property of its slot: it is the
 // weapon's own melee flag, which is exactly the rule the client implements by
-// keying the flash off the marker's presence.
+// keying the flash off the marker's presence. `sight` works the same way, on
+// a different question: whether the weapon is aimed ALONG (irons, marker
+// present) or THROUGH (an optic, marker absent, model hidden at full zoom).
 TEST_CASE("every shipped weapon satisfies what the viewmodel relies on", "[gltf]") {
     static eng::AssetCache cache{*eng::find_assets_root()};
     const auto assets_root = eng::find_assets_root();
@@ -126,6 +129,7 @@ TEST_CASE("every shipped weapon satisfies what the viewmodel relies on", "[gltf]
         REQUIRE(model != nullptr);
 
         std::optional<glm::vec3> muzzle;
+        std::optional<glm::vec3> sight;
         glm::vec3 lo{1e9f};
         glm::vec3 hi{-1e9f};
         std::size_t boxes = 0;
@@ -133,6 +137,8 @@ TEST_CASE("every shipped weapon satisfies what the viewmodel relies on", "[gltf]
             if (node.mesh < 0) {
                 if (node.name == "muzzle") {
                     muzzle = glm::vec3(node.transform[3]);
+                } else if (node.name == "sight") {
+                    sight = glm::vec3(node.transform[3]);
                 }
                 continue;
             }
@@ -162,9 +168,37 @@ TEST_CASE("every shipped weapon satisfies what the viewmodel relies on", "[gltf]
         CHECK(hi.z >= 0.0f);
 
         if (config->melee) {
-            // A knife with a muzzle node would spit fire out of its blade.
+            // A knife with a muzzle node would spit fire out of its blade,
+            // and one with a sight node would swing up to the eye when aimed.
             CHECK_FALSE(muzzle.has_value());
+            CHECK_FALSE(sight.has_value());
             continue;
+        }
+
+        // Which guns carry irons is not a list: it is the SAME rule the client
+        // draws with. A weapon that more than halves the FOV is looked
+        // through, so its model is hidden at full zoom and it needs no sight
+        // line; everything else is looked along and had better have one, or
+        // aiming it moves nothing.
+        if (config->ads_fov_scale > 0.5f) {
+            REQUIRE(sight.has_value());
+            // The eye goes here, so it has to be BEHIND the grip (+Z is toward
+            // the shooter) and behind the muzzle it is looking past. A sign
+            // error puts the camera out past the barrel: an empty screen that
+            // reads as "aiming is broken" rather than "one number is negated".
+            CHECK(sight->z > 0.0f);
+            // Dead centre, or the weapon aims off to one side of where the
+            // bullets go -- the server's cone is built from the camera axis
+            // and knows nothing about where the model ended up.
+            CHECK(sight->x == Catch::Approx(0.0f).margin(1e-4f));
+            // ...and level with the highest point on the whole weapon. The
+            // camera looks straight down this line, so anything reaching above
+            // it stands between the player and the target. Stating it against
+            // the geometry's own maximum is what makes it a property of the
+            // shipped asset rather than of the script that wrote it.
+            CHECK(sight->y == Catch::Approx(hi.y).margin(1e-4f));
+        } else {
+            CHECK_FALSE(sight.has_value());
         }
         REQUIRE(muzzle.has_value());
         // Ahead of every box, so the additive flash is not born inside the

@@ -865,6 +865,13 @@ struct WeaponModel {
     // fire: the flash position is a property of the ASSET, so four weapons of
     // four different lengths need no `if (weapon == ...)` in the client.
     std::optional<glm::vec3> muzzle;
+    // Grip-local eye position for aiming, from the asset's `sight` marker:
+    // put the camera exactly there and the weapon's own sights line up with
+    // the middle of the screen. Absent on the sniper, which has an optic
+    // rather than irons and is looked THROUGH rather than along, and on the
+    // knife, which has no sights -- and in both cases the absence is what
+    // keeps them on the plain zoom they had before this marker existed.
+    std::optional<glm::vec3> sight;
     // How far the geometry reaches forward of the grip. The arm extends by
     // whatever this leaves over, so every weapon presents its business end
     // at the same distance -- see kViewmodelBusinessEnd.
@@ -890,12 +897,12 @@ constexpr float kAimSteadiness = 0.22f;
 // A weapon that more than halves the FOV is being looked THROUGH, so the
 // model stops being drawn once the sights are most of the way up.
 //
-// The obvious alternative -- slide the model onto the centre line -- was
-// tried and looks worse than doing nothing: correct ADS placement aligns the
-// weapon's SIGHTS with the camera axis, and with no `sight` node on the mesh
-// (the models only carry `muzzle`) centring just puts the breech in the
-// camera's face, filling half the screen. Doing that properly is asset work
-// in tools/gen_weapons, not a constant to guess at here.
+// This is the SNIPER alone, and it is the exception rather than the rule: the
+// three iron-sighted guns carry a `sight` marker and align it with the eye
+// (see viewmodel_transform), which is the whole point of having irons. The
+// scope cannot do that -- it rides 0.250 above the grip, so putting it on the
+// eye line fills half the frame with breech, which was tried and looks worse
+// than doing nothing. Hiding the model is what a scope's own reticle replaces.
 constexpr float kScopeHidesModelAbove = 0.55f;
 
 // Forward is NOT fixed, because the arm is not: a short weapon is presented
@@ -1080,15 +1087,32 @@ void update_viewmodel(ViewmodelState& state, const game::WeaponConfig& config, s
 // ABOUT THE GRIP on top of that, which is why every weapon can share them --
 // the grip is the one point all five models agree on.
 glm::mat4 viewmodel_transform(const ViewmodelState& state, const eng::Camera& camera, float reach,
-                              bool melee, float ads_fraction) {
+                              bool melee, float ads_fraction,
+                              const std::optional<glm::vec3>& sight) {
     const glm::vec3 forward = camera.forward();
     const glm::vec3 right = camera.right();
     const glm::vec3 up = glm::cross(right, forward);
 
     const float aim = glm::clamp(ads_fraction, 0.0f, 1.0f);
-    glm::vec3 offset{
+    // Hip: over to the right and down, with the arm extended so every weapon
+    // presents its business end at the same distance from the eye.
+    const glm::vec3 hip{
         kViewmodelRight, -kViewmodelDown,
         glm::clamp(kViewmodelBusinessEnd - reach, kViewmodelForwardMin, kViewmodelForwardMax)};
+    // Aimed: not tuned at all, and deliberately so. It is whatever puts the
+    // asset's `sight` marker exactly on the eye. The basis below maps
+    // grip-local +X/+Y/-Z onto the camera's right/up/forward, so a marker at
+    // s lands on the camera when the grip sits at (-s.x, -s.y, s.z). Three
+    // guns of three different lengths aim correctly off one line of algebra,
+    // and a weapon whose sights move re-aims itself the next time
+    // gen_weapons.py runs -- no constant here to forget to update.
+    //
+    // No marker means no alignment: the sniper is looked through rather than
+    // along and hides its model instead (kScopeHidesModelAbove), and the
+    // knife has nothing to aim. Both keep the hip pose and just zoom, which
+    // is what they did before there was a marker at all.
+    const glm::vec3 aimed = sight ? glm::vec3{-sight->x, -sight->y, sight->z} : hip;
+    glm::vec3 offset = glm::mix(hip, aimed, aim);
     // Everything below adds motion to that rest pose; aiming scales it down.
     const float motion = glm::mix(1.0f, kAimSteadiness, aim);
     float pitch_kick = 0.0f;
@@ -1369,6 +1393,8 @@ WeaponModel load_weapon_model(eng::AssetCache& assets, const char* name, bool me
             // the maps use for `spawn_N`.
             if (node.name == "muzzle") {
                 model.muzzle = glm::vec3(node.transform[3]);
+            } else if (node.name == "sight") {
+                model.sight = glm::vec3(node.transform[3]);
             }
             continue;
         }
@@ -2871,9 +2897,9 @@ int main(int argc, char** argv) {
                              player.position, player.velocity, player.on_ground,
                              game::kMove.max_speed, camera.yaw, camera.pitch,
                              static_cast<float>(dt));
-            viewmodel_model =
-                viewmodel_transform(viewmodel, camera, held != nullptr ? held->reach : 0.0f,
-                                    viewmodel_config.melee, loadout.ads_fraction);
+            viewmodel_model = viewmodel_transform(
+                viewmodel, camera, held != nullptr ? held->reach : 0.0f, viewmodel_config.melee,
+                loadout.ads_fraction, held != nullptr ? held->sight : std::optional<glm::vec3>{});
         } else {
             // Hidden means dead, in the menu, or watching someone else. Forget
             // everything, so coming back raises the weapon rather than

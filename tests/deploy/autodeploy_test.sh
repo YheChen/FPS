@@ -147,7 +147,13 @@ HOST_N=0
 new_host() {  # new_host [commit-to-check-out] -> sets HOST and FPS_STATE_DIR
     HOST_N=$((HOST_N + 1))
     HOST="$WORK/host$HOST_N"
-    git clone --quiet "${HOST_ORIGIN:-$ORIGIN}" "$HOST"
+    # --no-hardlinks: cloning a LOCAL path makes git hardlink the object pack
+    # into the new repo instead of copying it. That is a real speedup and a
+    # real flake -- on 2026-08-17 a CI run died on "fatal: hardlink different
+    # from source" partway through case 14, failing three assertions for a
+    # reason that had nothing to do with what they test. Fifteen small clones
+    # is not where this suite spends its time.
+    git clone --quiet --no-hardlinks "${HOST_ORIGIN:-$ORIGIN}" "$HOST"
     [ $# -gt 0 ] && git -C "$HOST" reset --hard --quiet "$1"
     export FPS_STATE_DIR="$WORK/state$HOST_N"
     export FAKE_DOCKER_LOG="$WORK/docker$HOST_N.log"

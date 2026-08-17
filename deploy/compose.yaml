@@ -23,12 +23,17 @@ services:
       - "${FPS_BOTS:-0}"
       - "--bot-skill"
       - "${FPS_BOT_SKILL:-normal}"
-      # The client loads its geometry before it knows which map the server
-      # runs, so changing this makes browser clients built for the old map
-      # refuse to join rather than play against invisible walls. Rebuild and
-      # redeploy the client (CI does it on a push to main) when you change it.
-      - "--map"
-      - "${FPS_MAP:-maps/arena01.glb}"
+      # One map, or several comma-separated to rotate between matches (M51).
+      # `--maps` with a single entry is exactly `--map`, so this covers both
+      # and there is only one variable to reason about.
+      #
+      # Every arena ships inside the client, so rotating between them needs no
+      # client redeploy, and since M51b a client that arrives while the server
+      # is on the other map loads it instead of being turned away. Adding a
+      # NEW map is still a client change: publish a client that contains it
+      # before rotating to it, or arrivals get refused.
+      - "--maps"
+      - "${FPS_MAPS:-maps/arena01.glb}"
       # Career stats. The path is inside the one writable mount below; a
       # server told to write anywhere else on this root filesystem would
       # fail, loudly, at the first save rather than at startup.

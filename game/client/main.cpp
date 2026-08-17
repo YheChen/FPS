@@ -2116,6 +2116,22 @@ int main(int argc, char** argv) {
         const auto it = net->players().find(id);
         return it != net->players().end() ? it->second.name : "world";
     };
+    // Everything that has to be thrown away when the ground moves under it.
+    // Two callers -- the server rotating mid-session, and finding out at the
+    // welcome that it was already on a different map than we guessed -- and
+    // they must not drift, for the same reason load_arena is one function
+    // called twice rather than two copies.
+    const auto rebuild_after_map_load = [&] {
+        // Prediction held a reference into the world that just went away, so
+        // it is rebuilt rather than reset.
+        prediction.emplace(world, spawn);
+        player = {};
+        player.position = spawn;
+        previous_player = player;
+        recent_commands.clear();
+        remote_render_tick = -1.0;
+        kill_feed.clear();
+    };
 
     float view_yaw = 0.0f;
     float view_pitch = 0.0f;
@@ -2241,23 +2257,14 @@ int main(int argc, char** argv) {
             if (net->self_alive()) {
                 kill_cam_elapsed = 0.0f;
             }
-            // Geometry was loaded before the server could be asked which map
             // The server rotated between matches (M51): rebuild the world
-            // and everything standing in it. This runs BEFORE the wrong-map
-            // check below, which would otherwise see the new name against the
-            // old geometry and send the player back to the menu for a change
-            // the server just told us how to follow.
+            // and everything standing in it. This runs BEFORE the map check
+            // below, which would otherwise see the new name against the old
+            // geometry and treat a change the server just told us how to
+            // follow as a mismatch.
             if (const auto next_map = net->take_map_change()) {
                 if (load_arena(*next_map)) {
-                    // Prediction held a reference into the world that just
-                    // went away, so it is rebuilt rather than reset.
-                    prediction.emplace(world, spawn);
-                    player = {};
-                    player.position = spawn;
-                    previous_player = player;
-                    recent_commands.clear();
-                    remote_render_tick = -1.0;
-                    kill_feed.clear();
+                    rebuild_after_map_load();
                     eng::log::info("Rotated to '{}'", *next_map);
                 } else {
                     // The one failure that cannot be recovered from here: we
@@ -2272,14 +2279,37 @@ int main(int argc, char** argv) {
                     window->set_relative_mouse(false);
                 }
             }
-            // it runs, so the welcome is the first chance to find out. A
-            // mismatch is not a degraded match, it is a different world:
-            // shots stop at walls the server has never heard of and every
-            // authoritative position is meaningless. Refuse it, and say what
-            // to relaunch with rather than leaving the player to guess why
-            // the game is behaving impossibly.
-            const bool wrong_map = net->state() == game::NetClient::State::InGame &&
-                                   !net->server_map().empty() && net->server_map() != map_path;
+            // Geometry has to be loaded before the server can be asked which
+            // map it runs, so the welcome is the first chance to find out we
+            // guessed wrong. A mismatch is not a degraded match, it is a
+            // different world: shots stop at walls the server has never heard
+            // of and every authoritative position is meaningless. It cannot
+            // be played through.
+            //
+            // So LOAD what the server is actually running, rather than
+            // refusing it. Every arena ships inside the client, and the
+            // welcome names the one to switch to -- the same move the
+            // rotation above already makes, arriving through a different
+            // door. Refusing is kept for the case that check was really
+            // written for: a map this client genuinely does not have.
+            //
+            // Refusing outright is what made a ROTATING server unjoinable
+            // for half its uptime. Players already in the match followed the
+            // rotation fine; anyone arriving during the second map was told
+            // to "relaunch with --map", which a browser cannot do -- it has
+            // no argv, and its query string takes only `connect` and `name`.
+            const bool map_differs = net->state() == game::NetClient::State::InGame &&
+                                     !net->server_map().empty() && net->server_map() != map_path;
+            bool wrong_map = false;
+            if (map_differs) {
+                const std::string wanted = net->server_map();
+                if (load_arena(wanted)) {
+                    rebuild_after_map_load();
+                    eng::log::info("Server is on '{}'; loaded it and joined", wanted);
+                } else {
+                    wrong_map = true;
+                }
+            }
             // Made it in: whatever we were waiting out is over.
             if (net->state() == game::NetClient::State::InGame && reconnect.waiting()) {
                 eng::log::info("Reconnected after {} attempt(s)", reconnect.attempts);
@@ -2293,10 +2323,10 @@ int main(int argc, char** argv) {
                 net->state() == game::NetClient::State::Rejected) {
                 if (wrong_map) {
                     reconnect.stop_waiting();
-                    eng::log::error("Server runs '{}' but this client loaded '{}'",
-                                    net->server_map(), map_path);
-                    menu_error = "server is on " + net->server_map() + "; relaunch with --map " +
-                                 net->server_map();
+                    eng::log::error("Server runs '{}', which this client cannot load",
+                                    net->server_map());
+                    menu_error =
+                        "server is on " + net->server_map() + ", which this client cannot load";
                 } else if (net->state() == game::NetClient::State::Rejected && !version_mismatch) {
                     // Full, or a bad name. Neither gets better by waiting.
                     reconnect.stop_waiting();

@@ -323,6 +323,64 @@ TEST_CASE("the cone the server rolls follows the sights", "[weapon][ads]") {
     CHECK(game::effective_spread_degrees(scoped, 0.5f) == Approx(2.5f));  // halfway
 }
 
+TEST_CASE("a scoped weapon fires, and fires the tightened cone", "[weapon][ads]") {
+    // Aiming and firing are independent, and the shot that leaves a raised
+    // weapon is the AIMED one. Neither half was asserted anywhere: every ADS
+    // case above passes fire_held=false, and every firing case leaves
+    // aim_held at its default. So "can you shoot while scoped?" was
+    // unanswered by the suite, in a game whose entire ADS mechanic is a trade
+    // of mobility for accuracy -- and a trade that silently cost the shot
+    // would look exactly like one that worked.
+    const game::Arsenal arsenal = ads_arsenal();
+    const game::WeaponConfig& scoped = arsenal.at(0);
+
+    // 600 rpm is a shot every 6 ticks and ads_seconds 0.1 is 6 ticks to full,
+    // so 18 ticks covers the sights coming up AND several shots after they
+    // are up. Only the LAST shot is asserted on: the first leaves while the
+    // sights are still rising, and its half-raised cone is correct.
+    struct Run {
+        int shots = 0;
+        float cone_on_last_shot = -1.0f;
+        float ads_at_end = -1.0f;
+    };
+    const auto fire_for_18_ticks = [&](bool aim_held) {
+        Run out;
+        game::Loadout loadout;
+        game::reset_loadout(loadout, arsenal);
+        for (int tick = 0; tick < 18; ++tick) {
+            const game::WeaponTickResult shot =
+                game::update_loadout(loadout, arsenal, 0, /*fire_held=*/true,
+                                     /*reload_requested=*/false, kTick, aim_held);
+            if (shot.fired) {
+                ++out.shots;
+                // Exactly what server_game.cpp rolls the cone from at the
+                // moment it decides where the pellets went.
+                out.cone_on_last_shot =
+                    game::effective_spread_degrees(scoped, loadout.ads_fraction);
+            }
+        }
+        out.ads_at_end = loadout.ads_fraction;
+        return out;
+    };
+
+    const Run aimed = fire_for_18_ticks(/*aim_held=*/true);
+    const Run hip = fire_for_18_ticks(/*aim_held=*/false);
+
+    // It fires at all, which is the question this test exists to answer.
+    CHECK(aimed.shots > 1);
+    // ...and at the same rate as from the hip. Aiming buys accuracy; it must
+    // never quietly cost rate of fire.
+    CHECK(aimed.shots == hip.shots);
+    // Firing does not knock the sights back down. Recoil is a viewmodel
+    // animation on the client, deliberately not a simulated loss of aim --
+    // if it were, the server would have to agree about it.
+    CHECK(aimed.ads_at_end == Approx(1.0f));
+    // And the shot went out through the AIMED cone rather than the hip one,
+    // which is the half that makes aiming worth doing.
+    CHECK(aimed.cone_on_last_shot == Approx(1.0f));  // 4 * 0.25
+    CHECK(hip.cone_on_last_shot == Approx(4.0f));
+}
+
 TEST_CASE("switching weapons drops the sights instantly", "[weapon][ads]") {
     // Otherwise the new weapon's first moments render through the old
     // weapon's zoom, and a knife comes up scoped.

@@ -1,6 +1,6 @@
 # Packet format
 
-Status: **implemented** (protocol version 7, `game/shared/protocol.*`).
+Status: **implemented** (protocol version 11, `game/shared/protocol.*`).
 Update this document in the same commit as any protocol change.
 
 ## Encoding rules
@@ -22,24 +22,30 @@ Update this document in the same commit as any protocol change.
 
 Channel R = ENet reliable ordered (ch 0), U = unreliable sequenced (ch 1).
 
-| Type | Name             | Dir  | Ch | Frequency        | Max size | Notes |
-|------|------------------|------|----|------------------|----------|-------|
-| 1    | ClientHello      | C→S  | R  | once             | 24 B     | version + name |
-| 2    | ServerWelcome    | S→C  | R  | once             | 48 B     | id, rates, tick, map |
-| 3    | ServerReject     | S→C  | R  | once             | 4 B      | reason code |
-| 4    | PlayerJoined     | S→C  | R  | on join          | 24 B     | |
-| 5    | PlayerLeft       | S→C  | R  | on leave         | 4 B      | |
-| 6    | InputCommand     | C→S  | U  | 60/s             | 64 B     | redundant window of 3 |
-| 7    | Snapshot         | S→C  | U  | 20/s             | 16 + 26·players B | full state |
-| 8    | Ping / 9 Pong    | both | U  | 4/s              | 12 B     | RTT + clock offset |
-| 10   | FireEvent        | S→C  | R  | on shot (M8)     | 16 + 13·pellets B | shooter, weapon slot, origin, one ray (endpoint + victim) per pellet: a shotgun draws 8 tracers but plays one bang |
-| 11   | HealthUpdate     | S→C  | R  | on change (M8)   | 9 B      | victim, attacker, health after, damage dealt, and **hit zone** (M35): 0 torso, 1 head, 2 arm, 3 leg. One shot reports one zone — for a shotgun, the best any pellet reached. A zone byte above 3 rejects the message. |
-| 12   | PlayerDied       | S→C  | R  | on death (M8)    | 8 B      | victim, killer |
-| 13   | PlayerRespawned  | S→C  | R  | on respawn (M8)  | 20 B     | |
-| 14   | ScoreUpdate      | S→C  | R  | on change (M8)   | 8 B/row  | |
-| 15   | MatchState       | S→C  | R  | on change + join | 16 B     | phase, time remaining |
-| 16   | Leaderboard      | S→C  | R  | on join + match end (M29) | ≤ 10 rows | career kills/deaths/matches |
-| 17   | KillCam          | S→**victim** | R | on death (M30) | ≤ 40 × 20 B | the killer's view, oldest first |
+| Type | Name | Dir | Ch | Frequency | Max size | Notes |
+|------|------|-----|----|-----------|----------|-------|
+| 1  | ClientHello     | C→S | R | once | 20 B | protocol version + name |
+| 2  | ServerWelcome   | S→C | R | once | 74 B | id, rates, tick, map, team |
+| 3  | ServerReject    | S→C | R | once | 2 B | reason code |
+| 4  | PlayerJoined    | S→C | R | on join | 20 B | id, name, team |
+| 5  | PlayerLeft      | S→C | R | on leave | 2 B | |
+| 6  | Input           | C→S | U | 60/s | 47 B | redundant window of 3 |
+| 7  | Snapshot        | S→C | U | 20/s | 10 + 34·players B | full state |
+| 8  | FireEvent       | S→C | R | on shot | 16 + 13·pellets B | shooter, weapon slot, origin, one ray (endpoint + victim) per pellet: a shotgun draws 8 tracers but plays one bang |
+| 9  | PlayerDamaged   | S→C | R | on hit | 12 B | victim, attacker, health after, damage dealt, and **hit zone** (M35): 0 torso, 1 head, 2 arm, 3 leg. One shot reports one zone — for a shotgun, the best any pellet reached. A zone byte above 3 rejects the message. |
+| 10 | PlayerDied      | S→C | R | on death | 3 B | victim, killer |
+| 11 | PlayerRespawned | S→C | R | on respawn | 14 B | |
+| 12 | ScoreUpdate     | S→C | R | on change | 6 B | per player |
+| 13 | MatchState      | S→C | R | on change + join | 8 B | phase, time remaining, both team scores |
+| 14 | WeaponStatus    | S→**owner** | R | on ammo/reload/slot change | 6 B | unicast: nobody else needs your magazine |
+| 15 | Leaderboard     | S→C | R | on join + match end (M29) | 2 + 29·rows B, ≤ 10 rows | career kills/deaths/matches |
+| 16 | KillCam         | S→**victim** | R | on death (M30) | 3 + 20·samples B, ≤ 40 samples | the killer's view, oldest first |
+| 17 | RtcOffer        | C→S | R | once per WebRTC join (M19b) | 8195 B | SDP; consumed by the signalling router, never by ServerGame |
+| 18 | RtcAnswer       | S→C | R | once per WebRTC join (M19b) | 8195 B | SDP |
+| 19 | RtcCandidate    | both | R | during ICE (M19b) | 580 B | candidate + media id |
+| 20 | ChatSend        | C→S | R | rate limited to 1 per 45 ticks (M50) | 122 B | the only message whose *contents* a player composes |
+| 21 | ChatMessage     | S→C | R | on relay (M50) | 123 B | sender is the server's answer, not the client's claim |
+| 22 | MapChange       | S→C | R | at match end, with rotation (M51) | 66 B | rebuild the world before the next snapshot describes it |
 
 ### ClientHello (C→S, reliable, once)
 
@@ -56,7 +62,8 @@ Channel R = ENet reliable ordered (ch 0), U = unreliable sequenced (ch 1).
 | tick_rate        | u8   | 60 |
 | snapshot_rate    | u8   | 20 |
 | server_tick      | u32  | client seeds its tick estimate from this |
-| map_name         | string ≤ 32 | |
+| map_name         | string ≤ 64 | the client refuses a server on a different map |
+| team             | u8   | 0 = A, 1 = B; anything else rejects the message |
 
 ### InputCommand (C→S, unreliable, 60/s)
 
@@ -66,14 +73,17 @@ Carries the newest command plus the previous 2 (loss redundancy):
 |----------------------|------|------------|
 | newest_sequence      | u32  | must be > last processed; window-limited (≤ last+64) |
 | client_tick          | u32  | sanity vs. server tick estimate |
+| view_tick            | u32  | the tick the client was RENDERING remote players at; drives server-side rewind, clamped to [current − 15, current] on use. 0 = no estimate yet |
 | count                | u8   | 1–3 |
-| per command:         |      | |
-| · buttons            | u16  | bitfield: fwd, back, left, right, jump, fire, reload, sprint, crouch |
-| · yaw                | f32  | finite, wrapped to [-π, π) |
-| · pitch              | f32  | finite, clamped to ±89° |
-| · weapon_slot        | u8   | desired weapon, < 4; sent as state every tick so a lost packet cannot drop a switch |
+| per command (wire order): |  | |
+| · yaw                | f32  | finite and \|yaw\| ≤ 8 rad — a wrapped angle plus slack; the reader rejects, it does not re-wrap |
+| · pitch              | f32  | finite and within ±89° (`kMaxPitch`) plus 0.01 rad of slack |
+| · buttons            | u16  | bitfield: fwd, back, left, right, jump, fire, reload, sprint, crouch, aim |
+| · weapon_slot        | u8   | desired weapon, < `kMaxWeapons` (5); sent as state every tick so a lost packet cannot drop a switch |
 
-Rate limit: > 120 input packets/s sustained → warn, then kick.
+Rate limit: > 200 input packets/s (`kMaxInputPacketsPerSecond`) drops the
+connection on the packet that crosses it; the counter resets every 60 ticks.
+Ten malformed messages (`kMaxBadMessages`) also kick.
 
 ### Snapshot (S→C, unreliable, 20/s)
 
@@ -84,12 +94,15 @@ Rate limit: > 120 input packets/s sustained → warn, then kick.
 | player_count              | u8   | ≤ 8 |
 | per player:               |      | |
 | · player_id               | u8   | |
-| · position                | 3×f32| |
+| · position                | 3×f32| feet |
+| · velocity                | 3×f32| lets the client extrapolate and keeps reconciliation exact |
 | · yaw, pitch              | 2×f32| |
-| · state flags             | u8   | bit0 on_ground, bit1 alive, bit2 crouching |
+| · state flags             | u8   | bit0 on_ground, bit1 alive, bit2 crouching, bit3 team B (M52) |
 
-Full-state snapshots (no deltas) until profiling shows bandwidth pressure;
-at 8 players ≈ 226 B × 20/s ≈ 4.5 kB/s per client.
+Header is 10 B (type, server_tick, last_processed_input, player_count) and
+each player is 34 B, so a full 8-player snapshot is 282 B. Full-state (no
+deltas) until profiling shows bandwidth pressure: 282 B × 20/s ≈ 5.6 kB/s per
+client on the wire.
 
 ## Versioning
 
@@ -100,8 +113,9 @@ compatibility — both binaries ship together.
 is a static bundle on a CDN and the server is a container on someone's desk;
 they are deployed by different mechanisms and nothing enforces the ordering.
 A version bump that reaches only one of them turns every connection into
-`ServerReject(VersionMismatch)`. M29 bumped 4 → 5 and M30 bumped 5 → 6, so neither
-may reach the live server before the matching client is published.
+`ServerReject(VersionMismatch)`. Every bump since M29 has been in that position; the
+newest is M52's 10 → 11, and it may not reach the live server before the
+matching client is published.
 `tools/server_autodeploy.sh` enforces exactly this and refuses to deploy
 across a version gap.
 

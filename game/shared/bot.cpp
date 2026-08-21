@@ -113,7 +113,7 @@ InputCommand decide(BotState& state, const BotSenses& senses, const BotConfig& c
     state.aim_time += dt;
 
     InputCommand command;
-    command.weapon_slot = 0;
+    command.weapon_slot = config.weapon_slot;
 
     const float distance =
         senses.has_target ? glm::length(senses.target_position - senses.position) : 0.0f;

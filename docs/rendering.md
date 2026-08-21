@@ -342,6 +342,48 @@ it down: held, a semi-automatic weapon fires exactly once and then sits
 there, so nothing that needed a shotgun or a sniper to keep shooting could
 be verified at all. All three apply offline and online.
 
+`--screenshot-at <seconds>` moves the capture off the final frame, which is
+the only frame `--screenshot` alone can reach. Anything that exists only
+*during* a transition — sights rising, a weapon coming up, a reload arcing, a
+map rotating — is finished long before a run ends, so its evidence could not
+be captured at all. The deadline is **seconds into rendering**, not since
+process start: loading assets and opening a window costs over a second, and
+every value below that used to land on frame 1.
+
+```bash
+# the sniper's 0.7 s raise, three frames along the clip
+for t in 0.0 0.25 0.55; do
+  ./build/debug/game/fps_client --weapon 4 --run-seconds 2 --no-vsync \
+      --screenshot-at $t --screenshot /tmp/raise-$t.png
+done
+```
+
+One caveat with teeth: `FixedTimestep::kMaxPendingTicks` is 8, so the first
+rendered frame already contains up to 0.133 s of simulation. A transition
+shorter than that — the rifle's 0.20 s sight raise is close — is mostly over
+before any frame exists, and `--screenshot-at 0` is as early as it gets.
+Verifying a *fast* transition means slowing it down in the config first.
+
+`--connect <host:port>` is accepted as well as `--connect <host> --port <n>`,
+because one address split across two flags is a thing to get wrong every
+time. A value carrying a scheme is left alone: `rtc://host:7777` keeps its
+port inside the string, because the WebRTC transport signals over the `ws://`
+form of that whole URL and never reads `--port`.
+
+The **server** has `--bot-weapon <1-5>`, which is the same idea for the other
+side of the wire. Bots were pinned to slot 0, so verifying anything about the
+smg, shotgun, sniper or knife in a real match meant editing a `.cfg` and
+remembering to revert it. It is a verification hook, not a difficulty knob —
+`--bot-skill` is that.
+
+**Every one of these hooks has to be wired into BOTH the offline and online
+branches**, and that is not a style note. `--fixed-yaw` and `--auto-fire`
+were each silently offline-inert once, and aim-down-sights itself was
+invisible online for four milestones because the one code path that advanced
+it was the offline weapon tick — while every screenshot ever taken of the
+feature was an offline one. The evidence was real and it proved the wrong
+path.
+
 **A clean emcc build does not mean the web client works.** Shader
 compilation happens at runtime, so GLSL ES errors only surface in a browser.
 M13's missing `sampler2DShadow` precision built without a warning and broke

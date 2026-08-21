@@ -82,4 +82,25 @@ constexpr glm::vec3 player_color(std::uint8_t id) {
     return id < kMaxPlayers ? kPlayerColors[id] : kNoPlayerColor;
 }
 
+// Team deathmatch (M52) asks a different question of a colour than free-for-all
+// does. Free-for-all asks "who is that", and eight distinct hues answer it.
+// Team asks "do I shoot", and the honest answer to that is TWO colours: an
+// eight-way identity read is worthless if you have to remember which four of
+// the eight are yours while someone is already shooting at you.
+//
+// Red and cyan, taken unchanged from the palette above rather than invented,
+// so both keep the visibility they were picked for -- being hard to see is a
+// fairness problem (see the note at the top of this file). They also differ in
+// LUMINANCE, not just hue, which is what keeps them apart for the red-green
+// colour blindness that would ruin the obvious red-versus-green choice.
+//
+// Names stay in the kill feed and the scoreboard. That is where identity
+// belongs when the thing in front of you only needs to be friend or foe.
+inline constexpr glm::vec3 kTeamAColor = kPlayerColors[0];  // red
+inline constexpr glm::vec3 kTeamBColor = kPlayerColors[1];  // cyan
+
+constexpr glm::vec3 team_color(Team team) {
+    return team == Team::A ? kTeamAColor : kTeamBColor;
+}
+
 }  // namespace game

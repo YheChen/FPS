@@ -58,6 +58,7 @@ TEST_CASE("hello/welcome/joined/left round-trip", "[protocol]") {
         welcome.player_id = 3;
         welcome.server_tick = 12345;
         welcome.map = "maps/arena01.glb";
+        welcome.team = game::Team::B;
         const auto bytes = encode(welcome);
         eng::ByteReader r{{bytes.data(), bytes.size()}};
         REQUIRE(game::read_message_type(r) == game::MessageType::ServerWelcome);
@@ -68,15 +69,19 @@ TEST_CASE("hello/welcome/joined/left round-trip", "[protocol]") {
         CHECK(m->map == "maps/arena01.glb");
         CHECK(m->tick_rate == 60);
         CHECK(m->snapshot_rate == 20);
+        // Team B, not the default. A field that defaults to the value under
+        // test round-trips even when it is never written.
+        CHECK(m->team == game::Team::B);
     }
     {
-        const auto bytes = encode(game::PlayerJoined{5, "bob"});
+        const auto bytes = encode(game::PlayerJoined{5, "bob", game::Team::B});
         eng::ByteReader r{{bytes.data(), bytes.size()}};
         REQUIRE(game::read_message_type(r) == game::MessageType::PlayerJoined);
         const auto m = game::read_player_joined(r);
         REQUIRE(m.has_value());
         CHECK(m->player_id == 5);
         CHECK(m->name == "bob");
+        CHECK(m->team == game::Team::B);
     }
     {
         const auto bytes = encode(game::PlayerLeft{2});
@@ -189,12 +194,16 @@ TEST_CASE("combat messages round-trip", "[protocol]") {
         CHECK(m->deaths == 7);
     }
     {
-        const auto bytes = encode(game::MatchStateMsg{game::MatchPhase::Ended, 8});
+        const auto bytes = encode(game::MatchStateMsg{game::MatchPhase::Ended, 8, 13, 21});
         eng::ByteReader r{{bytes.data(), bytes.size()}};
         game::read_message_type(r);
         const auto m = game::read_match_state(r);
         CHECK(m->phase == game::MatchPhase::Ended);
         CHECK(m->seconds_remaining == 8);
+        // Different from each other AND from the seconds, so a field read in
+        // the wrong order cannot pass by coincidence.
+        CHECK(m->score_a == 13);
+        CHECK(m->score_b == 21);
     }
     {
         const auto bytes = encode(game::WeaponStatusMsg{17, true});

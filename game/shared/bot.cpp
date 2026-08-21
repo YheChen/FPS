@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numbers>
 
 #include "game/shared/rng.h"
@@ -20,6 +21,27 @@ float unit_random(std::uint32_t seed, std::uint32_t salt) {
 }
 
 }  // namespace
+
+std::optional<std::size_t> nearest_enemy(const glm::vec3& from, Team team,
+                                         std::span<const BotTarget> candidates) {
+    std::optional<std::size_t> best;
+    float nearest = std::numeric_limits<float>::max();
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        const BotTarget& candidate = candidates[i];
+        // Dead players and teammates are both invisible to targeting. A
+        // teammate is not "a target worth less" -- it is not a target, and a
+        // bot that ranks one at all will pick it whenever it is closer.
+        if (!candidate.alive || candidate.team == team) {
+            continue;
+        }
+        const float distance = glm::length(candidate.position - from);
+        if (distance < nearest) {
+            nearest = distance;
+            best = i;
+        }
+    }
+    return best;
+}
 
 BotConfig bot_config_for(BotSkill skill) {
     BotConfig config;  // the Normal defaults

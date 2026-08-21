@@ -114,6 +114,9 @@ private:
         float view_yaw = 0.0f;
         float view_pitch = 0.0f;
 
+        // Which side, assigned by the server on join and never by the client.
+        Team team = Team::A;
+
         // Combat (authoritative).
         Health health;
         Loadout loadout;
@@ -173,6 +176,18 @@ private:
     void broadcast_reliable(const std::vector<std::uint8_t>& data, eng::IServerTransport& net);
     void send_weapon_status(const Player& player, eng::IServerTransport& net);
     MatchStateMsg match_state() const;
+    // The team a joining player goes on: whichever has fewer, ties to A. Bots
+    // count, so a solo player never ends up alone against four of them.
+    Team assign_team() const;
+    // Spawn selection is team-aware (M52): the point furthest from the nearest
+    // LIVING ENEMY, so a team does not respawn into the side that just wiped
+    // it. Falls back to the old round-robin when no enemy is alive to measure
+    // against, which is also what keeps free-for-all behaviour unchanged when
+    // everyone happens to be on one team.
+    glm::vec3 pick_spawn(Team team);
+    // Evens the sides. Only ever called between matches: moving somebody
+    // mid-fight is worse than a 3v2.
+    void rebalance_teams();
     LeaderboardMsg leaderboard() const;
     void send_leaderboard(std::uint32_t peer, eng::IServerTransport& net) const;
 
@@ -190,6 +205,9 @@ private:
     std::filesystem::path replay_path_;
     std::uint32_t tick_ = 0;
     std::size_t next_spawn_ = 0;
+    // Team kills, indexed by Team. Not derived from the per-player scores:
+    // those disappear when a player leaves and a team's kills do not.
+    std::array<std::uint16_t, 2> team_kills_{};
 
     MatchPhase phase_ = MatchPhase::Playing;
     float match_remaining_ = kMatchSeconds;

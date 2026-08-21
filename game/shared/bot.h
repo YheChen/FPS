@@ -2,11 +2,13 @@
 
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string_view>
 
 #include <glm/glm.hpp>
 
 #include "game/shared/input_command.h"
+#include "game/shared/protocol.h"
 
 // Bot decision-making.
 //
@@ -75,6 +77,29 @@ struct BotConfig {
 // error -- kept because it is the useful control case when measuring whether
 // a change to movement or hit detection made bots better or worse.
 enum class BotSkill : std::uint8_t { Easy, Normal, Hard, Deadly };
+
+// One player as a bot's target selection sees them. Deliberately not the
+// server's Player: this is the whole of what the rule below needs, which is
+// what lets the rule be tested without a ServerGame, a transport or a match.
+struct BotTarget {
+    glm::vec3 position{0.0f};
+    Team team = Team::A;
+    bool alive = false;
+};
+
+// Index of the nearest LIVING ENEMY, or nullopt when there is none.
+//
+// This exists as a named, pure function because it is a RULE, and the version
+// of it that lived inline in the server was wrong for a whole milestone: it
+// took the nearest living PLAYER while its comment said "enemy", which was the
+// same sentence until teams existed. A bot then locks onto whichever teammate
+// is closest and empties magazine after magazine into someone it cannot hurt.
+//
+// It resisted testing through the server -- a bot-blind build still lands
+// plenty of cross-team hits by chance, so no assertion on damage counts could
+// separate the two -- which is exactly why the rule is out here now.
+std::optional<std::size_t> nearest_enemy(const glm::vec3& from, Team team,
+                                         std::span<const BotTarget> candidates);
 
 BotConfig bot_config_for(BotSkill skill);
 const char* bot_skill_name(BotSkill skill);

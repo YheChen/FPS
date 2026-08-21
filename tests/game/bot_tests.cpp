@@ -1,6 +1,7 @@
 #include "game/shared/bot.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <numbers>
 #include <string_view>
@@ -416,6 +417,55 @@ TEST_CASE("a bot on top of its target does not produce NaN aim", "[bot]") {
     const game::InputCommand command = run(state, senses, config, 10);
     CHECK(std::isfinite(command.yaw));
     CHECK(std::isfinite(command.pitch));
+}
+
+TEST_CASE("targeting ignores teammates however close they are", "[bot][team]") {
+    // The rule that was wrong for a whole milestone: the server took the
+    // nearest living PLAYER while its own comment called it the nearest
+    // "enemy". With one side those were the same sentence.
+    //
+    // Tested here rather than through a match because a match CANNOT tell the
+    // two apart. A team-blind build still lands plenty of cross-team hits by
+    // chance: measured damage counts came out 17 vs 16 over three seconds and
+    // 79 vs 52 over twenty, and no threshold in between is a fact about the
+    // rule rather than about this machine.
+    const glm::vec3 me{0.0f, 0.0f, 0.0f};
+
+    // A teammate at arm's length and an enemy across the map. The teammate is
+    // a hundred times nearer, which is the point: a rule that merely PREFERRED
+    // enemies would still pick the teammate here.
+    const std::array<game::BotTarget, 2> mixed{{
+        {{0.5f, 0.0f, 0.0f}, game::Team::A, true},
+        {{50.0f, 0.0f, 0.0f}, game::Team::B, true},
+    }};
+    const auto picked = game::nearest_enemy(me, game::Team::A, mixed);
+    REQUIRE(picked.has_value());
+    CHECK(*picked == 1);
+
+    // From the other side, the near one IS the enemy.
+    const auto from_b = game::nearest_enemy(me, game::Team::B, mixed);
+    REQUIRE(from_b.has_value());
+    CHECK(*from_b == 0);
+
+    // Nothing but teammates means NO target -- not "the closest teammate". A
+    // bot holding a target it cannot hurt stands there shooting forever, which
+    // is precisely what a full server looked like.
+    const std::array<game::BotTarget, 2> friends{{
+        {{0.5f, 0.0f, 0.0f}, game::Team::A, true},
+        {{2.0f, 0.0f, 0.0f}, game::Team::A, true},
+    }};
+    CHECK_FALSE(game::nearest_enemy(me, game::Team::A, friends).has_value());
+
+    // A dead enemy is not a target either, so the nearest LIVING one wins.
+    const std::array<game::BotTarget, 2> corpse{{
+        {{1.0f, 0.0f, 0.0f}, game::Team::B, false},
+        {{9.0f, 0.0f, 0.0f}, game::Team::B, true},
+    }};
+    const auto living = game::nearest_enemy(me, game::Team::A, corpse);
+    REQUIRE(living.has_value());
+    CHECK(*living == 1);
+
+    CHECK_FALSE(game::nearest_enemy(me, game::Team::A, {}).has_value());
 }
 
 }  // namespace

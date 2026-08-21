@@ -20,7 +20,7 @@
 // returning nullopt means "hostile or corrupt packet - drop it".
 namespace game {
 
-inline constexpr std::uint16_t kProtocolVersion = 10;
+inline constexpr std::uint16_t kProtocolVersion = 11;
 inline constexpr std::uint8_t kMaxPlayers = 8;
 inline constexpr std::size_t kMaxNameLength = 16;
 inline constexpr int kSnapshotDivisor = 3;  // 60 Hz ticks -> 20 Hz snapshots
@@ -138,10 +138,28 @@ struct MapChangeMsg {
     std::string map;  // e.g. "maps/arena02.glb"
 };
 
+// Which side a player is on (M52). TWO teams, and deliberately not N: two is
+// what a spare snapshot bit buys, what the arena's spawn layout supports, and
+// what "team deathmatch" means. A third team would be a different mode with a
+// different scoreboard, not a bigger enum.
+enum class Team : std::uint8_t { A = 0, B = 1 };
+
+constexpr Team other_team(Team team) {
+    return team == Team::A ? Team::B : Team::A;
+}
+constexpr const char* team_name(Team team) {
+    return team == Team::A ? "A" : "B";
+}
+
 // Snapshot player flags.
 inline constexpr std::uint8_t kFlagOnGround = 1u << 0;
 inline constexpr std::uint8_t kFlagAlive = 1u << 1;
 inline constexpr std::uint8_t kFlagCrouching = 1u << 2;
+// Team B when set, team A when clear. Team rides EVERY snapshot rather than
+// only the join message, because a player who missed a PlayerJoined -- or who
+// was rebalanced between matches -- would otherwise be shooting at the wrong
+// colour until they reconnected. One bit, and it is always current.
+inline constexpr std::uint8_t kFlagTeamB = 1u << 3;
 
 enum class RejectReason : std::uint8_t {
     VersionMismatch = 1,
@@ -172,7 +190,8 @@ struct ServerWelcome {
     std::uint8_t tick_rate = 60;
     std::uint8_t snapshot_rate = 20;
     std::uint32_t server_tick = 0;
-    std::string map;  // e.g. "maps/arena01.glb"
+    std::string map;  // e.g. "maps/arena02.glb"
+    Team team = Team::A;
 };
 
 // One career record. These are NOT authenticated: there are no accounts,
@@ -206,6 +225,7 @@ struct ServerReject {
 struct PlayerJoined {
     std::uint8_t player_id = 0;
     std::string name;
+    Team team = Team::A;
 };
 
 struct PlayerLeft {
@@ -295,6 +315,12 @@ enum class MatchPhase : std::uint8_t {
 struct MatchStateMsg {
     MatchPhase phase = MatchPhase::Playing;
     std::uint16_t seconds_remaining = 0;
+    // Team kills. The per-player ScoreUpdate stays exactly as it was: these
+    // are not a sum the client could compute for itself, because it only
+    // knows about players currently connected and a team keeps the kills of
+    // players who have since left.
+    std::uint16_t score_a = 0;
+    std::uint16_t score_b = 0;
 };
 
 // Sent only to the owning player when their ammo/reload state changes.

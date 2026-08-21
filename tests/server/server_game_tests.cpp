@@ -1555,3 +1555,155 @@ TEST_CASE("a rotation is announced before any snapshot of the new map", "[server
     }
     CHECK((!first_snapshot_after || *first_snapshot_after > *first_map_change));
 }
+
+// --- teams (M52) ------------------------------------------------------------
+
+TEST_CASE("teams are assigned to keep the sides even", "[server][team]") {
+    Harness h;
+    // Four joiners must alternate. Assigning by slot parity would look the
+    // same here and break the moment somebody leaves, so what is asserted is
+    // the RULE -- whichever side has fewer -- not the pattern it happens to
+    // produce from an empty server.
+    std::vector<game::Team> teams;
+    for (std::uint32_t peer = 1; peer <= 4; ++peer) {
+        REQUIRE(h.join(peer, "p" + std::to_string(peer)));
+        const auto welcomes =
+            decode_to(h.net.sent, peer, MsgType::ServerWelcome, game::read_server_welcome);
+        REQUIRE(!welcomes.empty());
+        teams.push_back(welcomes.back().team);
+    }
+    CHECK(teams[0] == game::Team::A);
+    CHECK(teams[1] == game::Team::B);
+    CHECK(teams[2] == game::Team::A);
+    CHECK(teams[3] == game::Team::B);
+
+    // And everyone is told everyone else's side, or a client cannot colour
+    // them and would have to guess -- which for Team::A == 0 means guessing
+    // that every stranger is friendly.
+    const auto joins = decode_to(h.net.sent, 1, MsgType::PlayerJoined, game::read_player_joined);
+    REQUIRE(joins.size() >= 3);
+    for (const game::PlayerJoined& join : joins) {
+        CHECK(join.team == teams[join.player_id]);
+    }
+}
+
+TEST_CASE("a bullet passes through a teammate and hits the enemy behind", "[server][team]") {
+    Harness h;
+    // Three joiners: A, B, A. So players 0 and 2 are teammates and player 1
+    // is the enemy.
+    const auto a1 = h.join(1, "a1");
+    const auto b1 = h.join(2, "b1");
+    const auto a2 = h.join(3, "a2");
+    REQUIRE(a1);
+    REQUIRE(b1);
+    REQUIRE(a2);
+    h.tick(60);  // gravity settles everyone onto the floor
+
+    const auto shooter_seen = h.observed(1, *a1);
+    const auto enemy_seen = h.observed(1, *b1);
+    const auto mate_seen = h.observed(1, *a2);
+    REQUIRE(shooter_seen);
+    REQUIRE(enemy_seen);
+    REQUIRE(mate_seen);
+
+    // pick_spawn put the teammate back on the shooter's own spawn -- it is the
+    // point furthest from the only living enemy, which is where the shooter
+    // already is. Asserted rather than assumed, because it is what makes this
+    // a test of BLOCKING: the teammate's capsule contains the ray's origin, so
+    // a ray that stopped at teammates could not travel at all.
+    CHECK(glm::distance(mate_seen->position, shooter_seen->position) < 0.5f);
+    CHECK(glm::distance(enemy_seen->position, shooter_seen->position) > 4.0f);
+
+    h.net.clear();
+    const game::InputCommand fire = aim_at(shooter_seen->position, enemy_seen->position, true);
+    const int ticks = h.drive_until(1, fire, MsgType::PlayerDamaged, 120);
+    REQUIRE(ticks > 0);
+
+    const auto damage = decode_all(h.net.sent, MsgType::PlayerDamaged, game::read_player_damaged);
+    REQUIRE(!damage.empty());
+    for (const game::PlayerDamagedMsg& hit : damage) {
+        // The enemy takes it; the teammate standing on the muzzle takes
+        // nothing. Friendly fire is skipped at the RAY, not at the damage, so
+        // a team cannot spend a match blocking each other's shots.
+        CHECK(hit.victim == *b1);
+        CHECK(hit.victim != *a2);
+    }
+}
+
+TEST_CASE("shooting a teammate does nothing at all", "[server][team]") {
+    Harness h;
+    const auto a1 = h.join(1, "a1");
+    const auto b1 = h.join(2, "b1");
+    const auto a2 = h.join(3, "a2");
+    REQUIRE(a1);
+    REQUIRE(b1);
+    REQUIRE(a2);
+    h.tick(60);
+
+    // Walk the enemy out of the line of fire first, so what this test proves
+    // is "no damage to the teammate" and not "the enemy happened to be hit
+    // instead". Nothing is aimed at the enemy at any point.
+    const auto mate_seen = h.observed(1, *a2);
+    const auto shooter_seen = h.observed(1, *a1);
+    REQUIRE(mate_seen);
+    REQUIRE(shooter_seen);
+
+    h.net.clear();
+    // Aim at the teammate and hold the trigger for two seconds. The test
+    // rifle kills in four hits, so a friendly-fire bug would have killed them
+    // twenty times over by the end of this.
+    const game::InputCommand fire = aim_at(shooter_seen->position, mate_seen->position, true);
+    h.drive(1, fire, 120);
+
+    CHECK(decode_all(h.net.sent, MsgType::PlayerDamaged, game::read_player_damaged).empty());
+    CHECK(decode_all(h.net.sent, MsgType::PlayerDied, game::read_player_died).empty());
+}
+
+TEST_CASE("a kill scores for the killer's team", "[server][team]") {
+    Harness h;
+    const Duel duel = set_up_duel(h);  // players 0 and 1, so A versus B
+    h.net.clear();
+
+    REQUIRE(h.drive_until(duel.shooter_peer, duel.fire, MsgType::PlayerDied, 120) > 0);
+    h.tick(60);  // let a MatchState go out
+
+    const auto states = decode_all(h.net.sent, MsgType::MatchState, game::read_match_state);
+    REQUIRE(!states.empty());
+    // The shooter is player 0, so team A. Team B's column must stay empty --
+    // a score that incremented both, or the wrong one, would still look like
+    // "scoring works" from a single number.
+    CHECK(states.back().score_a == 1);
+    CHECK(states.back().score_b == 0);
+}
+
+TEST_CASE("a team match with bots actually fights", "[server][team]") {
+    // A smoke test, and deliberately only that. It catches a team match that
+    // is DEAD -- nobody engaging, which is what a full server looked like when
+    // bots targeted the nearest player instead of the nearest enemy -- but it
+    // cannot tell correct targeting from lucky targeting, because a team-blind
+    // build still lands cross-team hits by chance. The rule itself is pinned
+    // in bot_tests.cpp ("targeting ignores teammates however close they are"),
+    // where it can be asserted instead of measured.
+    Harness h{60.0f,
+              {{0.0f, 1.0f, 0.0f}, {8.0f, 1.0f, 0.0f}, {0.0f, 1.0f, 8.0f}, {8.0f, 1.0f, 8.0f}}};
+    h.game.set_bot_config(game::bot_config_for(game::BotSkill::Deadly));
+    for (int i = 0; i < 4; ++i) {
+        REQUIRE(h.game.add_bot("bot" + std::to_string(i + 1)));
+    }
+    // A human is needed to SEE any of this: every combat message is addressed
+    // to peers and a bot has none, so a bot-only match is invisible to the
+    // transport these assertions read. Joined last, so bots keep ids 0-3.
+    REQUIRE(h.join(9, "witness"));
+    h.tick(1200);  // twenty seconds
+
+    const auto damage = decode_all(h.net.sent, MsgType::PlayerDamaged, game::read_player_damaged);
+    REQUIRE(!damage.empty());
+    int bot_on_bot = 0;
+    for (const game::PlayerDamagedMsg& hit : damage) {
+        CHECK(hit.attacker != hit.victim);
+        if (hit.attacker < 4 && hit.victim < 4) {
+            ++bot_on_bot;
+        }
+    }
+    CHECK(bot_on_bot > 0);
+}

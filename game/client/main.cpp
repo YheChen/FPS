@@ -1270,8 +1270,12 @@ struct KillFeedEntry {
 // exactly what a name must never be. The chip shows the raw albedo without the
 // scene's tonemap -- at this size it needs the full strength, and the hue is
 // what carries the match to the figure anyway.
-void player_chip(std::uint8_t id, float alpha) {
-    const glm::vec3 color = game::player_color(id);
+// Takes the colour rather than deriving it from the id, because what a chip
+// has to MATCH is the figure in the world -- and online that figure is team
+// coloured (M52). A chip that kept showing identity colours would put a cyan
+// square next to a name whose body is red, and in a team game the question a
+// colour answers is "mine or theirs".
+void player_chip(const glm::vec3& color, float alpha) {
     const float size = ImGui::GetTextLineHeight();
     const ImVec2 top_left = ImGui::GetCursorScreenPos();
     const ImVec2 bottom_right{top_left.x + size, top_left.y + size};
@@ -2116,6 +2120,25 @@ int main(int argc, char** argv) {
         const auto it = net->players().find(id);
         return it != net->players().end() ? it->second.name : "world";
     };
+    // What colour a body is drawn.
+    //
+    // Online this answers "do I shoot", and that question has exactly two
+    // answers -- see team_color in player_color.h. Offline there are no teams:
+    // the practice mannequin and a replay's actors keep the M41 per-player
+    // palette, because there identity IS the useful read.
+    //
+    // A player seen in a snapshot before their PlayerJoined arrives falls back
+    // to their identity colour for a frame rather than guessing a side. Team A
+    // is 0, so guessing would silently paint every stranger red.
+    const auto body_color = [&](std::uint8_t id) -> glm::vec3 {
+        if (!online) {
+            return game::player_color(id);
+        }
+        const auto it = net->players().find(id);
+        return it != net->players().end() ? game::team_color(it->second.team)
+                                          : game::player_color(id);
+    };
+
     // Everything that has to be thrown away when the ground moves under it.
     // Two callers -- the server rotating mid-session, and finding out at the
     // welcome that it was already on a different map than we guessed -- and
@@ -3065,9 +3088,8 @@ int main(int argc, char** argv) {
                 model = glm::rotate(model, -self_animation.death_yaw, glm::vec3{0.0f, 1.0f, 0.0f});
                 glm::mat4 hand{1.0f};
                 const int offset = append_character_pose(self_animation, joint_pool, hand);
-                draw_items.push_back({model, DrawKind::Character, -1,
-                                      game::player_color(net->my_id()), offset,
-                                      static_cast<int>(character_skeleton->joint_count())});
+                draw_items.push_back({model, DrawKind::Character, -1, body_color(net->my_id()),
+                                      offset, static_cast<int>(character_skeleton->joint_count())});
                 // Your corpse keeps the weapon you died holding. The killcam
                 // is the one view where you see your own body, so a figure
                 // with empty hands there would be the only unarmed player in
@@ -3143,8 +3165,8 @@ int main(int argc, char** argv) {
                                     glm::vec3{0.0f, 1.0f, 0.0f});
                 glm::mat4 hand{1.0f};
                 const int offset = append_character_pose(animation, joint_pool, hand);
-                draw_items.push_back({model, DrawKind::Character, -1, game::player_color(id),
-                                      offset, static_cast<int>(character_skeleton->joint_count())});
+                draw_items.push_back({model, DrawKind::Character, -1, body_color(id), offset,
+                                      static_cast<int>(character_skeleton->joint_count())});
 
                 // An id the server has no business sending falls back to the
                 // same slot 0 a player who has not fired yet gets.
@@ -3743,7 +3765,19 @@ int main(int argc, char** argv) {
                          ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                              ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBackground);
             ImGui::SetWindowFontScale(1.5f);
-            ImGui::Text("%02u:%02u", net->match_seconds() / 60, net->match_seconds() % 60);
+            // A - TIME - B, with your own side's number in your own colour, so
+            // "are we winning" is answerable without working out which letter
+            // you are. The A/B labels stay because the colours alone would not
+            // survive a screenshot in a bug report.
+            const auto team_rgba = [](game::Team t) {
+                const glm::vec3 c = game::team_color(t);
+                return ImVec4{c.r, c.g, c.b, 1.0f};
+            };
+            ImGui::TextColored(team_rgba(game::Team::A), "A %u", net->team_score(game::Team::A));
+            ImGui::SameLine();
+            ImGui::Text("  %02u:%02u  ", net->match_seconds() / 60, net->match_seconds() % 60);
+            ImGui::SameLine();
+            ImGui::TextColored(team_rgba(game::Team::B), "B %u", net->team_score(game::Team::B));
             ImGui::End();
 
             // Kill feed, top right.
@@ -3756,10 +3790,10 @@ int main(int argc, char** argv) {
                 for (const KillFeedEntry& entry : kill_feed) {
                     const float alpha = std::min(1.0f, entry.ttl);
                     const ImVec4 text_color{1.0f, 0.85f, 0.4f, alpha};
-                    player_chip(entry.killer, alpha);
+                    player_chip(body_color(entry.killer), alpha);
                     ImGui::TextColored(text_color, "%s killed", entry.killer_name.c_str());
                     ImGui::SameLine();
-                    player_chip(entry.victim, alpha);
+                    player_chip(body_color(entry.victim), alpha);
                     ImGui::TextColored(text_color, "%s", entry.victim_name.c_str());
                     if (entry.headshot) {
                         ImGui::SameLine();
@@ -3783,29 +3817,47 @@ int main(int argc, char** argv) {
                     ImGui::SetWindowFontScale(1.0f);
                     ImGui::Separator();
                 }
-                // Sort by kills descending.
+                // Grouped by team, then by kills within it. One flat list
+                // sorted by kills reads as a free-for-all ladder and hides the
+                // only number that decides a team match -- and it puts your
+                // teammates and the people shooting at you in the same column.
+                //
+                // YOUR team first, whichever letter it is, because the first
+                // thing you look for on a scoreboard is yourself.
                 std::vector<std::pair<std::uint8_t, game::NetClient::Scores>> rows(
                     net->scores().begin(), net->scores().end());
                 std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
                     return a.second.kills > b.second.kills;
                 });
-                if (ImGui::BeginTable("scores", 3, ImGuiTableFlags_Borders)) {
-                    ImGui::TableSetupColumn("player");
-                    ImGui::TableSetupColumn("kills");
-                    ImGui::TableSetupColumn("deaths");
-                    ImGui::TableHeadersRow();
-                    for (const auto& [id, score] : rows) {
-                        ImGui::TableNextRow();
-                        ImGui::TableSetColumnIndex(0);
-                        player_chip(id, 1.0f);
-                        ImGui::Text("%s%s", player_name(id).c_str(),
-                                    id == net->my_id() ? " (you)" : "");
-                        ImGui::TableSetColumnIndex(1);
-                        ImGui::Text("%u", score.kills);
-                        ImGui::TableSetColumnIndex(2);
-                        ImGui::Text("%u", score.deaths);
+                const auto team_of = [&](std::uint8_t id) {
+                    const auto it = net->players().find(id);
+                    return it != net->players().end() ? it->second.team : game::Team::A;
+                };
+                for (const game::Team team : {net->my_team(), game::other_team(net->my_team())}) {
+                    const glm::vec3 c = game::team_color(team);
+                    ImGui::TextColored({c.r, c.g, c.b, 1.0f}, "TEAM %s - %u", game::team_name(team),
+                                       net->team_score(team));
+                    if (ImGui::BeginTable(game::team_name(team), 3, ImGuiTableFlags_Borders)) {
+                        ImGui::TableSetupColumn("player");
+                        ImGui::TableSetupColumn("kills");
+                        ImGui::TableSetupColumn("deaths");
+                        ImGui::TableHeadersRow();
+                        for (const auto& [id, score] : rows) {
+                            if (team_of(id) != team) {
+                                continue;
+                            }
+                            ImGui::TableNextRow();
+                            ImGui::TableSetColumnIndex(0);
+                            player_chip(body_color(id), 1.0f);
+                            ImGui::Text("%s%s", player_name(id).c_str(),
+                                        id == net->my_id() ? " (you)" : "");
+                            ImGui::TableSetColumnIndex(1);
+                            ImGui::Text("%u", score.kills);
+                            ImGui::TableSetColumnIndex(2);
+                            ImGui::Text("%u", score.deaths);
+                        }
+                        ImGui::EndTable();
                     }
-                    ImGui::EndTable();
                 }
 
                 // Career records, when the server keeps them. Below the live
@@ -3857,7 +3909,7 @@ int main(int argc, char** argv) {
                 // makes it legible as a killcam.
                 if (!net->kill_cam().empty()) {
                     ImGui::SetWindowFontScale(1.0f);
-                    player_chip(net->kill_cam_killer(), 1.0f);
+                    player_chip(body_color(net->kill_cam_killer()), 1.0f);
                     ImGui::TextColored({0.85f, 0.85f, 0.85f, 1.0f}, "killed by %s",
                                        player_name(net->kill_cam_killer()).c_str());
                 }

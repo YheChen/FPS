@@ -102,6 +102,7 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
                 my_id_ = welcome->player_id;
                 latest_server_tick_ = welcome->server_tick;
                 server_map_ = welcome->map;
+                my_team_ = welcome->team;
                 state_ = State::InGame;
                 players_[my_id_].name = player_name_;
                 eng::log::info("Welcome: player {} on '{}' (tick {}, {} Hz / {} Hz snapshots)",
@@ -159,6 +160,7 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
         case MessageType::PlayerJoined: {
             if (const auto joined = read_player_joined(reader)) {
                 players_[joined->player_id].name = joined->name;
+                players_[joined->player_id].team = joined->team;
                 eng::log::info("Player {} '{}' joined", joined->player_id, joined->name);
             }
             break;
@@ -190,8 +192,18 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
                 player.pitch = sp.pitch;
                 player.on_ground = (sp.flags & kFlagOnGround) != 0;
                 player.crouching = (sp.flags & kFlagCrouching) != 0;
+                player.team = (sp.flags & kFlagTeamB) != 0 ? Team::B : Team::A;
                 player.seen_in_snapshot = true;
                 if (sp.player_id == my_id_) {
+                    // The welcome is not the last word on which side you are
+                    // on: rebalance_teams can move you between matches, and no
+                    // second welcome is ever sent. Tracking it here is what
+                    // stops your own HUD, your team's score and every "is that
+                    // a teammate" test from being one match out of date.
+                    if (player.team != my_team_) {
+                        eng::log::info("Moved to team {}", team_name(player.team));
+                        my_team_ = player.team;
+                    }
                     pending_self_ack_ =
                         SelfAck{sp.position, sp.velocity, player.on_ground,
                                 snapshot->last_processed_input, snapshot->server_tick};
@@ -249,6 +261,8 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
             if (const auto m = read_match_state(reader)) {
                 match_phase_ = m->phase;
                 match_seconds_ = m->seconds_remaining;
+                team_score_a_ = m->score_a;
+                team_score_b_ = m->score_b;
             }
             break;
         }

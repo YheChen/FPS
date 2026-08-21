@@ -418,4 +418,32 @@ TEST_CASE("a bot on top of its target does not produce NaN aim", "[bot]") {
     CHECK(std::isfinite(command.pitch));
 }
 
+TEST_CASE("bots carry the weapon the config names", "[bot]") {
+    // Bots were pinned to slot 0, so no automated run could put the smg,
+    // shotgun, sniper or knife into a real match -- verifying anything about
+    // them meant editing a .cfg and remembering to revert it. The slot rides
+    // every command a bot emits, so it has to survive whatever the bot is
+    // doing that tick, not just the first one.
+    game::BotConfig config = game::bot_config_for(game::BotSkill::Normal);
+    config.weapon_slot = 3;
+
+    game::BotState state;
+    const game::BotSenses engaging = looking_at_enemy(15.0f);
+    CHECK(game::decide(state, engaging, config, kDt, 0).weapon_slot == 3);
+    CHECK(run(state, engaging, config, 120).weapon_slot == 3);
+
+    // Idle, with nothing to shoot at, is a different path through decide().
+    game::BotState idle_state;
+    game::BotSenses idle;
+    idle.position = {0.0f, 0.0f, 0.0f};
+    idle.on_ground = true;
+    idle.has_target = false;
+    CHECK(run(idle_state, idle, config, 120).weapon_slot == 3);
+
+    // And the default is still the rifle, so an unset flag changes nothing.
+    game::BotConfig fallback = game::bot_config_for(game::BotSkill::Normal);
+    game::BotState fallback_state;
+    CHECK(run(fallback_state, engaging, fallback, 60).weapon_slot == 0);
+}
+
 }  // namespace

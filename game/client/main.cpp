@@ -311,11 +311,17 @@ struct ClientArgs {
     // and none of that could be captured in a screenshot without a way
     // to hold the right mouse button from a command line.
     bool aim = false;
-    bool auto_walk = false;                  // hold W: bob needs distance actually travelled
-    std::optional<std::uint8_t> weapon;      // start on this slot (1-based, as the keys are)
-    std::optional<float> fixed_yaw;          // lock the view yaw (radians)
-    std::optional<float> fixed_pitch;        // lock the view pitch (radians, + is up)
-    std::optional<std::string> screenshot;   // PNG written on the final frame
+    bool auto_walk = false;                 // hold W: bob needs distance actually travelled
+    std::optional<std::uint8_t> weapon;     // start on this slot (1-based, as the keys are)
+    std::optional<float> fixed_yaw;         // lock the view yaw (radians)
+    std::optional<float> fixed_pitch;       // lock the view pitch (radians, + is up)
+    std::optional<std::string> screenshot;  // PNG written on the final frame
+    // --screenshot-at S: write the PNG at S seconds instead of on the final
+    // frame. Without it, anything that only exists DURING a transition -- the
+    // sights rising, a map rotating, a reload arcing, a weapon coming up --
+    // could not be captured at all, because --screenshot only ever caught the
+    // frame the run ended on, by which time every transition has finished.
+    std::optional<double> screenshot_at;
     std::optional<std::string> replay_path;  // --replay: watch a recording
     bool audio_trace = false;                // dump every spatialized sound
     // Geometry is loaded once, before the menu, because the menu orbits it.
@@ -370,7 +376,34 @@ ClientArgs parse_args(int argc, char** argv) {
             }
         } else if (arg == "--connect") {
             if (const auto value = next_value()) {
-                args.connect_host = std::string(*value);
+                // host:port as well as a bare host, because one address split
+                // across two flags is a thing to get wrong every single time.
+                // --port still works and still wins if given separately.
+                //
+                // A value carrying a SCHEME is left exactly as it is: an
+                // "rtc://host:7777" address keeps its port inside the string
+                // on purpose -- the WebRTC transport signals over the ws://
+                // form of that whole URL and never reads args.port -- so
+                // splitting it here would quietly drop the port and fall back
+                // to 80/443. That is why this looks for "://" rather than
+                // just for a colon.
+                std::string_view rest = *value;
+                const bool has_scheme = rest.find("://") != std::string_view::npos;
+                const std::size_t colon = rest.rfind(':');
+                if (!has_scheme && colon != std::string_view::npos) {
+                    const std::string_view tail = rest.substr(colon + 1);
+                    std::uint16_t port = 0;
+                    // All digits and in range, or it is not a port and the
+                    // colon belongs to whatever the host actually is.
+                    if (!tail.empty() &&
+                        std::from_chars(tail.data(), tail.data() + tail.size(), port).ec ==
+                            std::errc{} &&
+                        port != 0) {
+                        args.port = port;
+                        rest = rest.substr(0, colon);
+                    }
+                }
+                args.connect_host = std::string(rest);
             }
         } else if (arg == "--port") {
             if (const auto value = next_value()) {
@@ -390,6 +423,17 @@ ClientArgs parse_args(int argc, char** argv) {
             }
         } else if (arg == "--no-vsync") {
             args.vsync = false;
+        } else if (arg == "--screenshot-at") {
+            if (const auto value = next_value()) {
+                double seconds = 0.0;
+                if (std::from_chars(value->data(), value->data() + value->size(), seconds).ec ==
+                        std::errc{} &&
+                    seconds >= 0.0) {
+                    args.screenshot_at = seconds;
+                } else {
+                    eng::log::warn("--screenshot-at '{}' is not a non-negative number", *value);
+                }
+            }
         } else if (arg == "--screenshot") {
             if (const auto value = next_value()) {
                 args.screenshot = std::string(*value);
@@ -2201,6 +2245,27 @@ int main(int argc, char** argv) {
     int web_frames = 0;
     int web_distinct_colors = 0;
     float web_mean_luma = 0.0f;
+#endif
+#if !defined(__EMSCRIPTEN__)
+    // Latched, so --screenshot-at writes exactly one PNG rather than
+    // re-writing the same path on every frame after its deadline.
+    bool screenshot_written = false;
+    // clock.elapsed() at the first RENDERED frame, because that is the zero
+    // --screenshot-at has to be measured from. Loading assets, compiling
+    // shaders and opening a window costs well over a second, so a deadline
+    // measured from process start spends its first ~1.2 s before a single
+    // frame exists -- and every value below that captured frame 1, which made
+    // the flag useless for exactly what it is for: a 0.2 s sight transition.
+    //
+    // --run-seconds deliberately keeps counting from process start. It bounds
+    // how long the program runs, which is a different question.
+    //
+    // Even at zero this cannot catch the very beginning of a fast transition:
+    // FixedTimestep::kMaxPendingTicks is 8, so the first rendered frame has
+    // already absorbed up to 0.133 s of simulation. The rifle's 0.20 s sight
+    // raise is two-thirds done before frame 1 exists. Slow the transition
+    // down in the config if that is the thing under test.
+    double first_frame_elapsed = -1.0;
 #endif
 
     bool running = true;
@@ -4091,8 +4156,33 @@ int main(int argc, char** argv) {
 #if !defined(__EMSCRIPTEN__)
         // Grab the finished frame from the back buffer before it is swapped
         // out; after the swap its contents are undefined.
-        if (last_frame && args.screenshot) {
+        //
+        // --screenshot-at moves the capture off the final frame, which is the
+        // only frame --screenshot could ever reach. A transition -- sights
+        // rising, a map rotating, a weapon coming up -- is over long before a
+        // run ends, so the evidence for one could not be captured at all.
+        //
+        // "First frame at or after S", not "the frame at S", and it waits for
+        // a non-degenerate framebuffer for the same reason the web smoke
+        // signature does: capturing into a 0-high drawable reports a broken
+        // client that is in fact about to come up fine.
+        if (first_frame_elapsed < 0.0) {
+            first_frame_elapsed = clock.elapsed();
+        }
+        const double render_seconds = clock.elapsed() - first_frame_elapsed;
+        const bool screenshot_due =
+            args.screenshot && !screenshot_written &&
+            (args.screenshot_at ? render_seconds >= *args.screenshot_at && window->width_px() > 0 &&
+                                      window->height_px() > 0
+                                : last_frame);
+        if (screenshot_due) {
             eng::save_framebuffer_png(*args.screenshot, window->width_px(), window->height_px());
+            screenshot_written = true;
+            if (args.screenshot_at) {
+                eng::log::info(
+                    "Screenshot written {:.3f} s into rendering (--screenshot-at {:.3f})",
+                    render_seconds, *args.screenshot_at);
+            }
         }
 #else
         // Same "before the swap" rule as the screenshot above, and the same

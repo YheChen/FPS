@@ -34,6 +34,14 @@ struct BotConfig {
     float jump_chance = 0.010f;        // per tick while engaging
     float wall_avoid_distance = 2.2f;  // turns away inside this
 
+    // Which gun every bot carries. Not a difficulty knob -- it exists so an
+    // automated run can put a weapon other than the rifle in front of the
+    // camera. Bots were pinned to slot 0, so verifying anything about the
+    // smg, shotgun, sniper or knife in a real match meant editing a .cfg and
+    // remembering to revert it. Out-of-range clamps to 0 in update_loadout,
+    // the same as any other slot a command can carry.
+    std::uint8_t weapon_slot = 0;
+
     // --- the three things that make a bot beatable -----------------------
     //
     // Without these a bot's aim converges on its target and then STAYS there,

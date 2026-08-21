@@ -48,6 +48,11 @@ struct ServerArgs {
     // server starts; --map is ignored when this is given.
     std::vector<std::string> map_rotation;
     game::BotSkill bot_skill = game::BotSkill::Normal;  // --bot-skill
+    // --bot-weapon N: which gun bots carry, 1-based like the client's --weapon
+    // and like the keys. Verification hook, not a difficulty knob -- bots were
+    // pinned to the rifle, so nothing automated could put another weapon into
+    // a real match.
+    std::uint8_t bot_weapon_slot = 0;
     // --stats PATH: career records that outlive the process. Off by default,
     // because a server that suddenly needs a writable path is a server that
     // suddenly has a new way to fail to start.
@@ -139,6 +144,20 @@ ServerArgs parse_args(int argc, char** argv) {
                 } else {
                     eng::log::warn("Unknown --bot-skill '{}'; keeping {}", *value,
                                    game::bot_skill_name(args.bot_skill));
+                }
+            }
+        } else if (arg == "--bot-weapon") {
+            if (const auto value = next_value()) {
+                int slot = 0;
+                const auto end = value->data() + value->size();
+                // 1-based on the command line to match the client's --weapon
+                // and the 1-5 keys; 0-based everywhere inside.
+                if (std::from_chars(value->data(), end, slot).ec == std::errc{} && slot >= 1 &&
+                    slot <= static_cast<int>(game::kMaxWeapons)) {
+                    args.bot_weapon_slot = static_cast<std::uint8_t>(slot - 1);
+                } else {
+                    eng::log::warn("--bot-weapon '{}' is not a slot in 1..{}; keeping {}", *value,
+                                   game::kMaxWeapons, args.bot_weapon_slot + 1);
                 }
             }
         } else if (arg == "--verbose") {
@@ -375,7 +394,9 @@ int main(int argc, char** argv) {
 #endif
 
     game::ServerGame server{std::move(collision), std::move(spawns), map_path, std::move(arsenal)};
-    server.set_bot_config(game::bot_config_for(args.bot_skill));
+    game::BotConfig bot_config = game::bot_config_for(args.bot_skill);
+    bot_config.weapon_slot = args.bot_weapon_slot;
+    server.set_bot_config(bot_config);
 
     // --maps: load every arena's collision up front. ServerGame does no file
     // I/O -- that is this file's job -- so the rotation is handed over as

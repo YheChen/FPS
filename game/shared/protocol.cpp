@@ -58,6 +58,7 @@ void write(eng::ByteWriter& w, const ServerWelcome& m) {
     w.u8(m.snapshot_rate);
     w.u32(m.server_tick);
     w.str(m.map);
+    w.u8(static_cast<std::uint8_t>(m.team));
 }
 
 void write(eng::ByteWriter& w, const ServerReject& m) {
@@ -69,6 +70,7 @@ void write(eng::ByteWriter& w, const PlayerJoined& m) {
     w.u8(static_cast<std::uint8_t>(MessageType::PlayerJoined));
     w.u8(m.player_id);
     w.str(m.name);
+    w.u8(static_cast<std::uint8_t>(m.team));
 }
 
 void write(eng::ByteWriter& w, const PlayerLeft& m) {
@@ -184,6 +186,8 @@ void write(eng::ByteWriter& w, const MatchStateMsg& m) {
     w.u8(static_cast<std::uint8_t>(MessageType::MatchState));
     w.u8(static_cast<std::uint8_t>(m.phase));
     w.u16(m.seconds_remaining);
+    w.u16(m.score_a);
+    w.u16(m.score_b);
 }
 
 void write(eng::ByteWriter& w, const WeaponStatusMsg& m) {
@@ -257,8 +261,9 @@ std::optional<ServerWelcome> read_server_welcome(eng::ByteReader& r) {
     const auto snapshot_rate = r.u8();
     const auto tick = r.u32();
     const auto map = r.str(64);
+    const auto team = r.u8();
     if (!id || *id >= kMaxPlayers || !tick_rate || *tick_rate == 0 || !snapshot_rate ||
-        *snapshot_rate == 0 || !tick || !map || !r.finished()) {
+        *snapshot_rate == 0 || !tick || !map || !team || *team > 1 || !r.finished()) {
         return std::nullopt;
     }
     m.player_id = *id;
@@ -266,6 +271,7 @@ std::optional<ServerWelcome> read_server_welcome(eng::ByteReader& r) {
     m.snapshot_rate = *snapshot_rate;
     m.server_tick = *tick;
     m.map = *map;
+    m.team = static_cast<Team>(*team);
     return m;
 }
 
@@ -280,10 +286,11 @@ std::optional<ServerReject> read_server_reject(eng::ByteReader& r) {
 std::optional<PlayerJoined> read_player_joined(eng::ByteReader& r) {
     const auto id = r.u8();
     const auto name = r.str(kMaxNameLength);
-    if (!id || *id >= kMaxPlayers || !name || !r.finished()) {
+    const auto team = r.u8();
+    if (!id || *id >= kMaxPlayers || !name || !team || *team > 1 || !r.finished()) {
         return std::nullopt;
     }
-    return PlayerJoined{*id, *name};
+    return PlayerJoined{*id, *name, static_cast<Team>(*team)};
 }
 
 std::optional<PlayerLeft> read_player_left(eng::ByteReader& r) {
@@ -506,10 +513,12 @@ std::optional<KillCamMsg> read_kill_cam(eng::ByteReader& r) {
 std::optional<MatchStateMsg> read_match_state(eng::ByteReader& r) {
     const auto phase = r.u8();
     const auto seconds = r.u16();
-    if (!phase || *phase < 1 || *phase > 2 || !seconds || !r.finished()) {
+    const auto score_a = r.u16();
+    const auto score_b = r.u16();
+    if (!phase || *phase < 1 || *phase > 2 || !seconds || !score_a || !score_b || !r.finished()) {
         return std::nullopt;
     }
-    return MatchStateMsg{static_cast<MatchPhase>(*phase), *seconds};
+    return MatchStateMsg{static_cast<MatchPhase>(*phase), *seconds, *score_a, *score_b};
 }
 
 std::optional<WeaponStatusMsg> read_weapon_status(eng::ByteReader& r) {

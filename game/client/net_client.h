@@ -29,6 +29,10 @@ struct NetPlayer {
     bool on_ground = false;
     bool crouching = false;
     bool seen_in_snapshot = false;
+    // Taken from the snapshot flag rather than only from PlayerJoined, so a
+    // client that missed a join -- or whose teams were rebalanced between
+    // matches -- is never shooting at the wrong colour.
+    Team team = Team::A;
     SnapshotBuffer history;  // for interpolation (remote players)
 };
 
@@ -116,6 +120,19 @@ public:
     std::uint8_t kill_cam_killer() const { return kill_cam_killer_; }
     MatchPhase match_phase() const { return match_phase_; }
     std::uint16_t match_seconds() const { return match_seconds_; }
+    // Team scores come off the wire rather than being summed from scores():
+    // a team keeps the kills of players who have since disconnected, and the
+    // client only knows about the ones still here.
+    std::uint16_t team_score(Team team) const {
+        return team == Team::A ? team_score_a_ : team_score_b_;
+    }
+    Team my_team() const { return my_team_; }
+    // Nobody's team but your own is known before their first snapshot, so this
+    // answers "is that one of mine" for a specific id.
+    bool same_team(std::uint8_t id) const {
+        const auto it = players_.find(id);
+        return it != players_.end() && it->second.team == my_team_;
+    }
 
     // One line of chat as the client will show it. The NAME is resolved at
     // receipt rather than stored as an id: a player who leaves mid-match
@@ -170,6 +187,9 @@ private:
     bool self_alive_ = true;
     MatchPhase match_phase_ = MatchPhase::Playing;
     std::uint16_t match_seconds_ = 0;
+    std::uint16_t team_score_a_ = 0;
+    std::uint16_t team_score_b_ = 0;
+    Team my_team_ = Team::A;
     std::vector<ChatLine> chat_lines_;
     std::optional<std::string> pending_map_change_;
     std::vector<FireEventMsg> fire_events_;

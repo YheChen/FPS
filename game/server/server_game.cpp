@@ -153,7 +153,8 @@ void ServerGame::handle_hello(std::uint32_t peer, eng::ByteReader& reader,
     Player player;
     player.peer = peer;
     player.name = hello->name;
-    const glm::vec3 spawn = spawns_[next_spawn_++ % spawns_.size()];
+    player.team = assign_team();
+    const glm::vec3 spawn = pick_spawn(player.team);
     player.state.position = spawn;
     player.controller = std::make_unique<eng::CharacterController>(world_, spawn);
     reset_loadout(player.loadout, arsenal_);
@@ -167,17 +168,18 @@ void ServerGame::handle_hello(std::uint32_t peer, eng::ByteReader& reader,
     welcome.player_id = *slot;
     welcome.server_tick = tick_;
     welcome.map = map_name_;
+    welcome.team = players_[*slot]->team;
     net.send(peer, encode(welcome), eng::NetChannel::Reliable, true);
     send_leaderboard(peer, net);
 
     // Tell them about everyone already here, and everyone about them.
     for (std::uint8_t i = 0; i < kMaxPlayers; ++i) {
         if (players_[i] && i != *slot) {
-            net.send(peer, encode(PlayerJoined{i, players_[i]->name}), eng::NetChannel::Reliable,
-                     true);
+            net.send(peer, encode(PlayerJoined{i, players_[i]->name, players_[i]->team}),
+                     eng::NetChannel::Reliable, true);
         }
     }
-    const auto joined = encode(PlayerJoined{*slot, hello->name});
+    const auto joined = encode(PlayerJoined{*slot, hello->name, players_[*slot]->team});
     for (std::uint8_t i = 0; i < kMaxPlayers; ++i) {
         if (players_[i] && i != *slot && !players_[i]->is_bot) {
             net.send(players_[i]->peer, joined, eng::NetChannel::Reliable, true);
@@ -290,7 +292,8 @@ bool ServerGame::add_bot(std::string name) {
     player.peer = 0;  // never used: send() is skipped for bots
     player.is_bot = true;
     player.name = std::move(name);
-    const glm::vec3 spawn = spawns_[next_spawn_++ % spawns_.size()];
+    player.team = assign_team();
+    const glm::vec3 spawn = pick_spawn(player.team);
     player.state.position = spawn;
     player.controller = std::make_unique<eng::CharacterController>(world_, spawn);
     reset_loadout(player.loadout, arsenal_);
@@ -313,22 +316,22 @@ BotSenses ServerGame::sense_for_bot(std::uint8_t bot_id) const {
 
     const glm::vec3 eye = bot.state.position + glm::vec3{0.0f, 1.6f, 0.0f};
 
-    float nearest = std::numeric_limits<float>::max();
+    // Target selection is a shared rule, not a loop here: see nearest_enemy
+    // in bot.h for why it had to leave this function.
+    std::array<BotTarget, kMaxPlayers> candidates{};
     for (std::uint8_t id = 0; id < kMaxPlayers; ++id) {
-        if (id == bot_id || !players_[id] || !players_[id]->alive) {
+        if (id == bot_id || !players_[id]) {
             continue;
         }
-        const glm::vec3 target = players_[id]->state.position;
-        const float distance = glm::length(target - bot.state.position);
-        if (distance >= nearest) {
-            continue;
-        }
-        nearest = distance;
+        candidates[id] =
+            BotTarget{players_[id]->state.position, players_[id]->team, players_[id]->alive};
+    }
+    if (const auto target_index = nearest_enemy(bot.state.position, bot.team, candidates)) {
         senses.has_target = true;
-        senses.target_position = target;
+        senses.target_position = candidates[*target_index].position;
 
         // Line of sight: a wall between us closer than the target blocks it.
-        const glm::vec3 aim = target + glm::vec3{0.0f, 1.1f, 0.0f};
+        const glm::vec3 aim = senses.target_position + glm::vec3{0.0f, 1.1f, 0.0f};
         const glm::vec3 to_aim = aim - eye;
         const float length = glm::length(to_aim);
         senses.target_visible = true;
@@ -498,7 +501,8 @@ void ServerGame::send_snapshots(eng::IServerTransport& net) {
         sp.yaw = p.view_yaw;
         sp.pitch = p.view_pitch;
         sp.flags = (p.state.on_ground ? kFlagOnGround : 0u) | (p.alive ? kFlagAlive : 0u) |
-                   (p.state.crouching ? kFlagCrouching : 0u);
+                   (p.state.crouching ? kFlagCrouching : 0u) |
+                   (p.team == Team::B ? kFlagTeamB : 0u);
         everyone.push_back(sp);
     }
 
@@ -574,7 +578,84 @@ MatchStateMsg ServerGame::match_state() const {
     m.phase = phase_;
     m.seconds_remaining = static_cast<std::uint16_t>(
         std::max(0.0f, phase_ == MatchPhase::Playing ? match_remaining_ : restart_remaining_));
+    m.score_a = team_kills_[static_cast<std::size_t>(Team::A)];
+    m.score_b = team_kills_[static_cast<std::size_t>(Team::B)];
     return m;
+}
+
+Team ServerGame::assign_team() const {
+    int counts[2]{};
+    for (const auto& slot : players_) {
+        if (slot) {
+            ++counts[static_cast<std::size_t>(slot->team)];
+        }
+    }
+    // Bots are counted. They are here so the server is never empty, and a
+    // lone human against four of them is not a team game.
+    return counts[1] < counts[0] ? Team::B : Team::A;
+}
+
+glm::vec3 ServerGame::pick_spawn(Team team) {
+    // Furthest from the nearest LIVING ENEMY. Not "furthest from everyone":
+    // spawning next to a teammate is fine and often what you want, and
+    // measuring against your own side would scatter a team across the map.
+    float best_score = -1.0f;
+    const glm::vec3* best = nullptr;
+    for (const glm::vec3& candidate : spawns_) {
+        float nearest_enemy = std::numeric_limits<float>::max();
+        for (const auto& slot : players_) {
+            if (!slot || !slot->alive || slot->team == team) {
+                continue;
+            }
+            nearest_enemy = std::min(nearest_enemy, glm::distance(candidate, slot->state.position));
+        }
+        if (nearest_enemy == std::numeric_limits<float>::max()) {
+            continue;  // no enemy alive to measure against
+        }
+        if (nearest_enemy > best_score) {
+            best_score = nearest_enemy;
+            best = &candidate;
+        }
+    }
+    if (best != nullptr) {
+        return *best;
+    }
+    // Nobody to avoid. Round-robin, which is exactly what every spawn did
+    // before teams existed, so a one-team server behaves as it always has.
+    return spawns_[next_spawn_++ % spawns_.size()];
+}
+
+void ServerGame::rebalance_teams() {
+    // Between matches only. Being teleported onto the other side mid-fight is
+    // worse than the 3v2 it fixes, so this runs from restart_match and
+    // nowhere else.
+    for (;;) {
+        std::vector<std::uint8_t> members[2];
+        for (std::uint8_t id = 0; id < kMaxPlayers; ++id) {
+            if (players_[id]) {
+                members[static_cast<std::size_t>(players_[id]->team)].push_back(id);
+            }
+        }
+        const std::size_t big = members[0].size() >= members[1].size() ? 0 : 1;
+        const std::size_t small = 1 - big;
+        if (members[big].size() <= members[small].size() + 1) {
+            return;  // even, or off by the one a player count of 3 forces
+        }
+        // Bots first, so a human is never the one moved while a bot could
+        // have been. Otherwise the last to join, who has least invested in
+        // the side they are on.
+        const auto& pool = members[big];
+        std::uint8_t move = pool.back();
+        for (const std::uint8_t id : pool) {
+            if (players_[id]->is_bot) {
+                move = id;
+                break;
+            }
+        }
+        players_[move]->team = static_cast<Team>(small);
+        eng::log::info("Rebalanced: player {} '{}' -> team {}", move, players_[move]->name,
+                       team_name(players_[move]->team));
+    }
 }
 
 void ServerGame::fire_hitscan(std::uint8_t shooter_id, const InputCommand& command,
@@ -630,6 +711,14 @@ void ServerGame::fire_hitscan(std::uint8_t shooter_id, const InputCommand& comma
         float hit_height = 0.0f;
         for (std::uint8_t id = 0; id < kMaxPlayers; ++id) {
             if (id == shooter_id || !players_[id] || !players_[id]->alive) {
+                continue;
+            }
+            // Friendly fire is OFF, and off at the RAY rather than at the
+            // damage: a teammate must not stop a bullet either, or a team
+            // would spend the match blocking each other's shots and calling
+            // it lag. A pellet passes through a teammate and can still hit
+            // the enemy behind them.
+            if (players_[id]->team == shooter.team) {
                 continue;
             }
             const glm::vec3 victim_position =
@@ -700,6 +789,7 @@ void ServerGame::kill_player(std::uint8_t victim_id, std::uint8_t killer_id,
     ++victim.deaths;
     if (killer_id != kNoPlayer && players_[killer_id]) {
         ++players_[killer_id]->kills;
+        ++team_kills_[static_cast<std::size_t>(players_[killer_id]->team)];
         broadcast_reliable(encode(ScoreUpdateMsg{killer_id, players_[killer_id]->kills,
                                                  players_[killer_id]->deaths}),
                            net);
@@ -737,7 +827,7 @@ void ServerGame::respawn_player(std::uint8_t player_id, eng::IServerTransport& n
     // Carrying the previous life's trail into this one would show a future
     // victim footage from before the killer was even alive.
     player.trail.clear();
-    const glm::vec3 spawn = spawns_[next_spawn_++ % spawns_.size()];
+    const glm::vec3 spawn = pick_spawn(player.team);
     player.state = {};
     player.state.position = spawn;
     player.controller->set_position(spawn);
@@ -817,7 +907,7 @@ bool ServerGame::advance_map(eng::IServerTransport& net) {
         if (!players_[id]) {
             continue;
         }
-        const glm::vec3 spawn = spawns_[next_spawn_++ % spawns_.size()];
+        const glm::vec3 spawn = pick_spawn(players_[id]->team);
         players_[id]->state = PlayerState{};
         players_[id]->state.position = spawn;
         players_[id]->controller = std::make_unique<eng::CharacterController>(world_, spawn);
@@ -848,6 +938,12 @@ void ServerGame::restart_match(eng::IServerTransport& net) {
     }
     phase_ = MatchPhase::Playing;
     match_remaining_ = kMatchSeconds;
+    team_kills_ = {};
+    // Between matches is the only safe moment to move somebody: a 3v2 for the
+    // rest of a round beats being teleported onto the other side mid-fight.
+    // Before advance_map, because the spawn each player is re-seated at is
+    // chosen from the team they are on.
+    rebalance_teams();
     // Rotate first: advance_map re-seats every controller in the new world,
     // and respawn_player below steps a controller.
     advance_map(net);

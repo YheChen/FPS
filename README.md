@@ -23,9 +23,9 @@ server, the build and the deployment pipeline are the project.
   headless-safe `engine` target and a client-only `engine_platform` target, so
   the dedicated server never links SDL, GL, or audio.
 - **Authoritative dedicated server** — [`game/server/`](game/server): owns all
-  state (positions, health, weapons, hits, deaths, scores, match timer),
-  consumes one validated input per player per tick, broadcasts 20 Hz snapshots.
-  Clients never send positions or hit claims.
+  state (positions, health, weapons, hits, deaths, scores, team assignment,
+  match timer), consumes one validated input per player per tick, broadcasts
+  20 Hz snapshots. Clients never send positions or hit claims.
 - **Client-side prediction and reconciliation** —
   [`game/shared/prediction.cpp`](game/shared/prediction.cpp): the client
   simulates locally with the *same* `advance_player` the server runs, then
@@ -42,7 +42,7 @@ server, the build and the deployment pipeline are the project.
   [`game/shared/protocol.cpp`](game/shared/protocol.cpp): 22 message types,
   explicit little-endian encoding, no struct memcpy, validation on every read
   (bounds, enum ranges, string caps, NaN/Inf rejection), versioned handshake.
-  Currently protocol 10.
+  Currently protocol 11.
 - **Three interchangeable transports** — ENet/UDP for native clients, a
   hand-written RFC 6455 WebSocket server for browsers
   ([`engine/net/websocket_host.cpp`](engine/net/websocket_host.cpp)), and
@@ -508,9 +508,9 @@ the code most:
 
 ## Scope
 
-A personal project, and sized like one: 8 players, one match mode
-(deathmatch), two arenas, no accounts, no matchmaking, no production
-anti-cheat. It is not an attempt at a general-purpose engine — every system in
+A personal project, and sized like one: 8 players, one match mode (two-team
+deathmatch, sides auto-balanced on join), two arenas, no accounts, no
+matchmaking, no production anti-cheat. It is not an attempt at a general-purpose engine — every system in
 `engine/` exists because this game needed it. The milestone-by-milestone
 roadmap, including what each one actually delivered and what it broke on the
 way, is in [docs/milestones.md](docs/milestones.md).

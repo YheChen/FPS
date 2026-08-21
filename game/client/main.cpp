@@ -3161,16 +3161,30 @@ int main(int argc, char** argv) {
         }
 
         // Targets: stretched cubes colored by remaining health.
-        for (const Target& target : targets) {
-            if (!target.alive()) {
-                continue;
+        //
+        // Practice-range furniture, and ONLY there. The gameplay that shoots
+        // them has always been offline-only -- the online branch `continue`s
+        // long before it -- but this draw loop was not, so every online
+        // deathmatch contained five red cubes that could not be shot, hurt
+        // nobody, and belonged to no one. A replay had them too, standing in
+        // a recorded match that never had them.
+        //
+        // Worth guarding rather than tolerating: they are scenery that every
+        // future tracer, team colour or highlight decision would have to stay
+        // separable from, and they already cost M41 a palette slot.
+        if (mode == Mode::Offline) {
+            for (const Target& target : targets) {
+                if (!target.alive()) {
+                    continue;
+                }
+                glm::mat4 model = glm::translate(
+                    glm::mat4{1.0f}, target.position + glm::vec3{0.0f, kTargetHeight * 0.5f, 0.0f});
+                model =
+                    glm::scale(model, {kTargetRadius * 2.0f, kTargetHeight, kTargetRadius * 2.0f});
+                const float hp = target.health.current / target.health.max;
+                draw_items.push_back(
+                    {model, DrawKind::Cube, -1, {0.9f, 0.15f + 0.6f * hp, 0.15f}, -1, 0});
             }
-            glm::mat4 model = glm::translate(
-                glm::mat4{1.0f}, target.position + glm::vec3{0.0f, kTargetHeight * 0.5f, 0.0f});
-            model = glm::scale(model, {kTargetRadius * 2.0f, kTargetHeight, kTargetRadius * 2.0f});
-            const float hp = target.health.current / target.health.max;
-            draw_items.push_back(
-                {model, DrawKind::Cube, -1, {0.9f, 0.15f + 0.6f * hp, 0.15f}, -1, 0});
         }
 
         int draw_calls = 0;

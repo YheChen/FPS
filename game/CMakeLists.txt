@@ -7,6 +7,8 @@ add_library(game_shared STATIC
     shared/footsteps.h
     shared/health.h
     shared/hitscan.h
+    shared/grenade.cpp
+    shared/grenade.h
     shared/input_command.h
     shared/interpolation.cpp
     shared/interpolation.h

@@ -376,8 +376,14 @@ smg, shotgun, sniper or knife in a real match meant editing a `.cfg` and
 remembering to revert it. It is a verification hook, not a difficulty knob —
 `--bot-skill` is that.
 
+`--grenade <seconds>` pulls the pin one second in, holds it for that long,
+then throws (M55). A grenade needs a held button *and* a release, and neither
+can be produced from a command line without it. This one is **online only**,
+and that is not an oversight to fix later: grenades are server-owned and
+offline practice has no server to own them.
+
 **Every one of these hooks has to be wired into BOTH the offline and online
-branches**, and that is not a style note. `--fixed-yaw` and `--auto-fire`
+branches, unless the thing it drives only exists in one of them**, and that is not a style note. `--fixed-yaw` and `--auto-fire`
 were each silently offline-inert once, and aim-down-sights itself was
 invisible online for four milestones because the one code path that advanced
 it was the offline weapon tick — while every screenshot ever taken of the

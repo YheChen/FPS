@@ -131,6 +131,24 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
             }
             break;
         }
+        case MessageType::GrenadeState: {
+            if (const auto m = read_grenade_state(reader)) {
+                grenades_ = m->grenades;
+            }
+            break;
+        }
+        case MessageType::GrenadeExploded: {
+            if (const auto m = read_grenade_exploded(reader)) {
+                // Remove it here rather than waiting for the next state
+                // message: that one only arrives if other grenades are still
+                // in the air, so a lone grenade would otherwise hang in the
+                // world at the point it went off.
+                std::erase_if(grenades_,
+                              [&](const GrenadeStateMsg::Live& g) { return g.id == m->id; });
+                grenade_blasts_.push_back(*m);
+            }
+            break;
+        }
         case MessageType::ChatSend:
             break;  // client-to-server only; a server sending this is broken
         case MessageType::Leaderboard: {
@@ -273,6 +291,8 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
                 self_slot_ = m->slot;
                 self_magazine_ = m->magazine;
                 self_switching_ = m->switching;
+                self_grenades_ = m->grenades;
+                self_cooking_ = m->cooking;
             }
             break;
         }

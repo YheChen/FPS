@@ -14,6 +14,7 @@
 #include "engine/physics/physics_world.h"
 #include "game/server/stats_store.h"
 #include "game/shared/bot.h"
+#include "game/shared/grenade.h"
 #include "game/shared/health.h"
 #include "game/shared/input_command.h"
 #include "game/shared/kill_cam.h"
@@ -117,6 +118,13 @@ private:
         // Which side, assigned by the server on join and never by the client.
         Team team = Team::A;
 
+        // Grenades (M55). `cooking` is the pin being out: the server sets it
+        // when it sees the button go down and clears it on release, so the
+        // cook time is measured here rather than reported by a client.
+        std::uint8_t grenades = kGrenadesPerLife;
+        bool cooking = false;
+        float cook_remaining = 0.0f;
+
         // Combat (authoritative).
         Health health;
         Loadout loadout;
@@ -188,6 +196,11 @@ private:
     // Evens the sides. Only ever called between matches: moving somebody
     // mid-fight is worse than a 3v2.
     void rebalance_teams();
+    // Grenades: the button edge, the flight, and the blast.
+    void update_grenade_button(std::uint8_t player_id, const InputCommand& command,
+                               eng::IServerTransport& net);
+    void step_grenades(eng::IServerTransport& net);
+    void detonate(const GrenadeState& grenade, eng::IServerTransport& net);
     LeaderboardMsg leaderboard() const;
     void send_leaderboard(std::uint32_t peer, eng::IServerTransport& net) const;
 
@@ -208,6 +221,8 @@ private:
     // Team kills, indexed by Team. Not derived from the per-player scores:
     // those disappear when a player leaves and a team's kills do not.
     std::array<std::uint16_t, 2> team_kills_{};
+    std::vector<GrenadeState> grenades_;
+    std::uint8_t next_grenade_id_ = 1;
 
     MatchPhase phase_ = MatchPhase::Playing;
     float match_remaining_ = kMatchSeconds;

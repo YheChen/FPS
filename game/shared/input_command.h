@@ -23,6 +23,12 @@ enum class Button : std::uint16_t {
     // byte it always read and ignores a bit it does not know, and a newer
     // one simply never sees the bit set by an older client.
     Aim = 1u << 9,
+    // Grenade (M55). Held rather than tapped: the hold IS the mechanic. The
+    // server watches this bit go down (pin pulled, fuse running) and come back
+    // up (thrown), so the cook time is something it MEASURES rather than
+    // something a client reports. A client-reported cook time would be a
+    // client-reported detonation, which is a client-reported kill.
+    Grenade = 1u << 10,
 };
 
 struct InputCommand {

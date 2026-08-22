@@ -530,6 +530,37 @@ def landing():
     return normalize(fade_out(attack_ramp(high_pass(out, 35.0), 0.0004), 0.025), 0.78)
 
 
+def explosion():
+    """A grenade going off (M55). Owns its RNG seed for the same reason each
+    weapon does: adding this must not move a single byte of any sound that
+    already shipped.
+
+    Three layers, longest last, because what makes a blast read as BIG is not
+    loudness -- everything here is normalised -- but that it keeps going after
+    the transient is over. A gunshot is done in 100 ms; this runs a full
+    second, which is what separates "explosion" from "very loud gunshot"."""
+    rng = random.Random(0xE7B1)
+
+    # 0-25 ms. The crack, high and broadband: the part that arrives first and
+    # the part a positional panner has detail to localise.
+    crack = normalize(high_pass(noise_burst(0.025, 240.0, 1.0, rng), 1400.0), 0.80)
+    # 0-350 ms. The body. Low-passed hard and swept downward, which is the
+    # pressure wave rather than the ignition.
+    body = normalize(low_pass(noise_burst(0.35, 11.0, 1.0, rng), 900.0, 180.0), 0.95)
+    # 0-160 ms. A sub sweep under both, well below the guns' 300-105 Hz
+    # glides so a grenade cannot be mistaken for someone shooting at you.
+    thump = sweep(0.16, 95.0, 32.0, decay=13.0, volume=0.85)
+    # 0-900 ms. Scattered debris, quiet and long. Doing this with `scatter`
+    # rather than a reverb keeps the file stdlib-only like the rest.
+    debris = normalize(
+        scatter(band_pass(noise_burst(0.05, 60.0, 1.0, rng), 300.0, 5200.0), 14, 0.85, rng), 0.30)
+
+    # soft_clip rather than a plain normalise: the layers sum past 1.0 by
+    # design here, and clamping them flat against the rail is the one thing
+    # that would make this sound cheap.
+    return fade_out(attack_ramp(soft_clip(mix(crack, body, thump, debris), 1.35), 0.0008), 0.08)
+
+
 def main():
     root = Path(__file__).resolve().parent.parent / "assets" / "sounds"
     rng = random.Random(42)
@@ -540,6 +571,11 @@ def main():
     write_wav(root / "fire_smg.wav", smg_fire())
     write_wav(root / "fire_shotgun.wav", shotgun_fire())
     write_wav(root / "fire_sniper.wav", sniper_fire())
+
+    # Grenade blast. Own seed, and written here rather than at the end only
+    # for readability: it draws nothing from the shared stream below, so its
+    # position in this function cannot move another file's bytes.
+    write_wav(root / "explosion.wav", explosion())
 
     # Generic shot, kept as the fallback for a weapon whose config names no
     # sound of its own (the knife, today) and for an out-of-range slot in a

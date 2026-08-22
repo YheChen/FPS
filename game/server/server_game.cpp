@@ -459,6 +459,7 @@ void ServerGame::tick(eng::IServerTransport& net) {
             // from the same button and the same sprint state, because the
             // cone it rolls below depends on it. Trusting a client-reported
             // aim flag would be trusting a client-reported spread.
+            update_grenade_button(id, command, net);
             const bool aim = wants_ads(command, player.state.sprinting);
             const WeaponTickResult shot =
                 update_loadout(player.loadout, arsenal_, command.weapon_slot, fire_held, reload,
@@ -471,6 +472,8 @@ void ServerGame::tick(eng::IServerTransport& net) {
             }
         }
     }
+
+    step_grenades(net);
 
     // Reset per-second rate counters.
     if (tick_ % 60 == 0) {
@@ -487,6 +490,29 @@ void ServerGame::tick(eng::IServerTransport& net) {
 }
 
 void ServerGame::send_snapshots(eng::IServerTransport& net) {
+    // Grenades ride the snapshot CADENCE but not the snapshot itself: a
+    // snapshot is per-player state the client reconciles its own prediction
+    // against, and a grenade belongs to nobody. Same channel and same rate,
+    // separate message, so neither has to grow a variable-length list of the
+    // other's business.
+    //
+    // Sent even when empty is deliberately NOT done -- a client that hears
+    // nothing keeps drawing the last positions for at most one interval, and
+    // an explosion message removes them anyway.
+    if (!grenades_.empty()) {
+        GrenadeStateMsg live;
+        live.grenades.reserve(grenades_.size());
+        for (const GrenadeState& g : grenades_) {
+            live.grenades.push_back({g.id, g.thrower, g.position});
+        }
+        const auto bytes = encode(live);
+        for (const auto& slot : players_) {
+            if (slot && !slot->is_bot) {
+                net.send(slot->peer, bytes, eng::NetChannel::Sequenced, false);
+            }
+        }
+    }
+
     // Shared player list; per-recipient last_processed_input header.
     std::vector<SnapshotPlayer> everyone;
     for (std::uint8_t i = 0; i < kMaxPlayers; ++i) {
@@ -535,12 +561,12 @@ void ServerGame::send_weapon_status(const Player& player, eng::IServerTransport&
     }
     const WeaponState& weapon = player.loadout.weapons[player.loadout.slot];
     const WeaponConfig& config = arsenal_.at(player.loadout.slot);
-    net.send(
-        player.peer,
-        encode(WeaponStatusMsg{static_cast<std::uint8_t>(weapon.ammo), weapon.reloading(),
-                               player.loadout.slot, static_cast<std::uint8_t>(config.magazine_size),
-                               player.loadout.switch_remaining_seconds > 0.0f}),
-        eng::NetChannel::Reliable, true);
+    net.send(player.peer,
+             encode(WeaponStatusMsg{
+                 static_cast<std::uint8_t>(weapon.ammo), weapon.reloading(), player.loadout.slot,
+                 static_cast<std::uint8_t>(config.magazine_size),
+                 player.loadout.switch_remaining_seconds > 0.0f, player.grenades, player.cooking}),
+             eng::NetChannel::Reliable, true);
 }
 
 void ServerGame::set_stats_path(std::filesystem::path path) {
@@ -655,6 +681,150 @@ void ServerGame::rebalance_teams() {
         players_[move]->team = static_cast<Team>(small);
         eng::log::info("Rebalanced: player {} '{}' -> team {}", move, players_[move]->name,
                        team_name(players_[move]->team));
+    }
+}
+
+// The pin, and the throw. Both are EDGES of one held button, which is what
+// makes cooking a single-button mechanic: press to pull the pin, release to
+// throw, and the fuse runs across both.
+void ServerGame::update_grenade_button(std::uint8_t player_id, const InputCommand& command,
+                                       eng::IServerTransport& net) {
+    Player& player = *players_[player_id];
+    const bool held = wants_grenade(command);
+    if (held && !player.cooking) {
+        // Pin out. A player with none left presses a button that does nothing,
+        // which is correct: there is no grenade to pull a pin from.
+        if (player.grenades == 0 || !player.alive) {
+            return;
+        }
+        --player.grenades;
+        player.cooking = true;
+        player.cook_remaining = kGrenadeFuseSeconds;
+        // The owner is told on BOTH edges. send_weapon_status otherwise only
+        // fires on a shot, a reload or a switch, so without this the HUD count
+        // never moved and the pin coming out was invisible -- the one piece of
+        // feedback the whole mechanic depends on.
+        send_weapon_status(player, net);
+        return;
+    }
+    if (!held && player.cooking) {
+        // Released: it leaves the hand with whatever fuse is left. A grenade
+        // thrown at 0.4 s remaining is a grenade that airbursts, and that is
+        // the entire point of having cooked it.
+        const glm::vec3 eye =
+            player.state.position + glm::vec3{0.0f, eye_height_for(player.state), 0.0f};
+        const glm::vec3 aim = view_direction(player.view_yaw, player.view_pitch);
+        GrenadeState g;
+        g.id = next_grenade_id_++;
+        if (next_grenade_id_ == 0) {
+            next_grenade_id_ = 1;  // 0 is never a live id
+        }
+        g.thrower = player_id;
+        g.team = player.team;
+        g.position = eye + aim * kGrenadeThrowOffset;
+        g.velocity =
+            grenade_throw_velocity(player.view_yaw, player.view_pitch, player.state.velocity);
+        g.fuse_remaining = player.cook_remaining;
+        g.in_hand = false;
+        grenades_.push_back(g);
+        player.cooking = false;
+        player.cook_remaining = 0.0f;
+        send_weapon_status(player, net);
+    }
+}
+
+// One tick of every grenade in the air, plus the ones that went off.
+void ServerGame::step_grenades(eng::IServerTransport& net) {
+    // A grenade whose thrower is still holding it burns down IN THEIR HAND and
+    // takes them with it. Handled here rather than in the button edge so a
+    // player who never releases still gets the blast on the right tick.
+    for (std::uint8_t id = 0; id < kMaxPlayers; ++id) {
+        if (!players_[id] || !players_[id]->cooking) {
+            continue;
+        }
+        Player& player = *players_[id];
+        player.cook_remaining -= kTickSeconds;
+        if (player.cook_remaining > 0.0f) {
+            continue;
+        }
+        GrenadeState in_hand;
+        in_hand.id = next_grenade_id_++;
+        if (next_grenade_id_ == 0) {
+            next_grenade_id_ = 1;
+        }
+        in_hand.thrower = id;
+        in_hand.team = player.team;
+        in_hand.position =
+            player.state.position + glm::vec3{0.0f, eye_height_for(player.state) * 0.6f, 0.0f};
+        player.cooking = false;
+        player.cook_remaining = 0.0f;
+        send_weapon_status(player, net);
+        detonate(in_hand, net);
+    }
+
+    for (std::size_t i = 0; i < grenades_.size();) {
+        GrenadeState& g = grenades_[i];
+        g.fuse_remaining -= kTickSeconds;
+
+        g.velocity.y -= kGrenadeGravity * kTickSeconds;
+        const glm::vec3 step = g.velocity * kTickSeconds;
+        const float distance = glm::length(step);
+        if (distance > 1e-5f) {
+            const glm::vec3 direction = step / distance;
+            // Raycast rather than a swept sphere: the arena is boxes and a
+            // 12 cm grenade against a wall does not need more, and this is the
+            // same primitive lag compensation already trusts.
+            if (const auto hit = world_.raycast(g.position, direction, distance + kGrenadeRadius)) {
+                // Land just off the surface, then split the velocity into the
+                // part that bounces and the part that slides. Without the
+                // friction term a grenade skates along a floor forever.
+                g.position =
+                    g.position + direction * std::max(0.0f, hit->distance - kGrenadeRadius);
+                const glm::vec3 normal = hit->normal;
+                const glm::vec3 into = normal * glm::dot(g.velocity, normal);
+                const glm::vec3 along = g.velocity - into;
+                g.velocity = along * kGrenadeFriction - into * kGrenadeRestitution;
+            } else {
+                g.position += step;
+            }
+        }
+
+        if (g.fuse_remaining <= 0.0f) {
+            detonate(g, net);
+            grenades_.erase(grenades_.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+        ++i;
+    }
+}
+
+void ServerGame::detonate(const GrenadeState& grenade, eng::IServerTransport& net) {
+    broadcast_reliable(encode(GrenadeExplodedMsg{grenade.id, grenade.thrower, grenade.position}),
+                       net);
+    for (std::uint8_t id = 0; id < kMaxPlayers; ++id) {
+        if (!players_[id] || !players_[id]->alive) {
+            continue;
+        }
+        Player& victim = *players_[id];
+        if (!blast_can_damage(grenade.thrower, grenade.team, id, victim.team)) {
+            continue;
+        }
+        // Measured to the CHEST, not the feet: a blast at head height beside a
+        // standing player would otherwise be scored from the floor and read as
+        // a grenade that visibly went off in someone's face for half damage.
+        const glm::vec3 chest =
+            victim.state.position + glm::vec3{0.0f, eye_height_for(victim.state) * 0.6f, 0.0f};
+        const float amount = grenade_damage_at(glm::distance(chest, grenade.position));
+        if (amount <= 0.0f) {
+            continue;
+        }
+        const bool died = apply_damage(victim.health, amount);
+        broadcast_reliable(encode(PlayerDamagedMsg{id, grenade.thrower, victim.health.current,
+                                                   amount, HitZone::Torso}),
+                           net);
+        if (died) {
+            kill_player(id, grenade.thrower, net);
+        }
     }
 }
 
@@ -784,6 +954,11 @@ void ServerGame::kill_player(std::uint8_t victim_id, std::uint8_t killer_id,
     Player& victim = *players_[victim_id];
     victim.alive = false;
     victim.health.current = 0.0f;
+    // Shot while cooking: the pin goes with them. A corpse that detonates
+    // seconds later kills whoever won the fight, from nowhere they can see,
+    // and reads as a bug however defensible the physics is.
+    victim.cooking = false;
+    victim.cook_remaining = 0.0f;
     victim.respawn_remaining = kRespawnSeconds;
     victim.state.velocity = {0.0f, 0.0f, 0.0f};
     ++victim.deaths;
@@ -827,6 +1002,12 @@ void ServerGame::respawn_player(std::uint8_t player_id, eng::IServerTransport& n
     // Carrying the previous life's trail into this one would show a future
     // victim footage from before the killer was even alive.
     player.trail.clear();
+    // A fresh grenade per LIFE, which is the whole of the ammo economy: it is
+    // never replenished by time or by pickup, so cooking one is a decision
+    // about the only one you have.
+    player.grenades = kGrenadesPerLife;
+    player.cooking = false;
+    player.cook_remaining = 0.0f;
     const glm::vec3 spawn = pick_spawn(player.team);
     player.state = {};
     player.state.position = spawn;

@@ -20,7 +20,7 @@
 // returning nullopt means "hostile or corrupt packet - drop it".
 namespace game {
 
-inline constexpr std::uint16_t kProtocolVersion = 11;
+inline constexpr std::uint16_t kProtocolVersion = 12;
 inline constexpr std::uint8_t kMaxPlayers = 8;
 inline constexpr std::size_t kMaxNameLength = 16;
 inline constexpr int kSnapshotDivisor = 3;  // 60 Hz ticks -> 20 Hz snapshots
@@ -75,7 +75,32 @@ enum class MessageType : std::uint8_t {
     // different map, so this is the one message that asks it to rebuild the
     // world it is standing in rather than just to draw something new.
     MapChange = 22,
+    // Grenades (M55), server -> everyone.
+    //
+    // Two messages because they answer different questions and want different
+    // delivery. GrenadeState is where the things ARE, sent unreliably at the
+    // snapshot rate like any other moving object -- a dropped one is corrected
+    // 50 ms later. GrenadeExploded is that a blast HAPPENED, sent reliably:
+    // it is the only frame that matters and there is no later update to fix a
+    // missed one, so a client that lost it would see a grenade vanish in
+    // silence next to a player who suddenly died.
+    GrenadeState = 23,
+    GrenadeExploded = 24,
 };
+
+// The highest value read_message_type will accept, written ONCE and next to
+// the enum it bounds.
+//
+// It used to be spelled out inside read_message_type and again in the test,
+// and M55 found what that costs: two new message types were added and BOTH
+// copies were left saying MapChange, so the reader silently refused every
+// grenade message while the test that exists to catch exactly this passed --
+// it compares the two copies, and two stale copies agree.
+//
+// The durable guard is not this constant, it is a round-trip test per
+// message: a message whose type the reader rejects cannot decode, and its
+// round-trip test says so immediately.
+inline constexpr MessageType kLastMessageType = MessageType::GrenadeExploded;
 
 // An SDP session description runs to a couple of kilobytes -- by far the
 // largest thing on this wire, and the reason long_str exists. A candidate
@@ -330,6 +355,30 @@ struct WeaponStatusMsg {
     std::uint8_t slot = 0;      // which weapon is raised
     std::uint8_t magazine = 0;  // that weapon's magazine size, for the HUD
     bool switching = false;     // weapon still being raised
+    // Grenades left this life, and whether the pin is currently out. Rides
+    // this message rather than a new one because it is the same kind of fact,
+    // addressed to the same single owner: what is in YOUR hands.
+    std::uint8_t grenades = 0;
+    bool cooking = false;
+};
+
+// Where the live grenades are. Sent at the snapshot rate, unreliably: a
+// dropped update is corrected by the next one.
+struct GrenadeStateMsg {
+    struct Live {
+        std::uint8_t id = 0;
+        std::uint8_t thrower = kNoPlayer;
+        glm::vec3 position{0.0f};
+    };
+    std::vector<Live> grenades;
+};
+
+// A blast, at the point it actually happened. Reliable: there is no later
+// update that repairs a missed explosion.
+struct GrenadeExplodedMsg {
+    std::uint8_t id = 0;
+    std::uint8_t thrower = kNoPlayer;
+    glm::vec3 position{0.0f};
 };
 
 // --- encode ---------------------------------------------------------------
@@ -349,6 +398,8 @@ void write(eng::ByteWriter& w, const MatchStateMsg& m);
 void write(eng::ByteWriter& w, const LeaderboardMsg& m);
 void write(eng::ByteWriter& w, const KillCamMsg& m);
 void write(eng::ByteWriter& w, const WeaponStatusMsg& m);
+void write(eng::ByteWriter& w, const GrenadeStateMsg& m);
+void write(eng::ByteWriter& w, const GrenadeExplodedMsg& m);
 void write(eng::ByteWriter& w, const RtcOfferMsg& m);
 void write(eng::ByteWriter& w, const RtcAnswerMsg& m);
 void write(eng::ByteWriter& w, const RtcCandidateMsg& m);
@@ -373,6 +424,8 @@ std::optional<MatchStateMsg> read_match_state(eng::ByteReader& r);
 std::optional<LeaderboardMsg> read_leaderboard(eng::ByteReader& r);
 std::optional<KillCamMsg> read_kill_cam(eng::ByteReader& r);
 std::optional<WeaponStatusMsg> read_weapon_status(eng::ByteReader& r);
+std::optional<GrenadeStateMsg> read_grenade_state(eng::ByteReader& r);
+std::optional<GrenadeExplodedMsg> read_grenade_exploded(eng::ByteReader& r);
 std::optional<RtcOfferMsg> read_rtc_offer(eng::ByteReader& r);
 std::optional<RtcAnswerMsg> read_rtc_answer(eng::ByteReader& r);
 std::optional<RtcCandidateMsg> read_rtc_candidate(eng::ByteReader& r);

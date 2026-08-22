@@ -1707,3 +1707,134 @@ TEST_CASE("a team match with bots actually fights", "[server][team]") {
     }
     CHECK(bot_on_bot > 0);
 }
+
+// --- grenades (M55) ---------------------------------------------------------
+
+namespace {
+
+// Holds G for `ticks`, then releases for one -- press is the pin, release is
+// the throw, and the gap between them is the cook.
+game::InputCommand grenade_command(bool held) {
+    game::InputCommand command;
+    game::set_button(command, game::Button::Grenade, held);
+    return command;
+}
+
+}  // namespace
+
+TEST_CASE("one grenade per life, restored only on respawn", "[server][grenade]") {
+    Harness h;
+    const auto id = h.join(1, "thrower");
+    REQUIRE(id);
+    h.tick(60);
+    h.net.clear();
+
+    // Reported before anything is thrown.
+    h.drive(1, grenade_command(false), 2);
+    auto status = decode_to(h.net.sent, 1, MsgType::WeaponStatus, game::read_weapon_status);
+    // WeaponStatus is only sent on a change, so the count is asserted after
+    // the throw below rather than demanded here.
+
+    // Pull and release: one thrown.
+    h.drive(1, grenade_command(true), 2);
+    h.drive(1, grenade_command(false), 2);
+    status = decode_to(h.net.sent, 1, MsgType::WeaponStatus, game::read_weapon_status);
+    REQUIRE_FALSE(status.empty());
+    CHECK(status.back().grenades == 0);
+
+    // A second attempt does nothing at all: no grenade, no pin, and the count
+    // does not go negative.
+    h.net.clear();
+    h.drive(1, grenade_command(true), 2);
+    h.drive(1, grenade_command(false), 2);
+    const auto after = decode_to(h.net.sent, 1, MsgType::WeaponStatus, game::read_weapon_status);
+    for (const game::WeaponStatusMsg& m : after) {
+        CHECK(m.grenades == 0);
+        CHECK_FALSE(m.cooking);
+    }
+}
+
+TEST_CASE("holding the grenade cooks it, and cooking it too long kills you", "[server][grenade]") {
+    Harness h;
+    const auto id = h.join(1, "cooker");
+    REQUIRE(id);
+    h.tick(60);
+    h.net.clear();
+
+    // Hold past the fuse without ever releasing. The whole cost of the
+    // mechanic is that this is possible: a cook with no downside is a strictly
+    // better throw and stops being a decision.
+    const int fuse_ticks = static_cast<int>(game::kGrenadeFuseSeconds * 60.0f) + 20;
+    h.drive(1, grenade_command(true), fuse_ticks);
+
+    // It went off...
+    const auto blasts =
+        decode_all(h.net.sent, MsgType::GrenadeExploded, game::read_grenade_exploded);
+    REQUIRE_FALSE(blasts.empty());
+    CHECK(blasts.back().thrower == *id);
+
+    // ...on the person holding it.
+    const auto deaths = decode_all(h.net.sent, MsgType::PlayerDied, game::read_player_died);
+    REQUIRE_FALSE(deaths.empty());
+    CHECK(deaths.back().victim == *id);
+
+    // And it never became a grenade in the world: it detonated in hand, so
+    // there is nothing to have seen flying.
+    const auto states = decode_all(h.net.sent, MsgType::GrenadeState, game::read_grenade_state);
+    for (const game::GrenadeStateMsg& state : states) {
+        CHECK(state.grenades.empty());
+    }
+}
+
+TEST_CASE("a thrown grenade flies, then explodes on its own fuse", "[server][grenade]") {
+    Harness h;
+    const auto id = h.join(1, "thrower");
+    REQUIRE(id);
+    h.tick(60);
+    h.net.clear();
+
+    // A quick pull-and-release: thrown almost fresh, so it spends most of its
+    // fuse in the air.
+    h.drive(1, grenade_command(true), 2);
+    h.drive(1, grenade_command(false), 1);
+
+    // It is a thing in the world, moving.
+    h.tick(12);
+    const auto early = decode_all(h.net.sent, MsgType::GrenadeState, game::read_grenade_state);
+    REQUIRE_FALSE(early.empty());
+    REQUIRE_FALSE(early.back().grenades.empty());
+    const glm::vec3 first = early.back().grenades.front().position;
+    CHECK(early.back().grenades.front().thrower == *id);
+
+    h.tick(12);
+    const auto later = decode_all(h.net.sent, MsgType::GrenadeState, game::read_grenade_state);
+    REQUIRE_FALSE(later.back().grenades.empty());
+    // Moved, and away from the thrower rather than merely jittering.
+    CHECK(glm::distance(later.back().grenades.front().position, first) > 0.5f);
+
+    // And the fuse still runs while it flies.
+    h.tick(static_cast<int>(game::kGrenadeFuseSeconds * 60.0f) + 20);
+    const auto blasts =
+        decode_all(h.net.sent, MsgType::GrenadeExploded, game::read_grenade_exploded);
+    REQUIRE_FALSE(blasts.empty());
+}
+
+TEST_CASE("dying with the pin out drops it instead of detonating later",
+          "[server][grenade][team]") {
+    Harness h;
+    const Duel duel = set_up_duel(h);  // players 0 and 1: opposite teams
+    // The victim pulls a pin and holds it while being shot.
+    h.net.queue_message(duel.victim_peer, test::input_bytes(1, grenade_command(true), 0),
+                        eng::NetChannel::Sequenced);
+    h.pump();
+    h.net.clear();
+
+    REQUIRE(h.drive_until(duel.shooter_peer, duel.fire, MsgType::PlayerDied, 240) > 0);
+    // Well past the fuse.
+    h.tick(static_cast<int>(game::kGrenadeFuseSeconds * 60.0f) + 60);
+
+    // No blast from the corpse. A grenade that goes off seconds after its
+    // holder died kills whoever won the fight, from nowhere they can see, and
+    // reads as a bug however defensible the physics is.
+    CHECK(decode_all(h.net.sent, MsgType::GrenadeExploded, game::read_grenade_exploded).empty());
+}

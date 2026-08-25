@@ -35,7 +35,32 @@ FROM fedora:latest
 
 # python3 is here for the health check below, which speaks the real game
 # protocol rather than just proving a port is open.
+#
+# The C++ runtime is UPGRADED, not installed, and the difference is the whole
+# bug. Both stages say `fedora:latest`, which is not enough to make them
+# agree: the build stage installs gcc-c++ and gets libstdc++ upgraded as a
+# dependency, while the runtime stage keeps whatever the base image shipped.
+# The server then builds cleanly and refuses to start:
+#
+#     /opt/fps/fps_server: /lib64/libstdc++.so.6:
+#         version `GLIBCXX_3.4.36' not found (required by /opt/fps/fps_server)
+#
+# which surfaces as the health check never going healthy, with a green build
+# directly above it.
+#
+# `dnf install libstdc++` does NOT fix it -- the package is already present,
+# so install is a no-op and leaves the old one in place. Measured in the base
+# image:
+#
+#     base                        libstdc++.so.6.0.35
+#     dnf install -y libstdc++    libstdc++.so.6.0.35   <- unchanged
+#     dnf upgrade -y libstdc++    libstdc++.so.6.0.36
+#     dnf install -y gcc-c++      libstdc++.so.6.0.36   <- what the build has
+#
+# libgcc comes along for the ride because it carries its own symbol versions
+# and drifts with the same compiler.
 RUN dnf install -y python3 \
+    && dnf upgrade -y libstdc++ libgcc \
     && dnf clean all \
     && useradd --system --home /opt/fps --shell /usr/sbin/nologin fps
 

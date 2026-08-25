@@ -54,6 +54,7 @@
 #include "game/client/fly_camera.h"
 #include "game/client/net_client.h"
 #include "game/shared/footsteps.h"
+#include "game/shared/grenade.h"
 #include "game/shared/health.h"
 #include "game/shared/hitscan.h"
 #include "game/shared/input_command.h"
@@ -311,7 +312,13 @@ struct ClientArgs {
     // and none of that could be captured in a screenshot without a way
     // to hold the right mouse button from a command line.
     bool aim = false;
-    bool auto_walk = false;                 // hold W: bob needs distance actually travelled
+    bool auto_walk = false;  // hold W: bob needs distance actually travelled
+    // --grenade SECONDS: pull the pin one second in, hold for SECONDS, throw.
+    // Exists for the same reason --aim and --auto-fire do: a grenade needs a
+    // held button AND a release, and neither can be produced from a command
+    // line without this. ONLINE ONLY, and that is not an oversight -- grenades
+    // are server-owned and offline practice has no server to own them.
+    std::optional<double> grenade_cook;
     std::optional<std::uint8_t> weapon;     // start on this slot (1-based, as the keys are)
     std::optional<float> fixed_yaw;         // lock the view yaw (radians)
     std::optional<float> fixed_pitch;       // lock the view pitch (radians, + is up)
@@ -441,6 +448,15 @@ ClientArgs parse_args(int argc, char** argv) {
         } else if (arg == "--replay") {
             if (const auto value = next_value()) {
                 args.replay_path = std::string(*value);
+            }
+        } else if (arg == "--grenade") {
+            if (const auto value = next_value()) {
+                double seconds = 0.0;
+                if (std::from_chars(value->data(), value->data() + value->size(), seconds).ec ==
+                        std::errc{} &&
+                    seconds >= 0.0) {
+                    args.grenade_cook = seconds;
+                }
             }
         } else if (arg == "--auto-fire") {
             args.auto_fire = true;
@@ -804,6 +820,39 @@ void emit_muzzle_flash(eng::ParticlePool& pool, const glm::vec3& position,
     params.drag = 12.0f;
     params.count = 8;
     pool.emit(params, seed);
+}
+
+// A blast. Big, bright and brief, and emitted in every direction rather than
+// down a cone: the whole point of the visual is that a grenade does not care
+// which way it was facing.
+void emit_grenade_blast(eng::ParticlePool& pool, const glm::vec3& position, std::uint32_t seed) {
+    eng::EmitParams fire;
+    fire.position = position;
+    fire.direction = {0.0f, 1.0f, 0.0f};
+    fire.cone_radians = std::numbers::pi_v<float>;  // a full sphere
+    fire.speed = 7.0f;
+    fire.speed_jitter = 0.8f;
+    fire.color_start = {3.0f, 1.9f, 0.6f, 0.0f};  // additive, over-bright
+    fire.color_end = {0.4f, 0.10f, 0.0f, 0.0f};
+    fire.size_start = 0.45f;
+    fire.size_end = 0.05f;
+    fire.lifetime_seconds = 0.35f;
+    fire.lifetime_jitter = 0.4f;
+    fire.drag = 3.4f;
+    fire.count = 48;
+    pool.emit(fire, seed);
+
+    // A second, slower, darker pass reads as smoke without a second system.
+    eng::EmitParams smoke = fire;
+    smoke.speed = 2.2f;
+    smoke.color_start = {0.30f, 0.28f, 0.26f, 0.0f};
+    smoke.color_end = {0.05f, 0.05f, 0.05f, 0.0f};
+    smoke.size_start = 0.7f;
+    smoke.size_end = 1.5f;
+    smoke.lifetime_seconds = 0.9f;
+    smoke.drag = 1.6f;
+    smoke.count = 24;
+    pool.emit(smoke, seed ^ 0x9e3779b9u);
 }
 
 void emit_impact(eng::ParticlePool& pool, const glm::vec3& position, const glm::vec3& normal,
@@ -1486,6 +1535,9 @@ game::InputCommand make_command(const eng::InputState& input, float yaw, float p
     game::set_button(command, game::Button::Sprint, input.is_down(eng::Key::LeftShift));
     game::set_button(command, game::Button::Crouch, input.is_down(eng::Key::LeftControl));
     game::set_button(command, game::Button::Aim, input.is_down(eng::MouseButton::Right));
+    // Held, not tapped: the server reads the press as the pin and the release
+    // as the throw, so holding G is what cooks it.
+    game::set_button(command, game::Button::Grenade, input.is_down(eng::Key::G));
     return command;
 }
 
@@ -2509,6 +2561,14 @@ int main(int argc, char** argv) {
                 if (args.aim) {
                     game::set_button(command, game::Button::Aim, true);
                 }
+                if (args.grenade_cook) {
+                    // Pin out at one second, released `grenade_cook` later.
+                    // Measured on the SIMULATION clock, so the cook lasts the
+                    // duration asked for whatever the frame rate is.
+                    const double now = static_cast<double>(client_tick) * game::kTickSeconds;
+                    game::set_button(command, game::Button::Grenade,
+                                     now >= 1.0 && now < 1.0 + *args.grenade_cook);
+                }
                 if (args.auto_walk) {
                     game::set_button(command, game::Button::Forward, true);
                 }
@@ -3056,6 +3116,17 @@ int main(int argc, char** argv) {
         // disarms it: no muzzle, no flash, and no branch on which slot is
         // which. Emit direction is the weapon's own -Z, so the flash leaves
         // along the barrel rather than along the aim it just kicked off.
+        // Blasts owed by this frame. Taken from the net client rather than
+        // driven off the grenade list emptying, because a grenade that goes
+        // off is REMOVED from that list by the same message -- watching the
+        // list would fire the effect for one that merely left the frame.
+        if (online) {
+            for (const game::GrenadeExplodedMsg& blast : net->take_grenade_blasts()) {
+                emit_grenade_blast(particles, blast.position, blast.id);
+                sound_at("explosion.wav", blast.position, 1.0f);
+            }
+        }
+
         if (muzzle_flash_armed) {
             if (viewmodel_visible && held != nullptr && held->muzzle) {
                 emit_muzzle_flash(particles,
@@ -3244,6 +3315,17 @@ int main(int argc, char** argv) {
                 // Kept for the NEXT frame's fire events, which are drained
                 // before this list exists.
                 remote_hand_transforms[id] = weapon_model;
+            }
+        }
+
+        // Grenades in the air (M55). A small dark cube: the arena is boxes and
+        // so is everything in it, and at 12 cm it is the SILHOUETTE against a
+        // pale floor that has to read, not the shape.
+        if (online) {
+            for (const game::GrenadeStateMsg::Live& g : net->grenades()) {
+                glm::mat4 model = glm::translate(glm::mat4{1.0f}, g.position);
+                model = glm::scale(model, glm::vec3{game::kGrenadeRadius * 2.0f});
+                draw_items.push_back({model, DrawKind::Cube, -1, {0.10f, 0.11f, 0.09f}, -1, 0});
             }
         }
 
@@ -4128,6 +4210,21 @@ int main(int argc, char** argv) {
             } else {
                 ImGui::Text("HP %.0f    %s  %d / %d    K %d / D %d", hud_health,
                             hud_weapon.name.c_str(), hud_ammo, hud_mag, hud_kills, hud_deaths);
+            }
+            // Grenades (M55). One line, and only online, because grenades are
+            // a server-owned thing and offline practice has no server to own
+            // them. COOKING is called out in red and counts DOWN, because the
+            // number that matters while the pin is out is how long you have,
+            // and a player discovering that by dying has learned the wrong
+            // lesson about the mechanic.
+            if (online) {
+                if (net->self_cooking()) {
+                    ImGui::TextColored({1.0f, 0.35f, 0.25f, 1.0f}, "COOKING");
+                } else {
+                    ImGui::TextColored(net->self_grenades() > 0 ? ImVec4{0.85f, 0.85f, 0.85f, 1.0f}
+                                                                : ImVec4{0.45f, 0.45f, 0.45f, 1.0f},
+                                       "G  grenade x%u", net->self_grenades());
+                }
             }
             ImGui::SetWindowFontScale(1.0f);
             // Weapon slots; the raised one is highlighted.

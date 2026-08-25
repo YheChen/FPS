@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <glm/glm.hpp>
 #include <memory>
@@ -127,6 +128,13 @@ public:
         return team == Team::A ? team_score_a_ : team_score_b_;
     }
     Team my_team() const { return my_team_; }
+    // Grenades (M55). Live positions for rendering, and what is in your hand.
+    const std::vector<GrenadeStateMsg::Live>& grenades() const { return grenades_; }
+    std::vector<GrenadeExplodedMsg> take_grenade_blasts() {
+        return std::exchange(grenade_blasts_, {});
+    }
+    std::uint8_t self_grenades() const { return self_grenades_; }
+    bool self_cooking() const { return self_cooking_; }
     // Nobody's team but your own is known before their first snapshot, so this
     // answers "is that one of mine" for a specific id.
     bool same_team(std::uint8_t id) const {
@@ -190,6 +198,10 @@ private:
     std::uint16_t team_score_a_ = 0;
     std::uint16_t team_score_b_ = 0;
     Team my_team_ = Team::A;
+    std::vector<GrenadeStateMsg::Live> grenades_;
+    std::vector<GrenadeExplodedMsg> grenade_blasts_;
+    std::uint8_t self_grenades_ = 0;
+    bool self_cooking_ = false;
     std::vector<ChatLine> chat_lines_;
     std::optional<std::string> pending_map_change_;
     std::vector<FireEventMsg> fire_events_;

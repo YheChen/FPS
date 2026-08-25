@@ -17,6 +17,7 @@ enum class Key : std::uint8_t {
     D,
     R,
     T,  // chat (M50)
+    G,  // grenade (M55)
     Space,
     LeftShift,
     LeftControl,

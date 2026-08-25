@@ -206,12 +206,66 @@ TEST_CASE("combat messages round-trip", "[protocol]") {
         CHECK(m->score_b == 21);
     }
     {
+        // Grenades (M55). These two are the reason the message-type bound
+        // moved: the reader refused both while every existing test passed,
+        // and a round-trip is what says so.
+        game::GrenadeStateMsg live;
+        live.grenades.push_back({7, 3, {1.5f, 2.5f, -3.5f}});
+        live.grenades.push_back({8, 4, {-9.0f, 0.25f, 11.0f}});
+        const auto bytes = encode(live);
+        eng::ByteReader r{{bytes.data(), bytes.size()}};
+        REQUIRE(game::read_message_type(r) == game::MessageType::GrenadeState);
+        const auto m = game::read_grenade_state(r);
+        REQUIRE(m.has_value());
+        REQUIRE(m->grenades.size() == 2u);
+        CHECK(m->grenades[0].id == 7);
+        CHECK(m->grenades[0].thrower == 3);
+        CHECK(m->grenades[0].position.z == -3.5f);
+        CHECK(m->grenades[1].id == 8);
+        CHECK(m->grenades[1].position.x == -9.0f);
+    }
+    {
+        const auto bytes = encode(game::GrenadeExplodedMsg{9, 2, {4.0f, 1.0f, -2.0f}});
+        eng::ByteReader r{{bytes.data(), bytes.size()}};
+        REQUIRE(game::read_message_type(r) == game::MessageType::GrenadeExploded);
+        const auto m = game::read_grenade_exploded(r);
+        REQUIRE(m.has_value());
+        CHECK(m->id == 9);
+        CHECK(m->thrower == 2);
+        CHECK(m->position.y == 1.0f);
+    }
+    {
+        // An empty list still round-trips: the server does not send one, but a
+        // reader that only worked for non-empty would be a trap for the day it
+        // does.
+        const auto bytes = encode(game::GrenadeStateMsg{});
+        eng::ByteReader r{{bytes.data(), bytes.size()}};
+        game::read_message_type(r);
+        const auto m = game::read_grenade_state(r);
+        REQUIRE(m.has_value());
+        CHECK(m->grenades.empty());
+    }
+    {
         const auto bytes = encode(game::WeaponStatusMsg{17, true});
         eng::ByteReader r{{bytes.data(), bytes.size()}};
         game::read_message_type(r);
         const auto m = game::read_weapon_status(r);
+        REQUIRE(m.has_value());
         CHECK(m->ammo == 17);
         CHECK(m->reloading);
+        // Appended by M55. Their absence from the constructor above is the
+        // point: an old-shaped literal must still decode to sane defaults.
+        CHECK(m->grenades == 0);
+        CHECK_FALSE(m->cooking);
+    }
+    {
+        const auto bytes = encode(game::WeaponStatusMsg{5, false, 2, 8, false, 1, true});
+        eng::ByteReader r{{bytes.data(), bytes.size()}};
+        game::read_message_type(r);
+        const auto m = game::read_weapon_status(r);
+        REQUIRE(m.has_value());
+        CHECK(m->grenades == 1);
+        CHECK(m->cooking);
     }
 }
 
@@ -537,11 +591,17 @@ TEST_CASE("every message type is inside the accepted type range", "[protocol]") 
     // not moved with it -- and it did exactly that when M50 added ChatSend
     // past what was then the end. Update kLastMessageType below along with
     // the enum; that is the point of it being written down twice.
-    constexpr auto kLastMessageType = game::MessageType::MapChange;
+    // The bound now lives beside the enum and the reader uses it, so this
+    // reads the same constant rather than a second copy that can go stale
+    // independently. M55 is why: two new types were added and both copies
+    // still said MapChange, so the reader refused every grenade message and
+    // THIS TEST PASSED -- it compares the copies, and two stale copies agree.
+    constexpr auto kLastMessageType = game::kLastMessageType;
 
     for (const auto type :
          {game::MessageType::ClientHello, game::MessageType::RtcOffer, game::MessageType::RtcAnswer,
-          game::MessageType::RtcCandidate, game::MessageType::ChatSend, kLastMessageType}) {
+          game::MessageType::RtcCandidate, game::MessageType::ChatSend,
+          game::MessageType::MapChange, game::MessageType::GrenadeState, kLastMessageType}) {
         eng::ByteWriter w;
         w.u8(static_cast<std::uint8_t>(type));
         eng::ByteReader r{w.data()};

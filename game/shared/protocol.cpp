@@ -197,6 +197,35 @@ void write(eng::ByteWriter& w, const WeaponStatusMsg& m) {
     w.u8(m.slot);
     w.u8(m.magazine);
     w.u8(m.switching ? 1u : 0u);
+    w.u8(m.grenades);
+    w.u8(m.cooking ? 1u : 0u);
+}
+
+void write(eng::ByteWriter& w, const GrenadeStateMsg& m) {
+    w.u8(static_cast<std::uint8_t>(MessageType::GrenadeState));
+    // A u8 count, capped the same way the snapshot caps players: one byte
+    // says how many follow, and a reader that trusted a bigger number than
+    // can exist would be trusting the wire about how much to allocate.
+    const std::uint8_t count =
+        static_cast<std::uint8_t>(std::min<std::size_t>(m.grenades.size(), kMaxPlayers));
+    w.u8(count);
+    for (std::uint8_t i = 0; i < count; ++i) {
+        const GrenadeStateMsg::Live& g = m.grenades[i];
+        w.u8(g.id);
+        w.u8(g.thrower);
+        w.f32(g.position.x);
+        w.f32(g.position.y);
+        w.f32(g.position.z);
+    }
+}
+
+void write(eng::ByteWriter& w, const GrenadeExplodedMsg& m) {
+    w.u8(static_cast<std::uint8_t>(MessageType::GrenadeExploded));
+    w.u8(m.id);
+    w.u8(m.thrower);
+    w.f32(m.position.x);
+    w.f32(m.position.y);
+    w.f32(m.position.z);
 }
 
 void write(eng::ByteWriter& w, const RtcOfferMsg& m) {
@@ -236,7 +265,7 @@ void write(eng::ByteWriter& w, const MapChangeMsg& m) {
 std::optional<MessageType> read_message_type(eng::ByteReader& r) {
     const auto value = r.u8();
     if (!value || *value < static_cast<std::uint8_t>(MessageType::ClientHello) ||
-        *value > static_cast<std::uint8_t>(MessageType::MapChange)) {
+        *value > static_cast<std::uint8_t>(kLastMessageType)) {
         return std::nullopt;
     }
     return static_cast<MessageType>(*value);
@@ -528,10 +557,55 @@ std::optional<WeaponStatusMsg> read_weapon_status(eng::ByteReader& r) {
     const auto magazine = r.u8();
     const auto switching = r.u8();
     if (!ammo.has_value() || !reloading || *reloading > 1 || !slot || *slot >= kMaxWeapons ||
-        !magazine.has_value() || !switching || *switching > 1 || !r.finished()) {
+        !magazine.has_value() || !switching || *switching > 1) {
         return std::nullopt;
     }
-    return WeaponStatusMsg{*ammo, *reloading == 1, *slot, *magazine, *switching == 1};
+    // r.finished() moved to the end when M55 appended two fields: checking it
+    // here declared the message over while two bytes of it were still unread,
+    // so every WeaponStatus failed to decode.
+    const auto grenades = r.u8();
+    const auto cooking = r.u8();
+    if (!grenades.has_value() || !cooking || *cooking > 1 || !r.finished()) {
+        return std::nullopt;
+    }
+    return WeaponStatusMsg{*ammo,           *reloading == 1, *slot,        *magazine,
+                           *switching == 1, *grenades,       *cooking == 1};
+}
+
+std::optional<GrenadeStateMsg> read_grenade_state(eng::ByteReader& r) {
+    const auto count = r.u8();
+    if (!count || *count > kMaxPlayers) {
+        return std::nullopt;
+    }
+    GrenadeStateMsg m;
+    m.grenades.reserve(*count);
+    for (std::uint8_t i = 0; i < *count; ++i) {
+        const auto id = r.u8();
+        const auto thrower = r.u8();
+        const auto x = r.f32();
+        const auto y = r.f32();
+        const auto z = r.f32();
+        if (!id || !thrower || !x || !y || !z) {
+            return std::nullopt;
+        }
+        m.grenades.push_back({*id, *thrower, glm::vec3{*x, *y, *z}});
+    }
+    if (!r.finished()) {
+        return std::nullopt;
+    }
+    return m;
+}
+
+std::optional<GrenadeExplodedMsg> read_grenade_exploded(eng::ByteReader& r) {
+    const auto id = r.u8();
+    const auto thrower = r.u8();
+    const auto x = r.f32();
+    const auto y = r.f32();
+    const auto z = r.f32();
+    if (!id || !thrower || !x || !y || !z || !r.finished()) {
+        return std::nullopt;
+    }
+    return GrenadeExplodedMsg{*id, *thrower, glm::vec3{*x, *y, *z}};
 }
 
 std::optional<RtcOfferMsg> read_rtc_offer(eng::ByteReader& r) {

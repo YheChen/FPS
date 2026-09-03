@@ -5,7 +5,14 @@ dist/
 
 # Local user state
 fps_settings.cfg
-handover.json
+# The context handover, and the hand-made backups that accumulate beside it.
+# The glob rather than the bare name: `handover.json` alone left
+# handover.json.bak, .bak2 and .bak3 showing as untracked, which is both noise
+# in every `git status` and a way to commit one by accident. This file is
+# working notes for whoever picks the project up next, and it is deliberately
+# local -- it names hosts, describes half-finished work, and would be stale
+# the moment it was reviewed.
+handover.json*
 
 # Deployment secrets: the domain is harmless, the Porkbun key/secret pair is
 # not. deploy/.env.example is the committed template.

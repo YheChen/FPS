@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 
 #include <glm/glm.hpp>
 
@@ -27,7 +28,17 @@ inline constexpr std::uint8_t kGrenadesPerLife = 1;
 // Seconds from pulling the pin to detonation, in hand or not.
 inline constexpr float kGrenadeFuseSeconds = 3.0f;
 // How hard it leaves the hand, and from where relative to the eye.
-inline constexpr float kGrenadeThrowSpeed = 16.0f;
+//
+// 24 m/s, not the 16 M55 shipped with. A throw only reaches v^2/g -- 11.6 m at
+// 16 m/s -- and this arena is not fought at 11 metres: instrumenting bots put
+// their engagements at 23-31 m, and the bot config aims for a band between
+// preferred_range 11 and engage_range 26. A grenade that could not cross that
+// gap was a grenade nobody could use without first walking into knife range,
+// which is not a trade anyone would make.
+//
+// 24 m/s reaches 26 m, which is engage_range exactly. That is the number this
+// should have been keyed to from the start.
+inline constexpr float kGrenadeThrowSpeed = 24.0f;
 inline constexpr float kGrenadeGravity = 22.0f;  // matches the player's fall
 inline constexpr float kGrenadeRadius = 0.12f;
 // A throw starts slightly ahead of the eye so it does not spawn inside the
@@ -81,5 +92,23 @@ struct GrenadeState {
 
 // The velocity a throw leaves with, from where the thrower is looking.
 glm::vec3 grenade_throw_velocity(float yaw, float pitch, const glm::vec3& thrower_velocity);
+
+// The pitch that lands a throw `horizontal_distance` away, or nullopt when it
+// is out of reach however you aim.
+//
+// A grenade is not a bullet and a thrower who aims AT something misses it: at
+// kGrenadeThrowSpeed a level throw from eye height is on the floor after about
+// nine metres. Anything that wants to land one near a target -- a bot, or a
+// future aim assist -- has to solve for the arc rather than point at the
+// thing, and that is a rule rather than a bot's private habit.
+//
+// The flat-ground solution to sin(2*theta) = g*d / v^2, taking the LOW arc:
+// the high one lobs over cover and hangs long enough for anyone to walk away,
+// which is the wrong grenade almost every time.
+//
+// Maximum reach is v^2/g, about 26 m with the current numbers, and past that
+// there is no angle at all -- which is why this returns an optional rather
+// than a best effort that quietly falls short.
+std::optional<float> grenade_launch_pitch(float horizontal_distance);
 
 }  // namespace game

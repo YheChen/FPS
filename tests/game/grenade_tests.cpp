@@ -66,4 +66,30 @@ TEST_CASE("a throw inherits the thrower's run but not their fall", "[grenade]") 
     CHECK(lobbed.y > 0.0f);
 }
 
+TEST_CASE("the launch arc reaches, and says when it cannot", "[grenade]") {
+    // A grenade is not a bullet: aiming AT something misses it. At the throw
+    // speed a level throw from eye height is on the floor after about six
+    // metres, so anything trying to land one has to solve the arc.
+    const auto near = game::grenade_launch_pitch(2.0f);
+    const auto far = game::grenade_launch_pitch(10.0f);
+    REQUIRE(near.has_value());
+    REQUIRE(far.has_value());
+    // Further needs more elevation, and both are the LOW arc -- under 45
+    // degrees. The high solution lobs over cover and hangs long enough for
+    // anyone to walk away, which is the wrong grenade almost every time.
+    CHECK(*far > *near);
+    CHECK(*far < 0.7854f);
+    CHECK(*near > 0.0f);
+
+    // Past v^2/g there is no angle at all, and this says so rather than
+    // quietly falling short.
+    const float max_reach =
+        game::kGrenadeThrowSpeed * game::kGrenadeThrowSpeed / game::kGrenadeGravity;
+    CHECK(game::grenade_launch_pitch(max_reach * 0.99f).has_value());
+    CHECK_FALSE(game::grenade_launch_pitch(max_reach * 1.05f).has_value());
+
+    // Zero distance is a throw at your own feet: legal, and level.
+    CHECK(game::grenade_launch_pitch(0.0f) == 0.0f);
+}
+
 }  // namespace

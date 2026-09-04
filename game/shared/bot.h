@@ -34,6 +34,22 @@ struct BotConfig {
     float jump_chance = 0.010f;        // per tick while engaging
     float wall_avoid_distance = 2.2f;  // turns away inside this
 
+    // --- grenades ---------------------------------------------------------
+    //
+    // A bot throws when it can see an enemy inside the arc's actual reach. It
+    // does NOT always cook: a bot that cooks every throw is one behaviour
+    // repeated, and the whole point of a fuse you control is that the timing
+    // varies. Half its throws leave immediately and the rest are held for a
+    // roll of up to grenade_cook_max_seconds.
+    //
+    // The cap is well under kGrenadeFuseSeconds on purpose. A bot that blows
+    // itself up is funny once and then simply removes an opponent for free,
+    // which is a worse fight than one that throws slightly early.
+    float grenade_chance_per_second = 0.5f;  // while an enemy is in sight
+    float grenade_min_range = 4.0f;          // closer than this and it is on itself
+    float grenade_cook_chance = 0.5f;        // how often a throw is cooked AT ALL
+    float grenade_cook_max_seconds = 1.1f;
+
     // Which gun every bot carries. Not a difficulty knob -- it exists so an
     // automated run can put a weapon other than the rifle in front of the
     // camera. Bots were pinned to slot 0, so verifying anything about the
@@ -128,6 +144,11 @@ struct BotSenses {
 
     // Distance to the nearest obstacle straight ahead. Large means clear.
     float forward_clearance = 1000.0f;
+
+    // Whether there is a grenade left to throw this life. The decision layer
+    // cannot see the loadout, and a bot that pulls a pin it does not have
+    // would hold a button forever waiting for a throw that never happens.
+    bool has_grenade = false;
 };
 
 // Carried between ticks. Kept separate from the senses so the decision
@@ -153,6 +174,11 @@ struct BotState {
     // Trigger discipline: seconds left in the current burst or pause.
     float burst_timer = 0.0f;
     bool bursting = false;
+    // Grenade: seconds of hold left once a throw is committed to. Held rather
+    // than re-rolled each tick, because the cook duration IS the decision --
+    // rolling every tick would give every bot the same expected fuse and undo
+    // the variety this exists for. Negative means "not throwing".
+    float grenade_hold_seconds = -1.0f;
     bool initialized = false;
 };
 

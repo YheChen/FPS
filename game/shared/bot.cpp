@@ -5,6 +5,7 @@
 #include <limits>
 #include <numbers>
 
+#include "game/shared/grenade.h"
 #include "game/shared/rng.h"
 
 namespace game {
@@ -281,6 +282,49 @@ InputCommand decide(BotState& state, const BotSenses& senses, const BotConfig& c
     }
     if (wants_to_shoot && state.bursting) {
         set_button(command, Button::Fire, true);
+    }
+
+    // --- grenades -----------------------------------------------------------
+    //
+    // Committed to ONCE and then held, rather than re-decided every tick. The
+    // cook duration IS the decision: rolling it again each tick would average
+    // every bot to the same fuse and erase the variety this exists for.
+    if (state.grenade_hold_seconds >= 0.0f) {
+        state.grenade_hold_seconds -= dt;
+        if (state.grenade_hold_seconds >= 0.0f) {
+            set_button(command, Button::Grenade, true);
+            // A grenade is thrown along the LOOK direction, and a bot aiming
+            // at a chest puts it on the floor in front of itself. While the
+            // pin is out it aims along the arc instead -- which also means it
+            // is visibly not shooting at you, and that is a fair trade to
+            // give away.
+            if (const auto pitch = grenade_launch_pitch(distance)) {
+                command.pitch = *pitch;
+            }
+            set_button(command, Button::Fire, false);
+        }
+        // Falling below zero releases the button, and the release is the
+        // throw: the server reads the two edges, so nothing here has to say
+        // "throw" at all.
+        return command;
+    }
+
+    const bool can_throw = engaging && senses.target_visible && reacted && senses.has_grenade &&
+                           distance >= config.grenade_min_range &&
+                           grenade_launch_pitch(distance).has_value();
+    if (can_throw && unit_random(seed, 0x2545f491u) < config.grenade_chance_per_second * dt) {
+        // Half the throws are not cooked at all -- the pin comes out and it
+        // leaves immediately. The rest are held for a roll up to the cap,
+        // which stays well short of the fuse: a bot that kills itself is funny
+        // once and then just hands over a free kill.
+        const bool cook = unit_random(seed, 0x9e3779b1u) < config.grenade_cook_chance;
+        const float held =
+            cook ? unit_random(seed, 0x27d4eb2fu) * config.grenade_cook_max_seconds : 0.0f;
+        // At least one tick either way, or the button never goes down and the
+        // server never sees a pin pulled.
+        state.grenade_hold_seconds = std::max(held, dt);
+        set_button(command, Button::Grenade, true);
+        set_button(command, Button::Fire, false);
     }
 
     return command;

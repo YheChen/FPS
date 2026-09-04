@@ -313,6 +313,10 @@ BotSenses ServerGame::sense_for_bot(std::uint8_t bot_id) const {
     senses.position = bot.state.position;
     senses.yaw = bot.view_yaw;
     senses.on_ground = bot.state.on_ground;
+    // Without this a bot pulls a pin it does not have: decide() would commit
+    // to a throw, hold the button, and wait forever for a grenade the server
+    // already refused to give it.
+    senses.has_grenade = bot.grenades > 0 && !bot.cooking;
 
     const glm::vec3 eye = bot.state.position + glm::vec3{0.0f, 1.6f, 0.0f};
 
@@ -799,6 +803,11 @@ void ServerGame::step_grenades(eng::IServerTransport& net) {
 }
 
 void ServerGame::detonate(const GrenadeState& grenade, eng::IServerTransport& net) {
+    // Logged for the same reason a kill is: it is a thing that HAPPENED in the
+    // match, and without a line for it the only way to find out whether
+    // grenades are being thrown at all is to stand in the arena and watch.
+    eng::log::info("Grenade {} from player {} detonated at ({:.1f},{:.1f},{:.1f})", grenade.id,
+                   grenade.thrower, grenade.position.x, grenade.position.y, grenade.position.z);
     broadcast_reliable(encode(GrenadeExplodedMsg{grenade.id, grenade.thrower, grenade.position}),
                        net);
     for (std::uint8_t id = 0; id < kMaxPlayers; ++id) {

@@ -4,11 +4,14 @@
 #include <array>
 #include <cmath>
 #include <numbers>
+#include <optional>
 #include <string_view>
+#include <vector>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include "game/shared/grenade.h"
 #include "game/shared/hitscan.h"
 #include "game/shared/player_movement.h"
 #include "game/shared/weapon.h"
@@ -494,6 +497,104 @@ TEST_CASE("bots carry the weapon the config names", "[bot]") {
     game::BotConfig fallback = game::bot_config_for(game::BotSkill::Normal);
     game::BotState fallback_state;
     CHECK(run(fallback_state, engaging, fallback, 60).weapon_slot == 0);
+}
+
+TEST_CASE("bots throw grenades, and do not always cook them", "[bot][grenade]") {
+    // Two things are under test, and the second is the interesting one: a bot
+    // that ALWAYS cooks is one behaviour repeated, and what makes a fuse you
+    // control interesting is that the timing varies.
+    game::BotConfig config = game::bot_config_for(game::BotSkill::Deadly);
+
+    // Runs one bot until it commits to a throw, and returns how long it held
+    // the button: the cook, measured the same way the server measures it.
+    const auto cook_seconds_for = [&](std::uint32_t seed_base) -> std::optional<float> {
+        game::BotState state;
+        game::BotSenses senses = looking_at_enemy(8.0f);
+        senses.has_grenade = true;
+        bool held_before = false;
+        float held_for = 0.0f;
+        for (int i = 0; i < 600; ++i) {
+            const game::InputCommand command =
+                game::decide(state, senses, config, kDt, seed_base + static_cast<std::uint32_t>(i));
+            const bool held = game::has_button(command, game::Button::Grenade);
+            if (held) {
+                held_before = true;
+                held_for += kDt;
+            } else if (held_before) {
+                return held_for;  // released: that is the throw
+            }
+        }
+        return std::nullopt;
+    };
+
+    std::vector<float> cooks;
+    for (std::uint32_t seed = 0; seed < 40; ++seed) {
+        if (const auto held = cook_seconds_for(seed * 7919u)) {
+            cooks.push_back(*held);
+        }
+    }
+
+    // It throws at all.
+    REQUIRE(cooks.size() >= 20u);
+
+    // An UNCOOKED throw is held only for the two ticks the server needs to see
+    // the button go down and come back up. A cooked one is held for a rolled
+    // duration on top of that.
+    const auto uncooked =
+        std::count_if(cooks.begin(), cooks.end(), [](float c) { return c <= 2.5f * kDt; });
+    const auto cooked = std::count_if(cooks.begin(), cooks.end(), [](float c) { return c > 0.2f; });
+
+    // BOTH have to be COMMON, and "common" is the load-bearing word. An
+    // earlier version asserted only `uncooked > 0`, and a bot rigged to cook
+    // every single throw still passed it -- a duration rolled uniformly is
+    // occasionally near zero anyway. A fraction cannot be satisfied by an
+    // accident of rounding, and it is what actually says "not always".
+    CHECK(uncooked * 4 >= static_cast<int>(cooks.size()));
+    CHECK(cooked * 4 >= static_cast<int>(cooks.size()));
+
+    // And the cooked ones VARY rather than all landing on the cap, which is
+    // what a per-throw roll buys over a constant.
+    const float longest = *std::max_element(cooks.begin(), cooks.end());
+    const float shortest = *std::min_element(cooks.begin(), cooks.end());
+    CHECK(longest - shortest > 0.2f);
+
+    // Never near the fuse. A bot that kills itself is funny once and then
+    // hands over a free kill.
+    CHECK(longest < game::kGrenadeFuseSeconds * 0.6f);
+}
+
+TEST_CASE("a bot with no grenade never pulls a pin", "[bot][grenade]") {
+    // Without this the bot commits to a throw, holds the button, and waits
+    // forever for a grenade the server already refused to give it -- which
+    // would also stop it shooting, since the two are exclusive.
+    game::BotConfig config = game::bot_config_for(game::BotSkill::Deadly);
+    game::BotState state;
+    game::BotSenses senses = looking_at_enemy(8.0f);
+    senses.has_grenade = false;
+
+    bool ever_held = false;
+    for (int i = 0; i < 600; ++i) {
+        const game::InputCommand command =
+            game::decide(state, senses, config, kDt, static_cast<std::uint32_t>(i));
+        ever_held = ever_held || game::has_button(command, game::Button::Grenade);
+    }
+    CHECK_FALSE(ever_held);
+}
+
+TEST_CASE("bots do not throw grenades at point blank", "[bot][grenade]") {
+    // At two metres the blast covers the thrower: the radius is 5.5 m.
+    game::BotConfig config = game::bot_config_for(game::BotSkill::Deadly);
+    game::BotState state;
+    game::BotSenses senses = looking_at_enemy(2.0f);
+    senses.has_grenade = true;
+
+    bool ever_held = false;
+    for (int i = 0; i < 600; ++i) {
+        const game::InputCommand command =
+            game::decide(state, senses, config, kDt, static_cast<std::uint32_t>(i));
+        ever_held = ever_held || game::has_button(command, game::Button::Grenade);
+    }
+    CHECK_FALSE(ever_held);
 }
 
 }  // namespace

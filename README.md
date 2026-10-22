@@ -62,7 +62,12 @@ server, the build and the deployment pipeline are the project.
 - **Bots** — [`game/shared/bot.cpp`](game/shared/bot.cpp): a pure
   `decide(state, senses, config, seed)` function producing ordinary
   `InputCommand`s, so bots exercise the real movement, hit detection, scoring
-  and replay paths. Four difficulty levels.
+  and replay paths. Four difficulty levels. They find their way with
+  [`game/shared/nav.cpp`](game/shared/nav.cpp): a walkability grid rasterized
+  from the map's own collision triangles (an agent-sized box tested against
+  every triangle, cells joined within the controller's step height) and A*
+  over it with string-pulled routes, so a bot goes round a pillar, up a ramp
+  and through the lane behind a gallery instead of into them.
 - **WebAssembly client + deployment pipeline** — Emscripten/WebGL 2 build,
   published to a CDN by CI only after a headless-Chrome smoke test loads it;
   the server ships as a Docker image behind a TLS reverse proxy and redeploys
@@ -330,13 +335,14 @@ engine/           Reusable engine library (~8.3k lines). No game concepts.
 game/             The FPS itself (~10.5k lines)
   shared/         Compiled into BOTH client and server: movement, weapons,
                   hitscan, prediction, interpolation, lag compensation,
-                  protocol, replay, bots, footsteps, deterministic RNG
+                  protocol, replay, bots, navigation grid + A*, footsteps,
+                  deterministic RNG
   client/         Render loop, HUD, menu, killcam, chat, replay viewer,
                   connection state machine, browser WebRTC glue
   server/         Authoritative ServerGame (a library, so it is testable),
                   signalling router, persistent stats store, main loop
 
-tests/            299 Catch2 test cases (~8.7k lines) + a shell test suite
+tests/            335 Catch2 test cases (~9.7k lines) + a shell test suite
                   for the deploy script's decision table
 tools/            Asset generators (maps, character, weapons, textures,
                   sounds, icon), browser smoke test, protocol probe,
@@ -417,7 +423,7 @@ test, is in [docs/build.md](docs/build.md); deployment is
 
 ## Testing
 
-**299 Catch2 test cases** in [`tests/`](tests), run by `ctest` on every push
+**335 Catch2 test cases** in [`tests/`](tests), run by `ctest` on every push
 and pull request. They cover the parts where a bug is invisible until someone
 plays: protocol round-trips and malformed-packet handling, the `ByteReader`
 poisoning discipline, prediction and reconciliation, the interpolation buffer,

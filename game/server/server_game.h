@@ -19,6 +19,7 @@
 #include "game/shared/input_command.h"
 #include "game/shared/kill_cam.h"
 #include "game/shared/lag_comp.h"
+#include "game/shared/nav.h"
 #include "game/shared/player_movement.h"
 #include "game/shared/protocol.h"
 #include "game/shared/replay.h"
@@ -205,6 +206,12 @@ private:
     void send_leaderboard(std::uint32_t peer, eng::IServerTransport& net) const;
 
     eng::PhysicsWorld world_;
+    // The bots' walkability grid for the current map (M58), built from the
+    // same meshes as world_. One per rotation entry is built up front, like
+    // the collision is loaded up front: a rebuild on the handover tick would
+    // be a stall on the tick everyone is being respawned.
+    NavGrid nav_;
+    std::vector<NavGrid> rotation_nav_;
     std::vector<glm::vec3> spawns_;
     std::string map_name_;
     std::vector<MapGeometry> rotation_;

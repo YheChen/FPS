@@ -1047,3 +1047,121 @@ changing, and the HUD read `prediction error: 0.0000 m` afterwards: the
 client's new world agrees with the server's exactly.
 
 **Protocol 10.** Tests: 293 (+6).
+
+## M58 — bots find their way ✅
+
+Bots steered by one ray: walk at the target, back off when something is
+within 2.2 m, wander on a random heading otherwise. Enough to cross an open
+floor; not enough to go round a pillar, up a ramp, or through the lane behind
+a gallery. An enemy behind any of those was an enemy the bot slid along a
+wall toward until the strafe flips happened to carry it past the end.
+
+**A grid, not waypoints, and built from the collision.** `game/shared/nav.h`
+rasterizes the same `(mesh, transform)` pairs the physics world is built from
+into half-metre cells. Each cell records the height of the highest
+upward-facing triangle under its centre, and whether a standing agent fits:
+a box the controller's radius wide and from step height to head height tall,
+tested against every triangle (separating-axis, the one piece of geometry in
+the module with tests of its own). The radius is what keeps routes off walls
+-- the cells within 0.4 m of a face are not walkable, so a route never asks
+the capsule to overlap one. Cells are joined when their floors are within the
+controller's step height, so a 16° ramp reads as a run of connected cells
+and a gallery lip as the edge of the walkable world. Hand-placed waypoints
+would have drifted the first time a box in `gen_arena.py` moved; this cannot.
+
+Two things the first build got wrong. The step rule was one-way -- climb
+0.4 m, drop 2.5 m -- until it became clear a drop can never fire: the floor
+cell beside any ledge taller than a step sits inside the band the agent
+radius erodes. The rule is symmetric now, and bots take ramps. And the cells
+directly under a wall get the wall's *top* as their floor, four metres up:
+walkable, unreachable, and until the grid labelled connected regions a
+roaming bot could be sent there and search the whole floor proving it could
+not go.
+
+**A\* with string pulling.** Octile heuristic, ties broken toward the goal
+and then by cell index so two runs over one grid pop the same order. The cell
+path is then pulled straight: from each anchor the leg extends while the
+straight line to the cell after it still crosses only walkable, steppable
+cells -- an Amanatides-Woo traversal, one face at a time, so a line cannot
+skip the corner of a pillar between two samples. A route round the test wall
+is three legs, not forty half-metre steps.
+
+**The decision layer stays pure.** `navigate(state, grid, position, chase,
+config, dt, seed)` is the one place a route is chosen, and it writes only
+`state.route`. The server calls it before `decide()` and hands the next
+point over as a sense, `senses.waypoint`, the way it hands over line of
+sight. `decide()` then has one new rule: a visible enemy inside engage range
+is the fight itself and the route has no say in it; everything else -- an
+enemy it cannot see, one too far away, nobody at all -- follows the route.
+Facing an enemy while walking a route means the feet and the gaze disagree,
+so the leg's direction is split into the view frame and pressed as buttons
+past cos 67.5°: eight headings, and a bot walking 20° off its gaze
+alternates between two of them tick to tick, which is what a player does.
+
+**Routes are refreshed, not recomputed.** A chase replans on a half-second
+timer, or when the target has moved 3 m from where the route was going; a
+sprinting target moves a cell a tick, and a route to where it was a moment
+ago still rounds the same corner. A roam picks somewhere reachable (same
+region) at least 10 m away. A bot with somewhere to go that has not moved
+0.35 m in 1.5 s is stuck on something the grid did not predict, and drops
+the route outright rather than leaning on the same lip for the match. The
+replan must not reset that clock -- it did, and no chasing bot could ever be
+stuck.
+
+**What the wall ray does now.** Only steer blind. A route already knows
+where the walls are, and backing away from one it is walking beside -- which
+the ray sees whenever the gaze crosses it -- undid the route a tick at a
+time.
+
+**Server side**, the grid is built in the constructor from the meshes it was
+handed, and one per rotation entry in `set_map_rotation`, for the reason the
+collision is loaded up front (M51): a rebuild on the handover tick is a stall
+on the tick everyone is respawned. Routes are reset on respawn and on a map
+change, when their points stop describing anything. `CharacterConfig` gained
+`step_height`, which the controller now reads instead of a `0.4f` in
+`update()`, so the grid's parameters come from the controller's own.
+
+**Tests:** 335 (+22). The grid: an empty mesh list; a flat floor walkable
+exactly where a centre is on it; a wall unwalkable with its band; a route
+round it whose every leg is straight-walkable, with no point in the band and
+a length that says detour; the line test seeing the wall; a sealed room with
+no route in and a region of its own that roaming respects; arena01's actual
+centre platform and ramp, climbed and descended, with the far lip a 12 m
+walk rather than a step; a 0.3 m step walked over and a 1.2 m crate not;
+snapping out of the wall band at the right height and never onto a wall top;
+routes as a function of their inputs; and the triangle-box test on six
+cases. Then the shipped arenas themselves, loaded from `assets/maps/`: every
+spawn of both reaches every other, each leg walkable, and a gallery spawn is
+reached at gallery height -- a new map whose ramps do not connect fails here
+before a bot stands on it. The bot: a route walked facing where it goes with
+the idle heading change never firing over it; a route hunted along with the
+feet moving and the gaze still; a visible enemy in range overriding it; a
+wall ray not overriding it; a chase routed round the wall, kept tick to tick,
+refreshed on the timer and replanned at once for a sprint; arrival; roaming
+somewhere far and reachable; stuck detection that survives the replans; and
+the empty grid. The server: a bot and a human 16 m apart with a 60 m wall
+between them, where the bot's first shot proves it went round one end.
+
+**Verified live.** Six bots, 60 s, normal skill, no human:
+
+| six bots, 60 s, normal skill | arena01 | arena02 |
+|---|---|---|
+| kills, M56 bots (one ray) | 22 | 27 |
+| kills, M58 bots (routes) | **33** | **32** |
+| grenade detonations, M56 → M58 | 22 → 25 | 26 → 27 |
+
+One run of each, so a direction rather than a measurement: bots that can
+get to each other fight more, and the grenade economy -- one per life --
+scales with deaths, as it should. The tick rate held at 60.0/s throughout
+with six bots replanning every half second, in a Debug build. The proof
+that the routes are *routes* is the server test above, not this table: the
+bot with a 60 m wall in its way fires its first shot from past the wall's
+end, every run.
+
+The grids: arena01 86×86 cells, 6540 walkable; arena02 102×70, 6128.
+
+**Not done, deliberately:** one floor per cell, so no bridges over
+walkways (these maps have none); no jumping across gaps or onto the 1.2 m
+cover, whose tops are regions of their own; and a visible enemy in range is
+still circle-strafed with no regard to the grid, so a fight can carry a bot
+into a wall the way it always could. No protocol change.

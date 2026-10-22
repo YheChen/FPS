@@ -44,6 +44,27 @@ std::vector<std::uint8_t> encode(const Message& message) {
     return {writer.data().begin(), writer.data().end()};
 }
 
+// The grid describes what the character controller can stand on and climb,
+// so its parameters come from the controller's own, not from numbers typed
+// here that would drift the first time either changed.
+NavParams nav_params() {
+    const eng::CharacterConfig character;
+    NavParams params;
+    params.agent_radius = character.radius;
+    params.agent_height = character.height;
+    params.step_height = character.step_height;
+    params.max_slope_degrees = character.max_slope_degrees;
+    return params;
+}
+
+NavGrid build_nav(const std::vector<std::pair<eng::MeshData, glm::mat4>>& meshes,
+                  std::string_view map_name) {
+    NavGrid grid = build_nav_grid(meshes, nav_params());
+    eng::log::info("Nav grid for '{}': {}x{} cells, {} walkable", map_name, grid.width(),
+                   grid.depth(), grid.walkable_count());
+    return grid;
+}
+
 }  // namespace
 
 ServerGame::ServerGame(std::vector<std::pair<eng::MeshData, glm::mat4>> map_meshes,
@@ -53,6 +74,7 @@ ServerGame::ServerGame(std::vector<std::pair<eng::MeshData, glm::mat4>> map_mesh
         world_.add_static_mesh(mesh, transform);
     }
     world_.optimize();
+    nav_ = build_nav(map_meshes, map_name_);
     if (spawns_.empty()) {
         spawns_.push_back({0.0f, 1.0f, 0.0f});
     }
@@ -398,7 +420,21 @@ void ServerGame::tick(eng::IServerTransport& net) {
         // scoring and recording code rather than a parallel imitation of it.
         InputCommand command = player.last_command;
         if (player.is_bot) {
-            const BotSenses senses = sense_for_bot(id);
+            BotSenses senses = sense_for_bot(id);
+            // The route (M58): toward the enemy the senses picked, or nowhere
+            // in particular. A dead bot is going nowhere, and planning from
+            // where its body lies would only be dropped on respawn.
+            if (player.alive) {
+                const std::optional<glm::vec3> chase =
+                    senses.has_target ? std::optional<glm::vec3>{senses.target_position}
+                                      : std::nullopt;
+                if (const auto waypoint =
+                        navigate(player.bot_state, nav_, player.state.position, chase, bot_config_,
+                                 kTickSeconds, hash_combine(tick_, id))) {
+                    senses.has_waypoint = true;
+                    senses.waypoint = *waypoint;
+                }
+            }
             command = decide(player.bot_state, senses, bot_config_, kTickSeconds,
                              hash_combine(tick_, id));
             command.sequence = ++player.last_processed_input;
@@ -1017,6 +1053,9 @@ void ServerGame::respawn_player(std::uint8_t player_id, eng::IServerTransport& n
     player.grenades = kGrenadesPerLife;
     player.cooking = false;
     player.cook_remaining = 0.0f;
+    // A route planned from where the body fell describes a walk from
+    // somewhere the bot no longer is.
+    player.bot_state.route = BotRoute{};
     const glm::vec3 spawn = pick_spawn(player.team);
     player.state = {};
     player.state.position = spawn;
@@ -1062,6 +1101,13 @@ void ServerGame::set_map_rotation(std::vector<MapGeometry> rotation) {
             break;
         }
     }
+    rotation_nav_.clear();
+    for (const MapGeometry& geometry : rotation_) {
+        // The current map's grid already exists; the rest are built now, so
+        // the handover tick does not pay for them.
+        rotation_nav_.push_back(
+            geometry.name == map_name_ ? nav_ : build_nav(geometry.meshes, geometry.name));
+    }
     if (rotation_.size() > 1) {
         eng::log::info("Map rotation: {} maps, currently {}", rotation_.size(), map_name_);
     }
@@ -1082,6 +1128,7 @@ bool ServerGame::advance_map(eng::IServerTransport& net) {
         world_.add_static_mesh(mesh, transform);
     }
     world_.optimize();
+    nav_ = rotation_nav_[rotation_index_];
 
     spawns_ = next.spawns;
     if (spawns_.empty()) {
@@ -1105,6 +1152,8 @@ bool ServerGame::advance_map(eng::IServerTransport& net) {
         // into it would lag-compensate against the old arena's geometry.
         players_[id]->history = PositionHistory{};
         players_[id]->trail = ViewTrail{};
+        // So does a route: its points are places in the old arena.
+        players_[id]->bot_state.route = BotRoute{};
     }
 
     // Told BEFORE any snapshot of the new arena: a client that stepped its

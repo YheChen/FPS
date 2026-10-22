@@ -1,13 +1,16 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
 #include <string_view>
+#include <vector>
 
 #include <glm/glm.hpp>
 
 #include "game/shared/input_command.h"
+#include "game/shared/nav.h"
 #include "game/shared/protocol.h"
 
 // Bot decision-making.
@@ -93,6 +96,30 @@ struct BotConfig {
     // time to break line of sight, close, or shoot back.
     float burst_seconds = 0.24f;        // ~2-3 rounds from the rifle
     float burst_pause_seconds = 0.90f;  // then off the trigger
+
+    // --- routes (M58) -------------------------------------------------------
+    //
+    // How a bot gets somewhere it cannot walk straight to. None of these is a
+    // difficulty knob: a bot that cannot find the ramp is not easier, it is
+    // broken.
+
+    // A route to a moving target is recomputed this often. The target has
+    // walked on by then, but a route to where it was half a second ago still
+    // goes round the same pillar.
+    float route_repath_seconds = 0.5f;
+    // Sideways distance at which a waypoint counts as reached. Wider than the
+    // controller's wobble around a point, narrower than a cell, so a bot
+    // neither orbits a waypoint it cannot land on exactly nor turns the corner
+    // before it is round it.
+    float route_waypoint_radius = 0.7f;
+    // A bot that has somewhere to go and has not moved this far in this long
+    // is caught on something the grid did not predict. The route is dropped
+    // and chosen again rather than pushed into the same thing forever.
+    float route_stuck_seconds = 1.5f;
+    float route_stuck_distance = 0.35f;
+    // Roaming picks somewhere at least this far away, so an idle bot crosses
+    // the arena rather than pacing one corner of it.
+    float route_roam_min_distance = 10.0f;
 };
 
 // Presets, so difficulty is a launch flag rather than a recompile.
@@ -149,6 +176,27 @@ struct BotSenses {
     // cannot see the loadout, and a bot that pulls a pin it does not have
     // would hold a button forever waiting for a throw that never happens.
     bool has_grenade = false;
+
+    // The next point on the bot's route (M58), from navigate(). Absent when
+    // there is no grid, no route, or the bot has arrived; decide() then
+    // steers the way it always did -- straight at the target, away from the
+    // nearest wall.
+    bool has_waypoint = false;
+    glm::vec3 waypoint{0.0f};
+};
+
+// Where a bot is going and how far along it is. Owned by BotState and
+// updated only by navigate(), which is the one place a route is chosen.
+struct BotRoute {
+    std::vector<glm::vec3> points;  // from find_path: the goal is the last
+    std::size_t next = 0;           // index into points; == size() when done
+    glm::vec3 goal{0.0f};
+    bool roaming = false;  // a goal of the bot's own choosing, not an enemy
+    float repath_timer = 0.0f;
+    // Stuck detection: where the bot last made progress, and for how long it
+    // has failed to since.
+    glm::vec3 progress_anchor{0.0f};
+    float stuck_timer = 0.0f;
 };
 
 // Carried between ticks. Kept separate from the senses so the decision
@@ -179,8 +227,24 @@ struct BotState {
     // rolling every tick would give every bot the same expected fuse and undo
     // the variety this exists for. Negative means "not throwing".
     float grenade_hold_seconds = -1.0f;
+    // The route being walked (M58). Reset by the server on respawn and on a
+    // map change, when the points stop describing anything.
+    BotRoute route;
     bool initialized = false;
 };
+
+// Chooses where the bot should be heading and returns the next point to walk
+// toward, or nullopt when there is nowhere to go: no grid, no route to the
+// target, or already there.
+//
+// With `chase` set the route leads to it and is refreshed on a timer; without
+// it the bot roams, picking somewhere reachable and far enough away to be a
+// walk. Pure, like decide(): the grid is immutable data, the randomness is a
+// hash of `seed`, and the only thing written is `state.route`. Gathering
+// `chase` -- the nearest living enemy -- is still the server's job.
+std::optional<glm::vec3> navigate(BotState& state, const NavGrid& grid, const glm::vec3& position,
+                                  const std::optional<glm::vec3>& chase, const BotConfig& config,
+                                  float dt, std::uint32_t seed);
 
 // Yaw that points from `from` toward `to`, in the project's convention
 // (yaw 0 looks down -Z, positive yaw turns toward +X).

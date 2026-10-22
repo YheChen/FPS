@@ -21,6 +21,30 @@ float unit_random(std::uint32_t seed, std::uint32_t salt) {
     return hash_float01(hash_combine(seed, salt));
 }
 
+float horizontal_distance(const glm::vec3& a, const glm::vec3& b) {
+    return glm::length(glm::vec2{a.x - b.x, a.z - b.z});
+}
+
+// Presses the movement buttons that carry the bot toward `direction` (a
+// unit vector in the ground plane) while it keeps looking along `yaw`. The
+// route is in world space and the buttons are in the view's frame, so the
+// direction is split into forward and sideways parts and each is pressed
+// past a threshold: cos(67.5 degrees), which quantizes the plane into the
+// eight headings the buttons can express. A bot walking a route at 20
+// degrees off its gaze alternates between two of them tick to tick, which
+// is what a player does.
+void press_toward(InputCommand& command, const glm::vec2& direction, float yaw) {
+    const glm::vec2 forward{std::sin(yaw), -std::cos(yaw)};  // (x, z), as wish_direction()
+    const glm::vec2 right{std::cos(yaw), std::sin(yaw)};
+    const float ahead = glm::dot(direction, forward);
+    const float sideways = glm::dot(direction, right);
+    constexpr float kSector = 0.3827f;
+    set_button(command, Button::Forward, ahead > kSector);
+    set_button(command, Button::Back, ahead < -kSector);
+    set_button(command, Button::Right, sideways > kSector);
+    set_button(command, Button::Left, sideways < -kSector);
+}
+
 }  // namespace
 
 std::optional<std::size_t> nearest_enemy(const glm::vec3& from, Team team,
@@ -142,6 +166,14 @@ InputCommand decide(BotState& state, const BotSenses& senses, const BotConfig& c
         senses.has_target ? glm::length(senses.target_position - senses.position) : 0.0f;
     const bool engaging = senses.has_target && distance <= config.sight_range;
 
+    // A route with nothing to shoot at is walked facing where it goes. The
+    // timer is topped up so the idle heading change below never fires over
+    // it: a bot does not glance at a random wall mid-route.
+    if (!engaging && senses.has_waypoint) {
+        state.wander_yaw = yaw_towards(senses.position, senses.waypoint);
+        state.wander_timer = config.wander_seconds;
+    }
+
     // --- reaction ----------------------------------------------------------
     // A target has to be seen for a while before the bot does anything about
     // it. Held rather than reset while a known target is merely occluded, so
@@ -214,8 +246,43 @@ InputCommand decide(BotState& state, const BotSenses& senses, const BotConfig& c
         state.strafe_sign = unit_random(seed, 0x51ed270bu) < 0.5f ? -1.0f : 1.0f;
     }
 
-    if (senses.has_target) {
-        // Circle-strafe, closing or backing off to hold a working range.
+    // Holding a working range on a visible target is the fight itself, and
+    // the route has no say in it. The route is for everything else: getting
+    // to an enemy it cannot see, closing on one it can but is too far from,
+    // and having somewhere to be when there is no enemy at all.
+    const bool fighting =
+        senses.has_target && senses.target_visible && distance <= config.engage_range;
+    const glm::vec2 to_waypoint{senses.waypoint.x - senses.position.x,
+                                senses.waypoint.z - senses.position.z};
+    const bool following = senses.has_waypoint && glm::dot(to_waypoint, to_waypoint) > 1e-6f;
+    if (fighting) {
+        // Circle-strafe, backing off to hold a working range.
+        set_button(command, state.strafe_sign > 0.0f ? Button::Right : Button::Left, true);
+        if (distance < config.preferred_range) {
+            set_button(command, Button::Back, true);
+        }
+        if (senses.on_ground && unit_random(seed, 0x9e3779b9u) < config.jump_chance) {
+            set_button(command, Button::Jump, true);
+        }
+    } else if (following) {
+        const glm::vec2 direction = glm::normalize(to_waypoint);
+        if (senses.has_target) {
+            // Looking at (or for) the enemy while the feet follow the route.
+            press_toward(command, direction, state.aim_yaw);
+            // Sprint only works pushing forward, and a route leg that runs
+            // mostly away from the gaze is walked rather than fumbled.
+            const glm::vec2 forward{std::sin(state.aim_yaw), -std::cos(state.aim_yaw)};
+            set_button(command, Button::Sprint, glm::dot(direction, forward) > 0.7f);
+            if (senses.on_ground && unit_random(seed, 0x9e3779b9u) < config.jump_chance) {
+                set_button(command, Button::Jump, true);
+            }
+        } else {
+            // Nothing to face: the gaze was already turned down the route.
+            set_button(command, Button::Forward, true);
+        }
+    } else if (senses.has_target) {
+        // No route -- off the grid, or none exists -- so the pursuit this
+        // shipped with: strafe, close, hold.
         set_button(command, state.strafe_sign > 0.0f ? Button::Right : Button::Left, true);
         if (distance > config.engage_range) {
             set_button(command, Button::Forward, true);
@@ -227,7 +294,7 @@ InputCommand decide(BotState& state, const BotSenses& senses, const BotConfig& c
             set_button(command, Button::Jump, true);
         }
     } else {
-        // Idle: pick a heading every so often and walk it.
+        // Idle with no route: pick a heading every so often and walk it.
         state.wander_timer -= dt;
         if (state.wander_timer <= 0.0f) {
             state.wander_timer = config.wander_seconds;
@@ -238,7 +305,11 @@ InputCommand decide(BotState& state, const BotSenses& senses, const BotConfig& c
 
     // Walls win over whatever the plan was: a bot grinding into a corner for
     // the rest of the match is the most obvious way this can look broken.
-    if (senses.forward_clearance < config.wall_avoid_distance) {
+    // Only when steering blind, though. A route already knows where the walls
+    // are, and backing away from one it is walking beside -- which the ray
+    // sees whenever the gaze crosses it -- would undo the route a tick at a
+    // time. A route that really is wrong is caught by navigate()'s stuck rule.
+    if (!following && senses.forward_clearance < config.wall_avoid_distance) {
         set_button(command, Button::Forward, false);
         set_button(command, Button::Back, true);
         state.wander_yaw = state.aim_yaw + (state.strafe_sign > 0.0f ? 1.2f : -1.2f);
@@ -328,6 +399,84 @@ InputCommand decide(BotState& state, const BotSenses& senses, const BotConfig& c
     }
 
     return command;
+}
+
+std::optional<glm::vec3> navigate(BotState& state, const NavGrid& grid, const glm::vec3& position,
+                                  const std::optional<glm::vec3>& chase, const BotConfig& config,
+                                  float dt, std::uint32_t seed) {
+    BotRoute& route = state.route;
+    if (grid.empty()) {
+        route = BotRoute{};
+        return std::nullopt;
+    }
+    route.repath_timer -= dt;
+    const auto done = [&] { return route.next >= route.points.size(); };
+    // Planning leaves the stuck clock alone: a chase replans every half
+    // second, and a clock that restarted with each plan would never reach
+    // the limit. Only progress resets it.
+    const auto plan = [&](const glm::vec3& goal, bool roaming) {
+        route.points = find_path(grid, position, goal);
+        route.next = 0;
+        route.goal = goal;
+        route.roaming = roaming;
+        route.repath_timer = config.route_repath_seconds;
+    };
+
+    if (chase) {
+        // On the timer, when the route was a roam, or when the target has
+        // moved well away from where this route was going. Not on every tick
+        // the target moves: a sprinting target moves a cell a tick, and a
+        // route to where it was a moment ago still rounds the same corner.
+        const bool stale = route.roaming || route.repath_timer <= 0.0f ||
+                           horizontal_distance(*chase, route.goal) > 3.0f;
+        if (stale) {
+            plan(*chase, /*roaming=*/false);
+        }
+    } else if (!route.roaming || done()) {
+        // Nowhere to be. Somewhere reachable, and a real walk away; a few
+        // rolls, and the last one stands if none is far enough -- a small
+        // map's longest walk is still a walk.
+        glm::vec3 goal = position;
+        for (std::uint32_t attempt = 0; attempt < 8; ++attempt) {
+            const auto candidate =
+                random_walkable_point(grid, hash_combine(seed, 0x6a09e667u + attempt), position);
+            if (!candidate) {
+                break;
+            }
+            goal = *candidate;
+            if (horizontal_distance(goal, position) >= config.route_roam_min_distance) {
+                break;
+            }
+        }
+        plan(goal, /*roaming=*/true);
+    }
+
+    // Waypoints reached fall away. Several can go at once: a bot pushed
+    // sideways by a fight may find itself past the next two corners.
+    while (!done() && horizontal_distance(position, route.points[route.next]) <=
+                          config.route_waypoint_radius) {
+        ++route.next;
+    }
+    if (done()) {
+        return std::nullopt;
+    }
+
+    // Stuck: somewhere to go and no progress toward it. The route is dropped
+    // outright. A chase replans at once next tick, a roam picks somewhere
+    // else, and either beats leaning on the same lip for the rest of the
+    // match.
+    if (horizontal_distance(position, route.progress_anchor) >= config.route_stuck_distance) {
+        route.progress_anchor = position;
+        route.stuck_timer = 0.0f;
+    } else {
+        route.stuck_timer += dt;
+        if (route.stuck_timer >= config.route_stuck_seconds) {
+            route = BotRoute{};
+            route.progress_anchor = position;
+            return std::nullopt;
+        }
+    }
+    return route.points[route.next];
 }
 
 }  // namespace game

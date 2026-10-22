@@ -27,6 +27,7 @@
 #include "game/shared/player_movement.h"
 #include "game/shared/protocol.h"
 #include "game/shared/weapon.h"
+#include "tests/game/boxes.h"
 #include "tests/server/fake_transport.h"
 #include "tests/server/temp_dir.h"
 
@@ -163,6 +164,10 @@ struct Harness {
                      std::vector<glm::vec3> spawns = default_spawns())
         : game(flat_floor(floor_half_extent), std::move(spawns), std::string{kMapName},
                test_arsenal()) {}
+
+    // A map with something in it besides a floor (tests/game/boxes.h).
+    Harness(test::BoxMeshes meshes, std::vector<glm::vec3> spawns)
+        : game(std::move(meshes), std::move(spawns), std::string{kMapName}, test_arsenal()) {}
 
     // Delivers everything the transport has queued, exactly as the real run
     // loop in game/server/main.cpp does.
@@ -1113,6 +1118,49 @@ TEST_CASE("bots play the match and are never sent anything", "[server]") {
     REQUIRE_FALSE(shots.empty());
     CHECK(std::any_of(shots.begin(), shots.end(),
                       [&](const game::FireEventMsg& shot) { return shot.shooter != *human_id; }));
+}
+
+TEST_CASE("a bot finds its way round a wall to an enemy it cannot see", "[server][route]") {
+    // A 60 m wall between a human and a bot, 16 m apart. Walking at the human
+    // means walking into it; the way round is a detour past one end that only
+    // a route knows about. Before M58 a bot here strafed along the wall on
+    // whichever side its random flips took it, and found the end -- if it
+    // found it -- by accident.
+    test::BoxMeshes meshes = test::floor(45.0f);
+    meshes.push_back(test::box({0.0f, 2.0f, 0.0f}, {1.0f, 4.0f, 60.0f}));  // z in [-30, 30]
+    Harness h{std::move(meshes), {{-8.0f, 1.0f, 0.0f}, {8.0f, 1.0f, 0.0f}}};
+    // Deadly: no reaction delay and no aim error, so the first sight of the
+    // human is a shot, and the shot is the proof of arrival.
+    h.game.set_bot_config(game::bot_config_for(game::BotSkill::Deadly));
+
+    const std::uint32_t human = 9;
+    const auto human_id = h.join(human, "human");  // first in: team A, spawn 0
+    REQUIRE(human_id);
+    REQUIRE(h.game.add_bot("bot1"));  // team B, and the spawn furthest from the human
+
+    h.tick(60 * 15);
+
+    // It got there: the bot fired at the human...
+    const auto shots = decode_to(h.net.sent, human, MsgType::FireEvent, game::read_fire_event);
+    CHECK(std::any_of(shots.begin(), shots.end(),
+                      [&](const game::FireEventMsg& shot) { return shot.shooter != *human_id; }));
+    // ...and it went round, not through: at some point it was past the end of
+    // the wall, which is nowhere the straight line between them goes.
+    const auto snapshots = decode_to(h.net.sent, human, MsgType::Snapshot, game::read_snapshot);
+    bool rounded_the_end = false;
+    bool ever_inside_the_wall = false;
+    for (const game::Snapshot& snapshot : snapshots) {
+        for (const game::SnapshotPlayer& player : snapshot.players) {
+            if (player.player_id == *human_id) {
+                continue;
+            }
+            rounded_the_end = rounded_the_end || std::abs(player.position.z) > 29.5f;
+            ever_inside_the_wall = ever_inside_the_wall || (std::abs(player.position.x) < 0.5f &&
+                                                            std::abs(player.position.z) < 30.0f);
+        }
+    }
+    CHECK(rounded_the_end);
+    CHECK_FALSE(ever_inside_the_wall);
 }
 
 TEST_CASE("career stats record the humans and never the bots", "[server]") {

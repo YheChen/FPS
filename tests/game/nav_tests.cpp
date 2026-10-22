@@ -1,5 +1,6 @@
 #include "game/shared/nav.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <optional>

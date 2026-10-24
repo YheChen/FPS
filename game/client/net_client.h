@@ -92,6 +92,19 @@ public:
     // Consumes the newest authoritative self state (nullopt if none arrived
     // since the last call).
     std::optional<SelfAck> take_self_ack();
+    // The newest WeaponStatus since the last call, as an EDGE: the server
+    // sends one only when something changed, and the predicted loadout (M57)
+    // reconciles against each one exactly once rather than re-snapping to a
+    // stale level every tick. The level accessors below stay for what is not
+    // predicted: the grenade count and the pin.
+    std::optional<WeaponStatusMsg> take_weapon_status();
+    // True once after a welcome and once after each own respawn: the two
+    // moments the server calls reset_loadout on its copy, so the predicted
+    // loadout (M57) resets in step. Consumed at the top of the frame, BEFORE
+    // the tick loop -- self_alive() flips inside poll(), and a reset that
+    // waited for the post-loop event drain would let the first ticks of a new
+    // life predict shots on the dead life's magazine.
+    bool take_loadout_reset();
 
     // --- combat state (server-authoritative) ---------------------------
     struct Scores {
@@ -187,6 +200,8 @@ private:
 
     std::map<std::uint8_t, Scores> scores_;
     float self_health_ = 100.0f;
+    std::optional<WeaponStatusMsg> pending_weapon_status_;
+    bool loadout_reset_pending_ = false;
     std::uint8_t self_ammo_ = 0;
     bool self_reloading_ = false;
     std::uint8_t self_slot_ = 0;

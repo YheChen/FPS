@@ -9,7 +9,8 @@
 // Weapon spread must be reproducible: the server is the only authority that
 // rolls it, but a recorded match has to replay bit-for-bit (Milestone 17), so
 // we never use std::rand or a wall-clock seed. Instead every roll is a pure
-// hash of (tick, player, shot index) - same inputs, same pellets, forever.
+// hash of (input sequence, player, pellet index) - same inputs, same pellets,
+// forever. See pellet_seed below for why it is the sequence and not the tick.
 namespace game {
 
 // Integer finalizer from MurmurHash3. Cheap, good avalanche.
@@ -24,6 +25,16 @@ constexpr std::uint32_t hash_u32(std::uint32_t x) {
 
 constexpr std::uint32_t hash_combine(std::uint32_t a, std::uint32_t b) {
     return hash_u32(a ^ (b + 0x9e3779b9u + (a << 6) + (a >> 2)));
+}
+
+// The seed for one pellet of one shot. One formula, used by the server that
+// rolls the shot and by the shooter's own client that predicts its tracers
+// (M57): both know the input sequence the shot is fired on and who fired it,
+// so the predicted cone is the authoritative one. It was the server tick
+// until then, which no client can know.
+constexpr std::uint32_t pellet_seed(std::uint32_t input_sequence, std::uint8_t shooter,
+                                    int pellet) {
+    return hash_combine(hash_combine(input_sequence, shooter), static_cast<std::uint32_t>(pellet));
 }
 
 // Uniform float in [0, 1) from a seed.

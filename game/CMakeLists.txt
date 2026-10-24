@@ -21,6 +21,8 @@ add_library(game_shared STATIC
     shared/protocol.h
     shared/replay.cpp
     shared/replay.h
+    shared/shot_prediction.cpp
+    shared/shot_prediction.h
     shared/weapon.cpp
     shared/weapon.h
 )

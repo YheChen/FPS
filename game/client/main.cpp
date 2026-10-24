@@ -64,6 +64,7 @@
 #include "game/shared/prediction.h"
 #include "game/shared/replay.h"
 #include "game/shared/rng.h"
+#include "game/shared/shot_prediction.h"
 #include "game/shared/weapon.h"
 
 namespace {
@@ -2019,6 +2020,23 @@ int main(int argc, char** argv) {
     };
     game::Loadout loadout;
     game::reset_loadout(loadout, arsenal);
+    // Shot prediction (M57). Online, `loadout` above is PREDICTED: the client
+    // runs the shared weapon tick on the commands it sends, exactly as it runs
+    // the shared movement, and the server's WeaponStatus is a reconciliation
+    // input rather than the thing the HUD draws. See shot_prediction.h.
+    game::ShotLedger shot_ledger;
+    // What each predicted weapon tick read, so a WeaponStatus can be caught
+    // up to the present by replaying the commands the server had not yet run.
+    game::WeaponInputHistory weapon_history;
+    // Off when the server's magazines do not match this build's weapon
+    // configs: every predicted count would then be wrong, so the shot is
+    // left to the echo and the magazine to the status.
+    bool shot_prediction_enabled = true;
+    // How long the LAST prediction of a burst waits for its echo before it is
+    // written off (every earlier one is settled by the echo after it).
+    // Generous, because a late echo discarded early is drawn TWICE -- once
+    // predicted, once as an unpredicted echo.
+    constexpr std::uint32_t kPredictedShotExpiryTicks = 240;
     // The slot is state rather than an edge (it rides every command), so
     // seeding it here is all --weapon needs to work in BOTH offline and
     // online runs. There is no other way to put a chosen gun in front of an
@@ -2254,7 +2272,13 @@ int main(int argc, char** argv) {
 
     float view_yaw = 0.0f;
     float view_pitch = 0.0f;
-    std::uint32_t input_sequence = 0;
+    // The next command's sequence. Starts at 1 because the server's
+    // last_processed_input starts at 0 and it only accepts sequences above
+    // it: a first command numbered 0 was silently dropped, so the movement
+    // predicted for it never happened and a shot predicted on it was fired
+    // by the server a command or two later instead (M57 measured exactly
+    // that on the first shot of every session).
+    std::uint32_t input_sequence = 1;
 
     ViewmodelState viewmodel;
     // The flash owed to this frame's own shots. Deferred rather than emitted
@@ -2379,9 +2403,7 @@ int main(int argc, char** argv) {
             // the entire point of having scoped.
             const float aim_sensitivity =
                 settings.sensitivity *
-                game::ads_lerp(
-                    arsenal.at(online ? net->self_weapon_slot() : loadout.slot).ads_fov_scale,
-                    loadout.ads_fraction);
+                game::ads_lerp(arsenal.at(loadout.slot).ads_fov_scale, loadout.ads_fraction);
             view_yaw += input.mouse_dx() * aim_sensitivity;
             view_pitch -= input.mouse_dy() * aim_sensitivity;
             view_pitch = std::clamp(view_pitch, -eng::Camera::kMaxPitchRadians,
@@ -2396,6 +2418,44 @@ int main(int argc, char** argv) {
             net->poll();
             if (net->self_alive()) {
                 kill_cam_elapsed = 0.0f;
+            }
+
+            // --- shot prediction bookkeeping (M57) ----------------------
+            // Before the tick loop, so the first tick of a new life predicts
+            // on a fresh magazine rather than the dead life's.
+            if (net->take_loadout_reset()) {
+                // Welcome or respawn: a fresh loadout on the server, and the
+                // shots predicted in the previous life answer to nothing.
+                // The input history is NOT cleared: the commands sent since
+                // the server respawned us -- while this side still thought
+                // it was dead -- are ones the server is running, and the
+                // respawn's own WeaponStatus (sent with it) says exactly
+                // which commands its fresh loadout already includes.
+                game::reset_loadout(loadout, arsenal);
+                shot_ledger.clear();
+            }
+            if (const auto status = net->take_weapon_status()) {
+                const std::uint8_t slot = arsenal.clamp_slot(status->slot);
+                if (shot_prediction_enabled && status->magazine != 0 &&
+                    status->magazine != arsenal.at(slot).magazine_size) {
+                    eng::log::warn(
+                        "Server magazine for slot {} is {}, this build's is {}: shots will not "
+                        "be predicted (weapon configs differ)",
+                        slot, status->magazine, arsenal.at(slot).magazine_size);
+                    shot_prediction_enabled = false;
+                }
+                weapon_history.acknowledge(status->input_sequence);
+                const int ammo_before = loadout.weapons[loadout.slot].ammo;
+                const std::size_t replayed =
+                    game::reconcile_loadout(loadout, arsenal, *status, weapon_history);
+                eng::log::debug(
+                    "weapon: status at seq {} (slot {} ammo {}), replayed {}: ammo {} -> {}",
+                    status->input_sequence, status->slot, status->ammo, replayed, ammo_before,
+                    loadout.weapons[loadout.slot].ammo);
+            }
+            if (const std::size_t expired =
+                    shot_ledger.expire(client_tick, kPredictedShotExpiryTicks)) {
+                eng::log::debug("shot: {} prediction(s) expired with no echo", expired);
             }
             // The server rotated between matches (M51): rebuild the world
             // and everything standing in it. This runs BEFORE the map check
@@ -2541,6 +2601,17 @@ int main(int argc, char** argv) {
             const bool auto_fire_now = args.auto_fire && client_tick % 2 == 0;
 
             if (online) {
+                // Nothing is simulated until the server has said welcome.
+                // Before it there is nobody to send a command to (send_input
+                // drops it), so a command made here would only spend a
+                // sequence number: the first one the server then sees is
+                // already that far ahead of the 0 it expects, and a handshake
+                // longer than kMaxInputAhead ticks got EVERY input refused
+                // forever. It would also predict shots and movement for a
+                // player who does not exist yet.
+                if (net->state() != game::NetClient::State::InGame) {
+                    continue;
+                }
                 // Predict locally with the shared movement code; the server
                 // corrects us via reconcile() below. While dead, inputs keep
                 // flowing (so acks stay in sync) but nothing is predicted.
@@ -2548,6 +2619,13 @@ int main(int argc, char** argv) {
                     make_command(input, view_yaw, view_pitch, input_sequence++, desired_slot);
                 if (!window->relative_mouse() && !args.auto_fire) {
                     game::set_button(command, game::Button::Fire, false);  // menu clicks
+                }
+                // Right-clicks in a menu are not aiming either. Cleared in the
+                // command rather than ignored locally, because the server
+                // reads the command: a client that ignored the bit while the
+                // server honoured it would predict hip fire for a scoped shot.
+                if (!window->relative_mouse()) {
+                    game::set_button(command, game::Button::Aim, false);
                 }
                 // Typing is not playing: "reload in 3" must not reload, walk
                 // forward and fire. The view angles are already frozen above;
@@ -2584,25 +2662,132 @@ int main(int argc, char** argv) {
                     remote_render_tick > 0.0 ? static_cast<std::uint32_t>(remote_render_tick) : 0u);
                 player = prediction->state();
                 previous_player = prediction->previous_state();
-                // The sights are the one part of the weapon an online client
-                // still has to run for itself, and the `continue` below is
-                // why: it skips the whole weapon tick, because the server
-                // owns the magazine, the slot and the reload and reports them
-                // in WeaponStatus. ads_fraction is not like those. It drives
-                // the FOV, the viewmodel and the crosshair -- pictures that
-                // must not lag the button by a round trip -- so it is
-                // advanced here from the same shared rule and the same Aim
-                // bit the server is about to apply to its own copy.
+
+                // --- predicted weapon tick (M57) ---------------------------
+                // The same shared update_loadout the server is about to run
+                // on this same command, run here first. Until M57 the online
+                // branch skipped it entirely and every piece of your own
+                // shot's feedback -- tracer, bang, kick, flash, the HUD's
+                // ammo -- waited one round trip for the server's echo. M49d
+                // had already pulled ONE field out of that tick (ads_fraction)
+                // for exactly that reason; this pulls out the rest.
                 //
-                // Missing this is what made aiming do nothing online while
-                // working perfectly in offline practice: everything below
-                // this line, update_loadout included, is offline-only.
-                const bool aim_held = game::wants_ads(command, player.sprinting) &&
-                                      (window->relative_mouse() || args.aim);
-                loadout.ads_fraction =
-                    game::advance_ads(loadout.ads_fraction, arsenal.at(net->self_weapon_slot()),
-                                      aim_held, game::kTickSeconds);
-                continue;  // offline gameplay (targets/weapon) stays offline
+                // Gated the way the server gates it (server_game.cpp: dead
+                // players and an ended match skip the tick), so the two state
+                // machines advance in lockstep. Fire and Reload are taken from
+                // the COMMAND, not from the keyboard: the command is what the
+                // server will read, and the offline path's edge-triggered
+                // reload is a different input than the level the server sees.
+                const bool aim_held = game::wants_ads(command, player.sprinting);
+                // Recorded whether or not this side ticks it below. Whether
+                // the SERVER ticks it is decided there, a round trip away:
+                // for the commands sent between it respawning us and us
+                // hearing about it, it does and we did not, and a replay
+                // that skipped them put every predicted shot of the new life
+                // four ticks behind the real ones (M57 measured exactly
+                // that). Which recorded inputs a status already includes is
+                // the status's to say, by its sequence.
+                const game::WeaponInput weapon_input{
+                    command.sequence, command.weapon_slot,
+                    shot_prediction_enabled && game::has_button(command, game::Button::Fire),
+                    game::has_button(command, game::Button::Reload), aim_held};
+                weapon_history.record(weapon_input);
+                const bool tick_weapon =
+                    net->self_alive() && net->match_phase() == game::MatchPhase::Playing;
+                if (!tick_weapon) {
+                    // Frozen, as on the server -- except the sights, which are
+                    // a picture rather than a rule and must still settle.
+                    loadout.ads_fraction =
+                        game::advance_ads(loadout.ads_fraction, arsenal.at(loadout.slot), aim_held,
+                                          game::kTickSeconds);
+                    continue;
+                }
+                const game::WeaponTickResult shot = game::update_loadout(
+                    loadout, arsenal, weapon_input.weapon_slot, weapon_input.fire,
+                    weapon_input.reload, game::kTickSeconds, weapon_input.aim);
+                // Two sounds online play never had: both come out of the tick
+                // result, which the online client never used to run.
+                if (shot.reload_started) {
+                    sound("reload.wav");
+                }
+                if (shot.dry_fired) {
+                    sound("dry.wav", 0.7f);
+                }
+                if (shot.fired) {
+                    const game::WeaponConfig& weapon_config = arsenal.at(loadout.slot);
+                    sound(fire_sound_for(loadout.slot), 0.9f);
+                    fire_viewmodel(viewmodel, weapon_config);
+                    muzzle_flash_armed = true;
+                    muzzle_flash_seed = input_sequence;
+                    shot_ledger.predict({command.sequence, client_tick, loadout.slot});
+                    eng::log::debug("shot: predicted seq {} on tick {} (slot {}, ammo left {})",
+                                    command.sequence, client_tick, loadout.slot,
+                                    loadout.weapons[loadout.slot].ammo);
+
+                    // Where the tracer goes, from a LOCAL hitscan. The world
+                    // is the same geometry the server tests. Remote players
+                    // are tested where this client is DRAWING them -- their
+                    // interpolated pose at remote_render_tick -- which is the
+                    // same tick the client reports as view_tick and the
+                    // server rewinds to for lag compensation, so both sides
+                    // test against approximately the same bodies.
+                    //
+                    // The spread is the server's own: pellet_seed hashes the
+                    // sequence of this very command and our id, both of which
+                    // the server uses for the authoritative shot, so the
+                    // predicted pellets leave in the directions the real ones
+                    // do. Where they END can still differ, because the eye,
+                    // the sights and the remote bodies here are predictions.
+                    //
+                    // A predicted hit on a player ends the tracer at them and
+                    // nothing more: no blood, no hitmarker, no hit sound.
+                    // Those stay server-confirmed. A predicted hit the server
+                    // then denies would teach the player that the game lies,
+                    // which is worse feedback than a one-round-trip delay on
+                    // the confirm.
+                    const glm::vec3 eye =
+                        player.position + glm::vec3{0.0f, game::eye_height_for(player), 0.0f};
+                    const glm::vec3 aim = game::view_direction(command.yaw, command.pitch);
+                    const float spread = glm::radians(
+                        game::effective_spread_degrees(weapon_config, loadout.ads_fraction));
+                    const auto& capsule = controller->config();
+                    for (int pellet = 0; pellet < weapon_config.pellets; ++pellet) {
+                        const std::uint32_t seed =
+                            game::pellet_seed(command.sequence, net->my_id(), pellet);
+                        const glm::vec3 dir = game::spread_direction(aim, spread, seed);
+                        float hit_t = weapon_config.range;
+                        const auto wall = world.raycast(eye, dir, weapon_config.range);
+                        if (wall) {
+                            hit_t = wall->distance;
+                        }
+                        bool hit_player = false;
+                        for (const auto& [id, remote] : net->players()) {
+                            if (id == net->my_id() || net->same_team(id)) {
+                                continue;  // teammates do not stop bullets (M52)
+                            }
+                            const auto pose = remote.history.sample(remote_render_tick);
+                            if (pose && (pose->flags & game::kFlagAlive) == 0) {
+                                continue;
+                            }
+                            const glm::vec3 feet = pose ? pose->position : remote.position;
+                            const bool crouched =
+                                pose ? (pose->flags & game::kFlagCrouching) != 0 : remote.crouching;
+                            const float height = crouched ? capsule.crouch_height : capsule.height;
+                            const auto t =
+                                game::ray_vertical_capsule(eye, dir, feet, capsule.radius, height);
+                            if (t && *t < hit_t) {
+                                hit_t = *t;
+                                hit_player = true;
+                            }
+                        }
+                        tracers.push_back({eye + dir * 0.4f - glm::vec3{0.0f, 0.06f, 0.0f},
+                                           eye + dir * hit_t, 0.08f});
+                        if (!hit_player && wall) {
+                            emit_impact(particles, eye + dir * hit_t, wall->normal, seed);
+                        }
+                    }
+                }
+                continue;  // offline gameplay (targets) stays offline
             }
 
             game::InputCommand command =
@@ -2772,6 +2957,32 @@ int main(int argc, char** argv) {
                 bool any_hit = false;
                 std::uint32_t ray_index = 0;
                 const bool own_shot = fire.shooter == net->my_id();
+                // M57: if this is the echo of a shot we predicted, its tracer,
+                // sparks, bang, kick and flash are already on screen from the
+                // tick of the trigger. What the echo still carries that the
+                // prediction could not is the server's verdict on who was
+                // HIT -- blood and the hit confirm below stay driven by it.
+                // An echo with nothing predicted (the server fired a shot we
+                // did not expect) is rendered in full, as it always was.
+                bool predicted = false;
+                if (own_shot) {
+                    const game::ShotLedger::Confirmation confirmation =
+                        shot_ledger.confirm(fire.input_sequence);
+                    predicted = confirmation.shot.has_value();
+                    if (predicted) {
+                        eng::log::debug(
+                            "shot: echo seq {} confirmed prediction seq {} after {} "
+                            "ticks ({} refused, {} pending)",
+                            fire.input_sequence, confirmation.shot->sequence,
+                            client_tick - confirmation.shot->tick, confirmation.refused,
+                            shot_ledger.pending());
+                    } else {
+                        eng::log::debug(
+                            "shot: echo seq {} matched no prediction ({} refused, {} "
+                            "pending): drawn in full",
+                            fire.input_sequence, confirmation.refused, shot_ledger.pending());
+                    }
+                }
                 // The only place a snapshot ever reveals what someone is
                 // holding, so it is the only place the third-person model can
                 // learn it.
@@ -2797,7 +3008,10 @@ int main(int argc, char** argv) {
                     }
                 }
                 for (const game::FireRay& ray : fire.rays) {
-                    tracers.push_back({fire.from + glm::vec3{0.0f, -0.06f, 0.0f}, ray.to, 0.08f});
+                    if (!predicted) {
+                        tracers.push_back(
+                            {fire.from + glm::vec3{0.0f, -0.06f, 0.0f}, ray.to, 0.08f});
+                    }
                     any_hit = any_hit || ray.hit_player != game::kNoPlayer;
 
                     const glm::vec3 direction = ray.to - fire.from;
@@ -2808,8 +3022,10 @@ int main(int argc, char** argv) {
                             game::hash_combine(fire.shooter * 2654435761u + ray_index,
                                                static_cast<std::uint32_t>(client_tick));
                         if (ray.hit_player != game::kNoPlayer) {
+                            // Server-confirmed, so drawn even for a predicted
+                            // shot: this is the half the prediction withheld.
                             emit_blood(particles, ray.to, -unit, seed);
-                        } else {
+                        } else if (!predicted) {
                             // The server sends only the endpoint, not the
                             // surface normal, so spray back along the ray.
                             emit_impact(particles, ray.to, -unit, seed);
@@ -2836,7 +3052,10 @@ int main(int argc, char** argv) {
                     }
                     ++ray_index;
                 }
-                if (own_shot) {
+                if (own_shot && predicted) {
+                    // Already heard, kicked and flashed on the tick of the
+                    // trigger; nothing to add.
+                } else if (own_shot) {
                     // Your own rifle is in your hands, not out in the arena.
                     // Being at zero distance would not save it either:
                     // fire.from is the SERVER's copy of your eye, which
@@ -2845,9 +3064,10 @@ int main(int argc, char** argv) {
                     // 20 cm error pans as hard as a 20 m one, and your own
                     // gun would wander between your ears as you moved.
                     sound(fire_sound_for(fire.slot), 0.9f);
-                    // Kick and flash the gun you are actually holding. The
-                    // event is the server's answer, so this lands one round
-                    // trip late -- the same latency the bang has always had.
+                    // Kick and flash the gun you are actually holding. Only
+                    // reached for a shot the client did NOT predict, so it
+                    // lands a round trip late; a predicted one did all of
+                    // this on the tick of the trigger (M57).
                     fire_viewmodel(viewmodel, arsenal.at(fire.slot));
                     muzzle_flash_armed = true;
                     muzzle_flash_seed =
@@ -3054,15 +3274,13 @@ int main(int argc, char** argv) {
         // Sights narrow the FOV. Driven by the SAME ads_fraction the server
         // uses for the cone, so the zoom and the accuracy it implies arrive
         // together rather than the picture leading the bullets.
-        // The slot is the SERVER's answer online, for the same reason the HUD
-        // and the viewmodel take it from there: loadout.slot is never advanced
-        // online (the server owns it), so reading it here would zoom by the
-        // rifle's scale no matter what was actually in your hands.
+        // The loadout is predicted online since M57, so its slot is the gun
+        // in your hands on this very tick -- the HUD, the viewmodel and the
+        // sights all read the same copy. (Before M57 the online slot had to
+        // come from the server, because the local one was never advanced.)
         camera.fov_y_degrees =
             settings.fov_degrees *
-            game::ads_lerp(
-                arsenal.at(online ? net->self_weapon_slot() : loadout.slot).ads_fov_scale,
-                loadout.ads_fraction);
+            game::ads_lerp(arsenal.at(loadout.slot).ads_fov_scale, loadout.ads_fraction);
 
         // The ears ride the camera rather than the player, so what you hear
         // always agrees with what you see -- in the killcam and the replay
@@ -3080,9 +3298,9 @@ int main(int argc, char** argv) {
         // the fly camera, the replay chase cam and the killcam are all looking
         // through someone else's head (or nobody's), and a gun pinned to the
         // corner of those frames would belong to no one.
-        // The raised weapon, and the same answer the HUD gives: online that is
-        // the server's, offline the local loadout's.
-        const std::uint8_t viewmodel_slot = online ? net->self_weapon_slot() : loadout.slot;
+        // The raised weapon, and the same answer the HUD gives: the loadout,
+        // which online is the predicted one (M57).
+        const std::uint8_t viewmodel_slot = loadout.slot;
         const game::WeaponConfig& viewmodel_config = arsenal.at(viewmodel_slot);
         // Looking through a scope means not looking at the weapon. The cut is
         // hidden by the zoom happening at the same time, and it only applies
@@ -3095,8 +3313,7 @@ int main(int argc, char** argv) {
         const WeaponModel* held = weapon_model_for(arsenal.clamp_slot(viewmodel_slot));
         glm::mat4 viewmodel_model{1.0f};
         if (viewmodel_visible) {
-            const bool reloading =
-                online ? net->self_reloading() : loadout.weapons[loadout.slot].reloading();
+            const bool reloading = loadout.weapons[loadout.slot].reloading();
             update_viewmodel(viewmodel, viewmodel_config, viewmodel_slot, reloading,
                              player.position, player.velocity, player.on_ground,
                              game::kMove.max_speed, camera.yaw, camera.pitch,
@@ -3231,8 +3448,7 @@ int main(int argc, char** argv) {
                 // with empty hands there would be the only unarmed player in
                 // the arena.
                 draw_items.push_back({model * hand * grip_offset, DrawKind::Weapon,
-                                      static_cast<int>(arsenal.clamp_slot(net->self_weapon_slot())),
-                                      glm::vec3{1.0f}, -1, 0});
+                                      static_cast<int>(loadout.slot), glm::vec3{1.0f}, -1, 0});
             }
         }
 
@@ -3659,7 +3875,15 @@ int main(int argc, char** argv) {
                 controller->set_velocity({0.0f, 0.0f, 0.0f});
                 view_yaw = 0.0f;
                 view_pitch = 0.0f;
-                input_sequence = 0;
+                input_sequence = 1;  // see its declaration
+                // A fresh magazine, as the server gives a joining player.
+                // Online play runs this loadout too since M57, so without
+                // this a practice session would start on whatever the last
+                // match left in it. The history and the ledger are numbered
+                // by the previous connection's sequences, which restart.
+                game::reset_loadout(loadout, arsenal);
+                weapon_history.clear();
+                shot_ledger.clear();
                 mode = next;
                 online = next == Mode::Online;
                 window->set_relative_mouse(true);
@@ -4072,9 +4296,9 @@ int main(int argc, char** argv) {
             const ImVec2 center{ImGui::GetIO().DisplaySize.x * 0.5f,
                                 ImGui::GetIO().DisplaySize.y * 0.5f};
 
-            // Which weapon is actually raised: the server's answer when
-            // online, our own loadout when practicing.
-            const std::uint8_t hud_slot = online ? net->self_weapon_slot() : loadout.slot;
+            // Which weapon is actually raised. Online this is the predicted
+            // loadout (M57), so a switch shows on the tick it is made.
+            const std::uint8_t hud_slot = loadout.slot;
             const game::WeaponConfig& hud_weapon = arsenal.at(hud_slot);
 
             // Crosshair gap tracks the weapon's spread and opens up while
@@ -4187,11 +4411,11 @@ int main(int argc, char** argv) {
                          ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                              ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBackground);
             ImGui::SetWindowFontScale(1.6f);
-            const bool hud_reloading =
-                online ? net->self_reloading() : loadout.weapons[loadout.slot].reloading();
-            const int hud_ammo = online ? net->self_ammo() : loadout.weapons[loadout.slot].ammo;
-            const int hud_mag = online && net->self_magazine() > 0 ? net->self_magazine()
-                                                                   : hud_weapon.magazine_size;
+            // Predicted online (M57): the count drops on the tick of the
+            // trigger, not one round trip later when the server agrees.
+            const bool hud_reloading = loadout.weapons[loadout.slot].reloading();
+            const int hud_ammo = loadout.weapons[loadout.slot].ammo;
+            const int hud_mag = hud_weapon.magazine_size;
             const int hud_kills = online ? [&] {
                 const auto it = net->scores().find(net->my_id());
                 return it != net->scores().end() ? static_cast<int>(it->second.kills) : 0;

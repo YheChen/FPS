@@ -128,6 +128,14 @@ private:
         // Combat (authoritative).
         Health health;
         Loadout loadout;
+        // The newest input sequence whose weapon tick `loadout` includes
+        // (M57). WeaponStatus carries it so the owner's client can resume
+        // its predicted tick from exactly this state and replay only the
+        // commands after it. Tracked rather than read off
+        // last_processed_input because a status can go out mid-tick -- the
+        // grenade button is handled before the weapon tick -- and then the
+        // loadout does not yet include the command being processed.
+        std::uint32_t weapon_sequence = 0;
         bool alive = true;
         float respawn_remaining = 0.0f;
         std::uint16_t kills = 0;

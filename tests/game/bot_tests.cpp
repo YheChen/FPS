@@ -13,8 +13,10 @@
 
 #include "game/shared/grenade.h"
 #include "game/shared/hitscan.h"
+#include "game/shared/nav.h"
 #include "game/shared/player_movement.h"
 #include "game/shared/weapon.h"
+#include "tests/game/boxes.h"
 
 namespace {
 
@@ -595,6 +597,253 @@ TEST_CASE("bots do not throw grenades at point blank", "[bot][grenade]") {
         ever_held = ever_held || game::has_button(command, game::Button::Grenade);
     }
     CHECK_FALSE(ever_held);
+}
+
+// --- routes (M58) ------------------------------------------------------------
+
+float horizontal(const glm::vec3& a, const glm::vec3& b) {
+    return glm::length(glm::vec2{a.x - b.x, a.z - b.z});
+}
+
+// A floor with a 16 m wall across the middle of it, x = 0, z in [-8, 8].
+game::NavGrid walled_grid() {
+    auto meshes = test::floor(15.0f);
+    meshes.push_back(test::box({0.0f, 2.0f, 0.0f}, {1.0f, 4.0f, 16.0f}));
+    return game::build_nav_grid(meshes);
+}
+
+TEST_CASE("a route with nothing to shoot at is walked facing where it goes", "[bot][route]") {
+    game::BotSenses senses;
+    senses.on_ground = true;
+    senses.has_waypoint = true;
+    senses.waypoint = {10.0f, 0.0f, 0.0f};  // due +X: a quarter turn from yaw 0
+    game::BotState state;
+    const game::BotConfig config;
+
+    const game::InputCommand command = run(state, senses, config, 120);
+    CHECK(std::abs(game::shortest_angle_delta(command.yaw, kPi * 0.5f)) < 0.05f);
+    CHECK(game::has_button(command, game::Button::Forward));
+    CHECK_FALSE(game::has_button(command, game::Button::Back));
+    CHECK_FALSE(game::has_button(command, game::Button::Left));
+    CHECK_FALSE(game::has_button(command, game::Button::Right));
+
+    // And keeps facing it. The idle heading change fires every 2.8 s with no
+    // route; over a route it must never fire, or the bot glances at a wall
+    // mid-leg and walks that way.
+    for (int i = 0; i < 600; ++i) {
+        const game::InputCommand later =
+            game::decide(state, senses, config, kDt, 1000u + static_cast<std::uint32_t>(i));
+        REQUIRE(std::abs(game::shortest_angle_delta(later.yaw, kPi * 0.5f)) < 0.05f);
+    }
+}
+
+TEST_CASE("a route while hunting an unseen enemy moves the feet, not the gaze", "[bot][route]") {
+    // Enemy straight ahead behind cover, 20 m off: not a fight, so the route
+    // decides where the feet go while the gaze stays on where the enemy is.
+    // Deadly, so no reaction delay muddies which way the bot is looking.
+    const game::BotConfig config = game::bot_config_for(game::BotSkill::Deadly);
+    game::BotSenses senses = looking_at_enemy(20.0f);
+    senses.target_visible = false;
+    senses.has_waypoint = true;
+
+    SECTION("a waypoint to the right is strafed to") {
+        senses.waypoint = {5.0f, 0.0f, 0.0f};
+        game::BotState state;
+        const game::InputCommand command = run(state, senses, config, 30);
+        CHECK(command.yaw == Approx(0.0f).margin(1e-4f));
+        CHECK(game::has_button(command, game::Button::Right));
+        CHECK_FALSE(game::has_button(command, game::Button::Left));
+        CHECK_FALSE(game::has_button(command, game::Button::Forward));
+        CHECK_FALSE(game::has_button(command, game::Button::Back));
+        CHECK_FALSE(game::has_button(command, game::Button::Sprint));
+        CHECK_FALSE(game::has_button(command, game::Button::Fire));
+    }
+    SECTION("a waypoint behind is backed toward") {
+        senses.waypoint = {0.0f, 0.0f, 5.0f};
+        game::BotState state;
+        const game::InputCommand command = run(state, senses, config, 30);
+        CHECK(command.yaw == Approx(0.0f).margin(1e-4f));
+        CHECK(game::has_button(command, game::Button::Back));
+        CHECK_FALSE(game::has_button(command, game::Button::Forward));
+        CHECK_FALSE(game::has_button(command, game::Button::Sprint));
+    }
+    SECTION("a waypoint ahead and off to one side is run at") {
+        senses.waypoint = {-3.0f, 0.0f, -5.0f};  // ~31 degrees left of the gaze
+        game::BotState state;
+        const game::InputCommand command = run(state, senses, config, 30);
+        CHECK(game::has_button(command, game::Button::Forward));
+        CHECK(game::has_button(command, game::Button::Left));
+        CHECK_FALSE(game::has_button(command, game::Button::Right));
+        CHECK(game::has_button(command, game::Button::Sprint));
+    }
+}
+
+TEST_CASE("a visible enemy in range is fought, whatever the route says", "[bot][route]") {
+    game::BotSenses senses = looking_at_enemy(15.0f);  // between preferred and engage range
+    senses.has_waypoint = true;
+    senses.waypoint = {0.0f, 0.0f, 10.0f};  // the route says: behind you
+    game::BotState state;
+    const game::InputCommand command =
+        run(state, senses, game::bot_config_for(game::BotSkill::Deadly), 60);
+    // Holding range: strafing, neither closing nor backing off, and certainly
+    // not walking away from a target it can see.
+    CHECK_FALSE(game::has_button(command, game::Button::Back));
+    CHECK_FALSE(game::has_button(command, game::Button::Forward));
+    CHECK((game::has_button(command, game::Button::Left) ||
+           game::has_button(command, game::Button::Right)));
+}
+
+TEST_CASE("a wall ahead does not override a route", "[bot][route]") {
+    game::BotSenses senses;
+    senses.on_ground = true;
+    senses.has_waypoint = true;
+    senses.waypoint = {0.0f, 0.0f, -6.0f};  // straight ahead
+    senses.forward_clearance = 1.0f;        // the ray sees a wall; the route knows better
+    game::BotState state;
+    const game::InputCommand command = run(state, senses, game::BotConfig{}, 10);
+    CHECK(game::has_button(command, game::Button::Forward));
+    CHECK_FALSE(game::has_button(command, game::Button::Back));
+
+    // Steering blind, the same wall still turns the bot away.
+    senses.has_waypoint = false;
+    game::BotState blind;
+    const game::InputCommand avoided = run(blind, senses, game::BotConfig{}, 10);
+    CHECK(game::has_button(avoided, game::Button::Back));
+    CHECK_FALSE(game::has_button(avoided, game::Button::Forward));
+}
+
+TEST_CASE("navigate routes a chase round a wall and keeps the route", "[bot][route]") {
+    const game::NavGrid grid = walled_grid();
+    game::BotState state;
+    const game::BotConfig config;
+    const glm::vec3 position{-5.0f, 0.0f, 0.0f};
+    const glm::vec3 enemy{5.0f, 0.0f, 0.0f};
+
+    const auto waypoint = game::navigate(state, grid, position, enemy, config, kDt, 1);
+    REQUIRE(waypoint);
+    // Not at the enemy -- that is through the wall -- but past one of its
+    // ends, still on this side of it.
+    CHECK(std::abs(waypoint->z) > 7.5f);
+    CHECK(waypoint->x < 0.0f);
+    CHECK_FALSE(state.route.roaming);
+    CHECK(state.route.points.size() >= 2);
+
+    // Next tick, the same answer from the same route: no search ran.
+    const std::vector<glm::vec3> points = state.route.points;
+    const auto again = game::navigate(state, grid, position, enemy, config, kDt, 2);
+    REQUIRE(again);
+    CHECK(*again == *waypoint);
+    CHECK(state.route.points == points);
+
+    // The enemy edges along: the route is kept until the timer runs out,
+    // then refreshed toward where the enemy is now.
+    const glm::vec3 edged{5.0f, 0.0f, 1.0f};
+    int refreshed_at = -1;
+    for (int tick = 0; tick < 60 && refreshed_at < 0; ++tick) {
+        game::navigate(state, grid, position, edged, config, kDt,
+                       10u + static_cast<std::uint32_t>(tick));
+        if (horizontal(state.route.goal, edged) < 0.01f) {
+            refreshed_at = tick;
+        }
+    }
+    REQUIRE(refreshed_at >= 0);
+    CHECK(refreshed_at > 20);   // not at once...
+    CHECK(refreshed_at <= 31);  // ...but within the half-second repath interval
+
+    // The enemy sprints off: that is a new chase, replanned at once.
+    const glm::vec3 far{5.0f, 0.0f, 12.0f};
+    game::navigate(state, grid, position, far, config, kDt, 99);
+    CHECK(horizontal(state.route.goal, far) < 0.01f);
+}
+
+TEST_CASE("navigate walks the route down and says when it has arrived", "[bot][route]") {
+    const game::NavGrid grid = game::build_nav_grid(test::floor(20.0f));
+    game::BotState state;
+    const game::BotConfig config;
+    const glm::vec3 enemy{8.0f, 0.0f, 0.0f};
+
+    const auto first = game::navigate(state, grid, {-8.0f, 0.0f, 0.0f}, enemy, config, kDt, 1);
+    REQUIRE(first);
+    CHECK(horizontal(*first, enemy) < grid.cell_size());  // open floor: one leg
+
+    // Standing on it: the route is done, and the bot is told so.
+    const auto arrived = game::navigate(state, grid, *first, enemy, config, kDt, 2);
+    CHECK_FALSE(arrived);
+    CHECK(state.route.next == state.route.points.size());
+}
+
+TEST_CASE("navigate roams somewhere reachable and far enough when idle", "[bot][route]") {
+    const game::NavGrid grid = game::build_nav_grid(test::floor(30.0f));
+    game::BotState state;
+    const game::BotConfig config;
+    const glm::vec3 position{0.0f, 0.0f, 0.0f};
+
+    const auto waypoint = game::navigate(state, grid, position, std::nullopt, config, kDt, 7);
+    REQUIRE(waypoint);
+    CHECK(state.route.roaming);
+    CHECK(horizontal(state.route.goal, position) >= config.route_roam_min_distance);
+    const auto goal_cell = grid.cell_of(state.route.goal);
+    REQUIRE(goal_cell);
+    CHECK(grid.walkable(*goal_cell));
+
+    // Arriving picks somewhere new, not the same place again.
+    const glm::vec3 first_goal = state.route.goal;
+    CHECK_FALSE(game::navigate(state, grid, first_goal, std::nullopt, config, kDt, 8));
+    const auto next = game::navigate(state, grid, first_goal, std::nullopt, config, kDt, 9);
+    REQUIRE(next);
+    CHECK(horizontal(state.route.goal, first_goal) >= config.route_roam_min_distance);
+
+    // An enemy appearing ends the roam at once.
+    const glm::vec3 enemy{-20.0f, 0.0f, 5.0f};
+    game::navigate(state, grid, first_goal, enemy, config, kDt, 10);
+    CHECK_FALSE(state.route.roaming);
+    CHECK(horizontal(state.route.goal, enemy) < 0.01f);
+}
+
+TEST_CASE("a bot that stops making progress drops its route", "[bot][route]") {
+    const game::NavGrid grid = walled_grid();
+    game::BotState state;
+    const game::BotConfig config;
+    const glm::vec3 position{-5.0f, 0.0f, 0.0f};
+    const glm::vec3 enemy{5.0f, 0.0f, 0.0f};
+
+    // Standing still with somewhere to go, for well under the limit: the
+    // route stands -- including across the half-second replans, each of
+    // which must NOT restart the clock.
+    const int limit = static_cast<int>(std::lround(config.route_stuck_seconds / kDt));
+    for (int tick = 0; tick < limit - 10; ++tick) {
+        REQUIRE(game::navigate(state, grid, position, enemy, config, kDt,
+                               static_cast<std::uint32_t>(tick)));
+    }
+    // ...and then, around the limit, it does not. Dropped outright, so a
+    // fresh one is planned next tick instead of leaning on the same obstacle.
+    int dropped_after = -1;
+    for (int tick = 0; tick < 20 && dropped_after < 0; ++tick) {
+        if (!game::navigate(state, grid, position, enemy, config, kDt,
+                            500u + static_cast<std::uint32_t>(tick))) {
+            dropped_after = tick;
+        }
+    }
+    CHECK(dropped_after >= 0);
+    CHECK(state.route.points.empty());
+
+    // Moving resets the clock: a bot walking its route is never "stuck".
+    game::BotState walking;
+    glm::vec3 at = position;
+    for (int tick = 0; tick < 2 * limit; ++tick) {
+        at.z += 0.05f;  // 3 m/s along the wall
+        REQUIRE(game::navigate(walking, grid, at, enemy, config, kDt,
+                               900u + static_cast<std::uint32_t>(tick)));
+    }
+}
+
+TEST_CASE("navigate on an empty grid has nothing to say", "[bot][route]") {
+    const game::NavGrid grid;
+    game::BotState state;
+    state.route.points.push_back({1.0f, 0.0f, 1.0f});  // stale, from some other map
+    CHECK_FALSE(game::navigate(state, grid, {0.0f, 0.0f, 0.0f}, glm::vec3{5.0f, 0.0f, 0.0f},
+                               game::BotConfig{}, kDt, 1));
+    CHECK(state.route.points.empty());
 }
 
 }  // namespace

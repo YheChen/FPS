@@ -13,6 +13,11 @@ struct CharacterConfig {
     float height = 1.8f;          // total standing height, meters
     float crouch_height = 1.15f;  // total crouched height, meters
     float max_slope_degrees = 50.0f;
+    // Largest ledge walked up (and stuck to on the way down) without a
+    // jump. Named here rather than buried in update() because the bots'
+    // navigation grid (game/shared/nav.h) has to agree with it: a cell it
+    // joins to its neighbour is one the controller can actually climb to.
+    float step_height = 0.4f;
 };
 
 // Kinematic FPS character on Jolt's CharacterVirtual (ADR 0004). The game

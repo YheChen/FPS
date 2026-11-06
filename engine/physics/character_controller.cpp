@@ -108,8 +108,8 @@ void CharacterController::update(PhysicsWorld& world, float dt, const glm::vec3&
     world.optimize();  // ensure broadphase is valid before queries
 
     JPH::CharacterVirtual::ExtendedUpdateSettings settings;
-    settings.mStickToFloorStepDown = JPH::Vec3(0.0f, -0.4f, 0.0f);
-    settings.mWalkStairsStepUp = JPH::Vec3(0.0f, 0.4f, 0.0f);
+    settings.mStickToFloorStepDown = JPH::Vec3(0.0f, -config_.step_height, 0.0f);
+    settings.mWalkStairsStepUp = JPH::Vec3(0.0f, config_.step_height, 0.0f);
 
     JPH::PhysicsSystem& system = world.impl().system;
     impl_->character->ExtendedUpdate(

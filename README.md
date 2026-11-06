@@ -342,7 +342,7 @@ game/             The FPS itself (~10.5k lines)
   server/         Authoritative ServerGame (a library, so it is testable),
                   signalling router, persistent stats store, main loop
 
-tests/            335 Catch2 test cases (~9.7k lines) + a shell test suite
+tests/            352 Catch2 test cases (~10.2k lines) + a shell test suite
                   for the deploy script's decision table
 tools/            Asset generators (maps, character, weapons, textures,
                   sounds, icon), browser smoke test, protocol probe,
@@ -423,7 +423,7 @@ test, is in [docs/build.md](docs/build.md); deployment is
 
 ## Testing
 
-**335 Catch2 test cases** in [`tests/`](tests), run by `ctest` on every push
+**352 Catch2 test cases** in [`tests/`](tests), run by `ctest` on every push
 and pull request. They cover the parts where a bug is invisible until someone
 plays: protocol round-trips and malformed-packet handling, the `ByteReader`
 poisoning discipline, prediction and reconciliation, the interpolation buffer,

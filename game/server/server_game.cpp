@@ -9,6 +9,7 @@
 #include "engine/core/log.h"
 #include "game/shared/hitscan.h"
 #include "game/shared/rng.h"
+#include "game/shared/shot_prediction.h"
 
 namespace game {
 
@@ -468,6 +469,7 @@ void ServerGame::tick(eng::IServerTransport& net) {
             const WeaponTickResult shot =
                 update_loadout(player.loadout, arsenal_, command.weapon_slot, fire_held, reload,
                                kTickSeconds, aim);
+            player.weapon_sequence = command.sequence;
             if (shot.fired) {
                 fire_hitscan(id, command, net);
             }
@@ -563,14 +565,10 @@ void ServerGame::send_weapon_status(const Player& player, eng::IServerTransport&
     if (player.is_bot) {
         return;
     }
-    const WeaponState& weapon = player.loadout.weapons[player.loadout.slot];
-    const WeaponConfig& config = arsenal_.at(player.loadout.slot);
-    net.send(player.peer,
-             encode(WeaponStatusMsg{
-                 static_cast<std::uint8_t>(weapon.ammo), weapon.reloading(), player.loadout.slot,
-                 static_cast<std::uint8_t>(config.magazine_size),
-                 player.loadout.switch_remaining_seconds > 0.0f, player.grenades, player.cooking}),
-             eng::NetChannel::Reliable, true);
+    WeaponStatusMsg status = describe_loadout(player.loadout, arsenal_, player.weapon_sequence);
+    status.grenades = player.grenades;
+    status.cooking = player.cooking;
+    net.send(player.peer, encode(status), eng::NetChannel::Reliable, true);
 }
 
 void ServerGame::set_stats_path(std::filesystem::path path) {
@@ -853,6 +851,7 @@ void ServerGame::fire_hitscan(std::uint8_t shooter_id, const InputCommand& comma
     FireEventMsg event;
     event.shooter = shooter_id;
     event.slot = shooter.loadout.slot;
+    event.input_sequence = command.sequence;
     event.from = eye;
 
     // Damage is accumulated per victim so a shotgun applies one combined hit
@@ -867,10 +866,19 @@ void ServerGame::fire_hitscan(std::uint8_t shooter_id, const InputCommand& comma
     const float spread =
         glm::radians(effective_spread_degrees(weapon, shooter.loadout.ads_fraction));
     for (int pellet = 0; pellet < weapon.pellets; ++pellet) {
-        // Deterministic per-pellet spread: a pure hash of tick, shooter and
-        // pellet index, so a recorded match replays identically (M17).
-        const std::uint32_t seed =
-            hash_combine(hash_combine(tick_, shooter_id), static_cast<std::uint32_t>(pellet));
+        // Deterministic per-pellet spread, from the input sequence rather
+        // than the tick since M57 (pellet_seed in rng.h). A recorded match
+        // still replays identically (M17) -- the recorder keeps every
+        // consumed command's sequence -- and the shooter's own client rolls
+        // the SAME cone for the tracers it predicts, so a shotgun's
+        // predicted pellets land where the server's blood does.
+        //
+        // What this gives away: a client can now compute its cone exactly.
+        // It could already estimate the tick it would be consumed on from
+        // the snapshots to within a tick or two, so a deterministic seed was
+        // never much of a secret; spread is a property of the weapon, not a
+        // defence against aim assistance.
+        const std::uint32_t seed = pellet_seed(command.sequence, shooter_id, pellet);
         const glm::vec3 dir = spread_direction(aim, spread, seed);
 
         // World geometry bounds each pellet.
@@ -1024,6 +1032,9 @@ void ServerGame::respawn_player(std::uint8_t player_id, eng::IServerTransport& n
     player.controller->set_velocity({0.0f, 0.0f, 0.0f});
     reset_health(player.health);
     reset_loadout(player.loadout, arsenal_);
+    // A fresh loadout has run no weapon tick at all, so it "includes" every
+    // command consumed so far and the client replays only the ones after.
+    player.weapon_sequence = player.last_processed_input;
     player.alive = true;
     broadcast_reliable(encode(PlayerRespawnedMsg{player_id, spawn}), net);
     send_weapon_status(player, net);

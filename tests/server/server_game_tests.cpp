@@ -26,6 +26,8 @@
 #include "game/shared/lag_comp.h"
 #include "game/shared/player_movement.h"
 #include "game/shared/protocol.h"
+#include "game/shared/rng.h"
+#include "game/shared/shot_prediction.h"
 #include "game/shared/weapon.h"
 #include "tests/server/fake_transport.h"
 #include "tests/server/temp_dir.h"
@@ -90,8 +92,9 @@ game::Arsenal test_arsenal() {
     // Slot 1. A single-pellet weapon cannot exercise the two rules that only
     // exist because of shotguns -- that the pellets of one shot are combined
     // into ONE damage event per victim, and that the per-pellet spread is a
-    // deterministic function of (tick, shooter, pellet) rather than of a
-    // running RNG that a replay could not reproduce.
+    // deterministic function of (input sequence, shooter, pellet) rather
+    // than of a running RNG that a replay -- or the shooter's own predicting
+    // client (M57) -- could not reproduce.
     //
     // Eight pellets of 20 is 160 against 100 health: a hit is a kill, which
     // is what makes "exactly one PlayerDied" a real assertion. The cone is
@@ -1837,4 +1840,211 @@ TEST_CASE("dying with the pin out drops it instead of detonating later",
     // holder died kills whoever won the fight, from nowhere they can see, and
     // reads as a bug however defensible the physics is.
     CHECK(decode_all(h.net.sent, MsgType::GrenadeExploded, game::read_grenade_exploded).empty());
+}
+
+// --- shot prediction (M57) ----------------------------------------------------
+//
+// The client predicts its own weapon tick, and keeping that honest needs two
+// facts from the server: which command a shot was fired on, and which command
+// a WeaponStatus is current to. These pin both down from the outside, plus the
+// pellet seed the two sides now share.
+
+namespace {
+
+game::WeaponInput weapon_input_of(std::uint32_t sequence, const game::InputCommand& command) {
+    return {sequence, command.weapon_slot, game::has_button(command, game::Button::Fire),
+            game::has_button(command, game::Button::Reload),
+            game::has_button(command, game::Button::Aim)};
+}
+
+// The client's reconcile, run on the server's own messages: resume from
+// `from`, replay what was sent after it up to `to`'s sequence, and say
+// whether that lands exactly on `to`.
+void require_replays_to(const game::WeaponStatusMsg& from, const game::WeaponStatusMsg& to,
+                        const std::map<std::uint32_t, game::WeaponInput>& sent) {
+    const game::Arsenal arsenal = test_arsenal();
+    game::WeaponInputHistory history;
+    for (auto it = sent.upper_bound(from.input_sequence);
+         it != sent.end() && it->first <= to.input_sequence; ++it) {
+        history.record(it->second);
+    }
+    game::Loadout loadout;
+    game::reset_loadout(loadout, arsenal);
+    game::reconcile_loadout(loadout, arsenal, from, history);
+    const game::WeaponStatusMsg replayed =
+        game::describe_loadout(loadout, arsenal, to.input_sequence);
+    INFO("from seq " << from.input_sequence << " to seq " << to.input_sequence << " replaying "
+                     << history.size());
+    REQUIRE(replayed.slot == to.slot);
+    REQUIRE(replayed.switch_remaining_seconds == to.switch_remaining_seconds);
+    for (std::size_t w = 0; w < game::kMaxWeapons; ++w) {
+        INFO("weapon " << w);
+        REQUIRE(replayed.weapons[w].ammo == to.weapons[w].ammo);
+        REQUIRE(replayed.weapons[w].cooldown_seconds == to.weapons[w].cooldown_seconds);
+        REQUIRE(replayed.weapons[w].reload_remaining_seconds ==
+                to.weapons[w].reload_remaining_seconds);
+        REQUIRE(replayed.weapons[w].trigger_was_held == to.weapons[w].trigger_was_held);
+    }
+}
+
+}  // namespace
+
+TEST_CASE("a shot names the input it was fired on, and so does its status",
+          "[server][shot_prediction]") {
+    Harness h;
+    REQUIRE(h.join(1, "shooter"));
+    h.tick(60);
+    h.drive(1, game::InputCommand{}, 5);
+    h.net.clear();
+
+    game::InputCommand fire;
+    game::set_button(fire, game::Button::Fire, true);
+    h.drive_tick(1, fire);
+    const std::uint32_t fired_on = h.sequence[1];
+    REQUIRE(fired_on == 6);
+
+    const auto shots = decode_to(h.net.sent, 1, MsgType::FireEvent, game::read_fire_event);
+    REQUIRE(shots.size() == 1);
+    CHECK(shots[0].input_sequence == fired_on);
+
+    const auto statuses = decode_to(h.net.sent, 1, MsgType::WeaponStatus, game::read_weapon_status);
+    REQUIRE(statuses.size() == 1);
+    CHECK(statuses[0].input_sequence == fired_on);
+    // The whole state machine, not the summary: the client resumes from it.
+    CHECK(statuses[0].weapons[0].ammo == 29);
+    CHECK(statuses[0].weapons[0].cooldown_seconds == test_arsenal().at(0).shot_interval_seconds());
+    CHECK(statuses[0].weapons[0].trigger_was_held);
+    CHECK(statuses[0].weapons[1].ammo == 8);  // the shotgun, untouched
+}
+
+TEST_CASE("the server's pellets go where the shooter's client predicted them",
+          "[server][shot_prediction]") {
+    Harness h;
+    const auto id = h.join(1, "shotgunner");
+    REQUIRE(id);
+    h.tick(60);
+
+    game::InputCommand raised;
+    raised.weapon_slot = 1;
+    raised.yaw = 0.3f;
+    raised.pitch = 0.05f;
+    h.drive(1, raised, 40);  // past the shotgun's 0.4 s raise
+    h.net.clear();
+    game::InputCommand fire = raised;
+    game::set_button(fire, game::Button::Fire, true);
+    h.drive_tick(1, fire);
+
+    const auto shots = decode_to(h.net.sent, 1, MsgType::FireEvent, game::read_fire_event);
+    REQUIRE(shots.size() == 1);
+    const game::FireEventMsg& shot = shots[0];
+    REQUIRE(shot.rays.size() == static_cast<std::size_t>(kShotgunPellets));
+
+    // Exactly what the client computes for its predicted tracers, from
+    // nothing but its own command and its own id.
+    const glm::vec3 aim = game::view_direction(fire.yaw, fire.pitch);
+    const float spread = glm::radians(game::effective_spread_degrees(test_arsenal().at(1), 0.0f));
+    for (int pellet = 0; pellet < kShotgunPellets; ++pellet) {
+        INFO("pellet " << pellet);
+        const glm::vec3 predicted = game::spread_direction(
+            aim, spread, game::pellet_seed(shot.input_sequence, *id, pellet));
+        const glm::vec3 actual =
+            glm::normalize(shot.rays[static_cast<std::size_t>(pellet)].to - shot.from);
+        CHECK(glm::length(predicted - actual) < 1e-4f);
+    }
+    // And they really are spread, or agreeing above would prove nothing.
+    CHECK(glm::length(glm::normalize(shot.rays[0].to - shot.from) -
+                      glm::normalize(shot.rays[1].to - shot.from)) > 1e-3f);
+}
+
+TEST_CASE("every WeaponStatus replays forward to the next one", "[server][shot_prediction]") {
+    // The contract the client's reconcile rests on, checked from the
+    // outside: take any status, run the commands after its sequence through
+    // the shared tick, and you arrive at the next status EXACTLY. A status
+    // that claimed a command its loadout did not include -- or left out one
+    // it did -- would have the client replay one tick too few or too many,
+    // and put its next predicted shot on the wrong command.
+    //
+    // The grenade is here on purpose. Its button is handled BEFORE the
+    // weapon tick, so the status it sends goes out with the loadout one
+    // command behind the input being processed. Pulling the pin while the
+    // rifle's cooldown is running makes that one tick visible.
+    Harness h;
+    REQUIRE(h.join(1, "player"));
+    h.tick(60);
+
+    std::map<std::uint32_t, game::WeaponInput> sent;
+    for (int t = 0; t < 360; ++t) {
+        game::InputCommand command;
+        command.weapon_slot = (t >= 150 && t < 260) ? 1 : 0;
+        game::set_button(command, game::Button::Fire, (t % 40) < 25);
+        game::set_button(command, game::Button::Reload, t == 100);
+        game::set_button(command, game::Button::Aim, t >= 20 && t < 90);
+        // Shots on 40, 46, 52, 58: the pin comes out three ticks into a
+        // cooldown, and the grenade is thrown on 70.
+        game::set_button(command, game::Button::Grenade, t >= 61 && t < 70);
+        h.drive_tick(1, command);
+        sent[h.sequence[1]] = weapon_input_of(h.sequence[1], command);
+    }
+    // Nobody died, or the stretch spent dead would be a different test.
+    REQUIRE(h.net.count(MsgType::PlayerDied) == 0);
+
+    const auto statuses = decode_to(h.net.sent, 1, MsgType::WeaponStatus, game::read_weapon_status);
+    REQUIRE(statuses.size() > 20);
+    for (std::size_t i = 0; i + 1 < statuses.size(); ++i) {
+        INFO("status " << i);
+        require_replays_to(statuses[i], statuses[i + 1], sent);
+    }
+}
+
+TEST_CASE("a respawn's status is current to the input it respawned on",
+          "[server][shot_prediction]") {
+    // A dead player's commands are consumed but never reach the weapon, so
+    // the fresh loadout includes every one of them. The victim here holds
+    // Fire the whole time it is dead, as players do: a status that claimed
+    // an older sequence would have the client replay those dead commands as
+    // shots.
+    Harness h;
+    const Duel duel = set_up_duel(h);
+    game::InputCommand mash;
+    game::set_button(mash, game::Button::Fire, true);
+    std::map<std::uint32_t, game::WeaponInput> sent;
+
+    const auto drive_both = [&](const game::InputCommand& shooter) {
+        h.net.queue_message(duel.shooter_peer,
+                            test::input_bytes(++h.sequence[duel.shooter_peer], shooter),
+                            eng::NetChannel::Sequenced);
+        const std::uint32_t seq = ++h.sequence[duel.victim_peer];
+        h.net.queue_message(duel.victim_peer, test::input_bytes(seq, mash),
+                            eng::NetChannel::Sequenced);
+        sent[seq] = weapon_input_of(seq, mash);
+        h.pump();
+        h.tick();
+    };
+
+    for (int i = 0; i < 120 && h.net.count(MsgType::PlayerDied) == 0; ++i) {
+        drive_both(duel.fire);
+    }
+    REQUIRE(h.net.count(MsgType::PlayerDied) > 0);
+    h.net.clear();
+
+    std::optional<std::uint32_t> respawned_on;
+    for (int i = 0; i < 400 && !respawned_on; ++i) {
+        drive_both(duel.hold_still);
+        if (h.net.count(MsgType::PlayerRespawned) > 0) {
+            respawned_on = h.sequence[duel.victim_peer];
+        }
+    }
+    REQUIRE(respawned_on);
+    // A few more, so the victim fires a shot from the fresh magazine.
+    for (int i = 0; i < 3; ++i) {
+        drive_both(duel.hold_still);
+    }
+
+    const auto statuses =
+        decode_to(h.net.sent, duel.victim_peer, MsgType::WeaponStatus, game::read_weapon_status);
+    REQUIRE(statuses.size() >= 2);
+    CHECK(statuses[0].input_sequence == *respawned_on);
+    CHECK(statuses[0].weapons[0].ammo == 30);
+    CHECK(statuses[1].weapons[0].ammo == 29);
+    require_replays_to(statuses[0], statuses[1], sent);
 }

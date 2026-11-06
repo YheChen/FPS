@@ -1047,3 +1047,57 @@ changing, and the HUD read `prediction error: 0.0000 m` afterwards: the
 client's new world agrees with the server's exactly.
 
 **Protocol 10.** Tests: 293 (+6).
+
+## M57 — your own shot, on the tick of the trigger ✅
+
+Online, the client never ran the weapon tick. It sent the Fire bit and waited
+for the server's `FireEvent` before drawing a tracer, playing the bang, kicking
+the gun, flashing the muzzle or taking a round off the HUD. At 150 ms each way
+every trigger pull showed nothing for a third of a second, then everything at
+once. Offline practice did all of it on the tick of the trigger, from the same
+shared `update_loadout` -- so the fix was to run that tick online too and
+reconcile it against the server, exactly as movement already was.
+
+**What is predicted:** the cosmetics of your own shot and the magazine, reload
+and raise timers the HUD and the viewmodel draw from. **What is not:** whether
+it hit. Blood, hitmarkers and damage numbers stay server-confirmed; a predicted
+hit the server then denies teaches you the game lies.
+
+**The first design paired echoes with predictions by order, and a review found
+the failure before it shipped:** one shot the two sides disagreed about -- a
+starved server re-running a command, a respawn with the trigger held -- and
+every later echo answered the wrong prediction, so shots went silent and then
+drew twice. Protocol 13 puts the input sequence on both directions instead:
+
+- `FireEvent.input_sequence` -- the command the server fired on. Pairing is a
+  lookup (`ShotLedger`, ±3 commands of slack for a starved server firing a
+  tick early). An echo that matches nothing is drawn in full.
+- `WeaponStatus` carries the whole weapon state machine plus the sequence it is
+  current to. The client snaps to it and replays its inputs since
+  (`reconcile_loadout`). The sequence is tracked on the server as
+  `weapon_sequence`, not read off `last_processed_input`, because the grenade
+  button sends a status before that tick's weapon update has run.
+- Pellets are seeded by `pellet_seed(sequence, shooter, pellet)` instead of the
+  server tick, so a predicted shotgun blast flies where the real one does.
+
+Two pre-existing bugs fell out of measuring it. The client numbered commands
+from 0 while the server only accepts sequences above its own 0, so the first
+command of every session was dropped. And it made and numbered commands
+*before* the welcome: a handshake longer than 64 ticks (about 200 ms of latency
+each way) put the first command it sent outside the server's input window, and
+the server then refused every input for the rest of the session.
+
+**Verified against a live server** at 150 ms each way, with every gun:
+
+```
+rifle    39/39 echoes paired exactly, 0 unpredicted, 0 magazine corrections
+smg      52/52            shotgun  6/6 through a reload    sniper 5/5
+knife    17/17            5% loss + 30 ms jitter: 38/38, 3 within the slack
+prediction -> echo: 19 ticks, the 317 ms your own shot no longer waits for
+```
+
+A capture 170 ms after the first trigger pull shows the new build at 28/30 with
+the muzzle flashing and the rifle kicked back; the old one is still at 30/30,
+gun at rest, identical to a frame where nobody fired.
+
+**Protocol 13.** Tests: 330 (+17).

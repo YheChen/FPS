@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -20,7 +21,7 @@
 // returning nullopt means "hostile or corrupt packet - drop it".
 namespace game {
 
-inline constexpr std::uint16_t kProtocolVersion = 12;
+inline constexpr std::uint16_t kProtocolVersion = 13;
 inline constexpr std::uint8_t kMaxPlayers = 8;
 inline constexpr std::size_t kMaxNameLength = 16;
 inline constexpr int kSnapshotDivisor = 3;  // 60 Hz ticks -> 20 Hz snapshots
@@ -299,6 +300,15 @@ struct FireRay {
 struct FireEventMsg {
     std::uint8_t shooter = 0;
     std::uint8_t slot = 0;  // weapon that fired, for per-weapon sound/FX
+    // The shooter's input sequence the server fired on (M57, protocol 13).
+    // The shooter's own client has already drawn this shot from its own
+    // prediction of that same command, and this is how it knows WHICH of
+    // its predictions the echo answers: pairing by order instead mis-pairs
+    // every echo after the first shot the two sides disagree about. It is
+    // also the pellet seed (with the shooter id), so the predicted spread is
+    // the authoritative one. Meaningless for a bot, and harmless: only the
+    // shooter's own client reads it.
+    std::uint32_t input_sequence = 0;
     glm::vec3 from{0.0f};
     std::vector<FireRay> rays;  // 1..kMaxPellets
 };
@@ -348,6 +358,15 @@ struct MatchStateMsg {
     std::uint16_t score_b = 0;
 };
 
+// One weapon's state machine exactly as the server holds it (M57): every
+// field update_weapon reads, so a client can resume the tick from it.
+struct WeaponSlotStatus {
+    std::uint8_t ammo = 0;
+    float cooldown_seconds = 0.0f;
+    float reload_remaining_seconds = 0.0f;
+    bool trigger_was_held = false;
+};
+
 // Sent only to the owning player when their ammo/reload state changes.
 struct WeaponStatusMsg {
     std::uint8_t ammo = 0;
@@ -360,6 +379,17 @@ struct WeaponStatusMsg {
     // addressed to the same single owner: what is in YOUR hands.
     std::uint8_t grenades = 0;
     bool cooking = false;
+    // --- reconciliation (M57, protocol 13) --------------------------------
+    // The client predicts its own weapon tick, so a status is no longer what
+    // the HUD draws: it is the server's loadout to resume from. Resuming
+    // needs to know WHEN it is from -- the newest input sequence whose
+    // weapon tick it includes -- so the client can replay only the commands
+    // the server had not yet run. And it needs the whole state machine, not
+    // the summary above: a client that knows the magazine but not the
+    // cooldown predicts its next shot on the wrong tick.
+    std::uint32_t input_sequence = 0;
+    float switch_remaining_seconds = 0.0f;
+    std::array<WeaponSlotStatus, kMaxWeapons> weapons{};
 };
 
 // Where the live grenades are. Sent at the snapshot rate, unreliably: a

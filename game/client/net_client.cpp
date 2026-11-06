@@ -100,6 +100,7 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
         case MessageType::ServerWelcome: {
             if (const auto welcome = read_server_welcome(reader)) {
                 my_id_ = welcome->player_id;
+                loadout_reset_pending_ = true;
                 latest_server_tick_ = welcome->server_tick;
                 server_map_ = welcome->map;
                 my_team_ = welcome->team;
@@ -264,6 +265,7 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
                     self_health_ = 100.0f;
                     kill_cam_.clear();
                     kill_cam_killer_ = kNoPlayer;
+                    loadout_reset_pending_ = true;
                 }
                 respawn_events_.push_back(*m);
             }
@@ -293,6 +295,7 @@ void NetClient::handle_message(const std::vector<std::uint8_t>& data) {
                 self_switching_ = m->switching;
                 self_grenades_ = m->grenades;
                 self_cooking_ = m->cooking;
+                pending_weapon_status_ = *m;
             }
             break;
         }
@@ -342,6 +345,14 @@ std::vector<PlayerDiedMsg> NetClient::take_death_events() {
 
 std::vector<PlayerRespawnedMsg> NetClient::take_respawn_events() {
     return std::exchange(respawn_events_, {});
+}
+
+bool NetClient::take_loadout_reset() {
+    return std::exchange(loadout_reset_pending_, false);
+}
+
+std::optional<WeaponStatusMsg> NetClient::take_weapon_status() {
+    return std::exchange(pending_weapon_status_, std::nullopt);
 }
 
 std::optional<SelfAck> NetClient::take_self_ack() {

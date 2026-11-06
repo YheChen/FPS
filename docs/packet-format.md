@@ -1,6 +1,6 @@
 # Packet format
 
-Status: **implemented** (protocol version 11, `game/shared/protocol.*`).
+Status: **implemented** (protocol version 13, `game/shared/protocol.*`).
 Update this document in the same commit as any protocol change.
 
 ## Encoding rules
@@ -31,13 +31,13 @@ Channel R = ENet reliable ordered (ch 0), U = unreliable sequenced (ch 1).
 | 5  | PlayerLeft      | S→C | R | on leave | 2 B | |
 | 6  | Input           | C→S | U | 60/s | 47 B | redundant window of 3 |
 | 7  | Snapshot        | S→C | U | 20/s | 10 + 34·players B | full state |
-| 8  | FireEvent       | S→C | R | on shot | 16 + 13·pellets B | shooter, weapon slot, origin, one ray (endpoint + victim) per pellet: a shotgun draws 8 tracers but plays one bang |
+| 8  | FireEvent       | S→C | R | on shot | 20 + 13·pellets B | shooter, weapon slot, **input sequence** it was fired on (M57), origin, one ray (endpoint + victim) per pellet: a shotgun draws 8 tracers but plays one bang |
 | 9  | PlayerDamaged   | S→C | R | on hit | 12 B | victim, attacker, health after, damage dealt, and **hit zone** (M35): 0 torso, 1 head, 2 arm, 3 leg. One shot reports one zone — for a shotgun, the best any pellet reached. A zone byte above 3 rejects the message. |
 | 10 | PlayerDied      | S→C | R | on death | 3 B | victim, killer |
 | 11 | PlayerRespawned | S→C | R | on respawn | 14 B | |
 | 12 | ScoreUpdate     | S→C | R | on change | 6 B | per player |
 | 13 | MatchState      | S→C | R | on change + join | 8 B | phase, time remaining, both team scores |
-| 14 | WeaponStatus    | S→**owner** | R | on ammo/reload/slot change | 6 B | unicast: nobody else needs your magazine |
+| 14 | WeaponStatus    | S→**owner** | R | on shot, reload, switch, grenade edge | 66 B | unicast: nobody else needs your magazine. Since M57 the whole weapon state machine plus the input sequence it is current to — see below |
 | 15 | Leaderboard     | S→C | R | on join + match end (M29) | 2 + 29·rows B, ≤ 10 rows | career kills/deaths/matches |
 | 16 | KillCam         | S→**victim** | R | on death (M30) | 3 + 20·samples B, ≤ 40 samples | the killer's view, oldest first |
 | 17 | RtcOffer        | C→S | R | once per WebRTC join (M19b) | 8195 B | SDP; consumed by the signalling router, never by ServerGame |
@@ -46,6 +46,8 @@ Channel R = ENet reliable ordered (ch 0), U = unreliable sequenced (ch 1).
 | 20 | ChatSend        | C→S | R | rate limited to 1 per 45 ticks (M50) | 122 B | the only message whose *contents* a player composes |
 | 21 | ChatMessage     | S→C | R | on relay (M50) | 123 B | sender is the server's answer, not the client's claim |
 | 22 | MapChange       | S→C | R | at match end, with rotation (M51) | 66 B | rebuild the world before the next snapshot describes it |
+| 23 | GrenadeState    | S→C | U | 20/s (M55) | 2 + 14·grenades B, ≤ 8 | id, thrower, position of every grenade in the air |
+| 24 | GrenadeExploded | S→C | R | on blast (M55) | 15 B | id, thrower, where it went off; the one frame that matters, so reliable |
 
 ### ClientHello (C→S, reliable, once)
 
@@ -113,9 +115,8 @@ compatibility — both binaries ship together.
 is a static bundle on a CDN and the server is a container on someone's desk;
 they are deployed by different mechanisms and nothing enforces the ordering.
 A version bump that reaches only one of them turns every connection into
-`ServerReject(VersionMismatch)`. Every bump since M29 has been in that position; the
-newest is M52's 10 → 11, and it may not reach the live server before the
-matching client is published.
+`ServerReject(VersionMismatch)`. Every bump since M29 has been in that position: M52's
+10 → 11, M55's 11 → 12 (grenades), and M57's 12 → 13 (shot prediction).
 `tools/server_autodeploy.sh` enforces exactly this and refuses to deploy
 across a version gap.
 
@@ -171,3 +172,31 @@ matters: it would let a single message forge a second line in the chat log
 *and* in the server's own log, and an ESC could rewrite the terminal of
 whoever is tailing `journalctl`. Bytes >= 0x80 are kept so accented names
 survive, and truncation never splits a UTF-8 sequence.
+
+## Shot prediction (M57): FireEvent and WeaponStatus, protocol 13
+
+The client runs the shared weapon tick (`update_loadout`) on every command it
+sends and draws its own shot — tracer, sparks, bang, kick, flash, the HUD's
+count — on the tick of the trigger instead of one round trip later. Two
+fields make that honest:
+
+| Field | Type | Notes |
+|---|---|---|
+| **FireEvent** `input_sequence` | u32 | after `slot`. The shooter's command the server fired on. The shooter's client pairs the echo with its own prediction of that command (`ShotLedger`, tolerance ±3) and skips the visuals it already drew; an echo matching nothing is drawn in full. Also the pellet seed: `pellet_seed(input_sequence, shooter, pellet)` in `rng.h`, so predicted pellets fly where the server's do |
+| **WeaponStatus** `input_sequence` | u32 | after `cooking`. The newest input whose weapon tick the loadout below includes — not `last_processed_input`, because the grenade button sends a status before that tick has run |
+| `switch_remaining_seconds` | f32 | 0–60, else the message is rejected |
+| per weapon, `kMaxWeapons` (5) times: | | |
+| · ammo | u8 | |
+| · cooldown_seconds | f32 | 0–60 |
+| · reload_remaining_seconds | f32 | 0–60 |
+| · trigger_was_held | u8 | 0 or 1 |
+
+The client snaps its predicted loadout to the status and replays every input
+it sent after `input_sequence` through the same tick (`reconcile_loadout`),
+exactly as movement reconciles against a snapshot. The timers are
+range-checked because the client *runs* them: a NaN or absurd cooldown would
+not crash anything, it would leave a gun that never fires again.
+
+What stays server-confirmed: whether a shot **hit**. Blood, hitmarkers and
+damage numbers still come from the echo and `PlayerDamaged`.
+

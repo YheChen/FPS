@@ -112,6 +112,7 @@ void write(eng::ByteWriter& w, const FireEventMsg& m) {
     w.u8(static_cast<std::uint8_t>(MessageType::FireEvent));
     w.u8(m.shooter);
     w.u8(m.slot);
+    w.u32(m.input_sequence);
     w.f32(m.from.x);
     w.f32(m.from.y);
     w.f32(m.from.z);
@@ -199,6 +200,14 @@ void write(eng::ByteWriter& w, const WeaponStatusMsg& m) {
     w.u8(m.switching ? 1u : 0u);
     w.u8(m.grenades);
     w.u8(m.cooking ? 1u : 0u);
+    w.u32(m.input_sequence);
+    w.f32(m.switch_remaining_seconds);
+    for (const WeaponSlotStatus& weapon : m.weapons) {
+        w.u8(weapon.ammo);
+        w.f32(weapon.cooldown_seconds);
+        w.f32(weapon.reload_remaining_seconds);
+        w.u8(weapon.trigger_was_held ? 1u : 0u);
+    }
 }
 
 void write(eng::ByteWriter& w, const GrenadeStateMsg& m) {
@@ -413,16 +422,18 @@ std::optional<FireEventMsg> read_fire_event(eng::ByteReader& r) {
     FireEventMsg m;
     const auto shooter = r.u8();
     const auto slot = r.u8();
+    const auto sequence = r.u32();
     const auto fx = r.f32();
     const auto fy = r.f32();
     const auto fz = r.f32();
     const auto count = r.u8();
-    if (!shooter || *shooter >= kMaxPlayers || !slot || *slot >= kMaxWeapons || !fx || !fy || !fz ||
-        !count || *count == 0 || *count > kMaxPellets) {
+    if (!shooter || *shooter >= kMaxPlayers || !slot || *slot >= kMaxWeapons || !sequence || !fx ||
+        !fy || !fz || !count || *count == 0 || *count > kMaxPellets) {
         return std::nullopt;
     }
     m.shooter = *shooter;
     m.slot = *slot;
+    m.input_sequence = *sequence;
     m.from = {*fx, *fy, *fz};
     for (std::uint8_t i = 0; i < *count; ++i) {
         const auto tx = r.f32();
@@ -565,11 +576,42 @@ std::optional<WeaponStatusMsg> read_weapon_status(eng::ByteReader& r) {
     // so every WeaponStatus failed to decode.
     const auto grenades = r.u8();
     const auto cooking = r.u8();
-    if (!grenades.has_value() || !cooking || *cooking > 1 || !r.finished()) {
+    if (!grenades.has_value() || !cooking || *cooking > 1) {
         return std::nullopt;
     }
-    return WeaponStatusMsg{*ammo,           *reloading == 1, *slot,        *magazine,
-                           *switching == 1, *grenades,       *cooking == 1};
+    WeaponStatusMsg m{*ammo,           *reloading == 1, *slot,        *magazine,
+                      *switching == 1, *grenades,       *cooking == 1};
+    // The timers feed the client's own copy of the weapon tick, which a
+    // hostile value would wedge rather than crash: a NaN cooldown is never
+    // <= 0, so that gun would simply never fire again. f32() already refuses
+    // non-finite values; the range check refuses the rest. A minute is far
+    // past any real reload, raise or shot interval.
+    constexpr float kMaxTimerSeconds = 60.0f;
+    const auto valid_timer = [](const std::optional<float>& t) {
+        return t && *t >= 0.0f && *t <= kMaxTimerSeconds;
+    };
+    const auto sequence = r.u32();
+    const auto switch_remaining = r.f32();
+    if (!sequence || !valid_timer(switch_remaining)) {
+        return std::nullopt;
+    }
+    m.input_sequence = *sequence;
+    m.switch_remaining_seconds = *switch_remaining;
+    for (WeaponSlotStatus& weapon : m.weapons) {
+        const auto slot_ammo = r.u8();
+        const auto cooldown = r.f32();
+        const auto reload = r.f32();
+        const auto trigger = r.u8();
+        if (!slot_ammo || !valid_timer(cooldown) || !valid_timer(reload) || !trigger ||
+            *trigger > 1) {
+            return std::nullopt;
+        }
+        weapon = {*slot_ammo, *cooldown, *reload, *trigger == 1};
+    }
+    if (!r.finished()) {
+        return std::nullopt;
+    }
+    return m;
 }
 
 std::optional<GrenadeStateMsg> read_grenade_state(eng::ByteReader& r) {

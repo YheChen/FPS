@@ -148,6 +148,9 @@ TEST_CASE("combat messages round-trip", "[protocol]") {
         game::FireEventMsg fire;
         fire.shooter = 2;
         fire.slot = 1;
+        // Four distinct bytes, so a field read in the wrong byte order or at
+        // the wrong offset cannot come back equal.
+        fire.input_sequence = 0x0A0B0C0Du;
         fire.from = {1.0f, 1.6f, 3.0f};
         fire.rays.push_back({{5.0f, 1.2f, -8.0f}, game::kNoPlayer});
         fire.rays.push_back({{6.0f, 1.3f, -8.5f}, 3});
@@ -158,6 +161,8 @@ TEST_CASE("combat messages round-trip", "[protocol]") {
         REQUIRE(m.has_value());
         CHECK(m->shooter == 2);
         CHECK(m->slot == 1);
+        CHECK(m->input_sequence == 0x0A0B0C0Du);
+        CHECK(m->from.y == 1.6f);
         REQUIRE(m->rays.size() == 2);
         CHECK(m->rays[0].to.z == -8.0f);
         CHECK(m->rays[0].hit_player == game::kNoPlayer);
@@ -267,6 +272,86 @@ TEST_CASE("combat messages round-trip", "[protocol]") {
         CHECK(m->grenades == 1);
         CHECK(m->cooking);
     }
+}
+
+// Protocol 13 (M57): the status is the server's whole weapon state machine
+// plus the input sequence it is current to, because the client resumes its
+// own predicted tick from it. Every field is given a value no other field
+// has, so two swapped in the reader cannot both come back right.
+game::WeaponStatusMsg full_status() {
+    game::WeaponStatusMsg status;
+    status.ammo = 4;
+    status.reloading = false;
+    status.slot = 1;
+    status.magazine = 6;
+    status.switching = true;
+    status.grenades = 1;
+    status.cooking = false;
+    status.input_sequence = 0x01020304u;
+    status.switch_remaining_seconds = 0.25f;
+    for (std::size_t i = 0; i < game::kMaxWeapons; ++i) {
+        const float f = static_cast<float>(i);
+        status.weapons[i] = {static_cast<std::uint8_t>(10 + i), 0.5f + f, 1.5f + f, i % 2 == 1};
+    }
+    return status;
+}
+
+TEST_CASE("WeaponStatus carries the whole loadout and the input it is current to", "[protocol]") {
+    const auto bytes = encode(full_status());
+    eng::ByteReader r{{bytes.data(), bytes.size()}};
+    REQUIRE(game::read_message_type(r) == game::MessageType::WeaponStatus);
+    const auto m = game::read_weapon_status(r);
+    REQUIRE(m.has_value());
+    CHECK(m->ammo == 4);
+    CHECK(m->slot == 1);
+    CHECK(m->magazine == 6);
+    CHECK(m->switching);
+    CHECK(m->grenades == 1);
+    CHECK(m->input_sequence == 0x01020304u);
+    CHECK(m->switch_remaining_seconds == 0.25f);
+    for (std::size_t i = 0; i < game::kMaxWeapons; ++i) {
+        INFO("weapon " << i);
+        const float f = static_cast<float>(i);
+        CHECK(m->weapons[i].ammo == 10 + i);
+        CHECK(m->weapons[i].cooldown_seconds == 0.5f + f);
+        CHECK(m->weapons[i].reload_remaining_seconds == 1.5f + f);
+        CHECK(m->weapons[i].trigger_was_held == (i % 2 == 1));
+    }
+}
+
+TEST_CASE("a WeaponStatus that would wedge the predicted tick is rejected", "[protocol]") {
+    const auto decodes = [](const std::vector<std::uint8_t>& bytes) {
+        eng::ByteReader r{{bytes.data(), bytes.size()}};
+        game::read_message_type(r);
+        return game::read_weapon_status(r).has_value();
+    };
+    REQUIRE(decodes(encode(full_status())));
+
+    // A negative timer, or an absurd one. The client runs its own weapon
+    // tick from these, and a cooldown of a day is a gun that never fires.
+    for (const float bad : {-0.01f, 61.0f}) {
+        INFO("timer " << bad);
+        auto status = full_status();
+        status.weapons[2].cooldown_seconds = bad;
+        CHECK_FALSE(decodes(encode(status)));
+        status = full_status();
+        status.weapons[4].reload_remaining_seconds = bad;
+        CHECK_FALSE(decodes(encode(status)));
+        status = full_status();
+        status.switch_remaining_seconds = bad;
+        CHECK_FALSE(decodes(encode(status)));
+    }
+    // A bool that is neither: the last weapon's trigger flag is the last byte.
+    auto bytes = encode(full_status());
+    bytes.back() = 2;
+    CHECK_FALSE(decodes(bytes));
+    // Short by one, and long by one.
+    bytes = encode(full_status());
+    bytes.pop_back();
+    CHECK_FALSE(decodes(bytes));
+    bytes = encode(full_status());
+    bytes.push_back(0);
+    CHECK_FALSE(decodes(bytes));
 }
 
 TEST_CASE("hostile combat messages are rejected", "[protocol]") {
